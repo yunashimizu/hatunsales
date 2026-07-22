@@ -72,7 +72,7 @@ export class AuthBussnies {
       id_usuario: usuario.id_usuario,
       nombre: usuario.nombre,
       email: usuario.email,
-      rol,
+      rol: { idRol: usuario.rol?.id_rol ?? null, nombre: usuario.rol?.nombre ?? rol },
       permisos,
       access_token: token,
       expires_in: expiresIn,
@@ -93,7 +93,7 @@ export class AuthBussnies {
       email: dto.email,
       password: hashedPassword,
       estado: true,
-      rol: { id_rol: 2 },
+      rol: { id_rol: 4 },
     });
 
     const guardado = await this.usuarioRepo.save(nuevoUsuario);

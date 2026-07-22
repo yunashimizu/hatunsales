@@ -328,6 +328,25 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     return lista.map((c) => this.mapComprobante(c));
   }
 
+  async obtenerPorId(id_comprobante: number): Promise<ComprobanteResponse> {
+    const c = await this.repo.buscarPorId(id_comprobante);
+    if (!c) throw new NotFoundException('Comprobante no encontrado');
+    return this.mapComprobante(c);
+  }
+
+  async obtenerPdfBuffer(id_comprobante: number): Promise<Buffer> {
+    const c = await this.repo.buscarPorId(id_comprobante);
+    if (!c) throw new NotFoundException('Comprobante no encontrado');
+    if (!c.enlace_pdf) throw new NotFoundException('No hay PDF disponible para este comprobante');
+
+    try {
+      const resp = await axios.get(c.enlace_pdf, { responseType: 'arraybuffer' });
+      return Buffer.from(resp.data);
+    } catch (error: any) {
+      throw new ServiceUnavailableException('Error al descargar el PDF del proveedor');
+    }
+  }
+
   // ── Build payload ────────────────────────────────────────────
 
   private buildPayload(dto: GenerarComprobanteRequest): object {

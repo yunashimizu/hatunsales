@@ -131,4 +131,11 @@ export class ComprobanteRepository extends CrudRepository<Comprobante> {
       .orderBy('c.creado_en', 'DESC')
       .getMany();
   }
+
+  async buscarPorId(id_comprobante: number): Promise<Comprobante | null> {
+    return this.comprobanteRepo.findOne({
+      where: { id_comprobante },
+      relations: ['items', 'cliente', 'tipo', 'moneda'],
+    });
+  }
 }

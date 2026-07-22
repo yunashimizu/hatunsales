@@ -1,4 +1,6 @@
 import { Controller, Post, Get, Body, Param, UseGuards } from '@nestjs/common';
+import { Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { ComprobanteBussnies } from '../../bussnies/Bussnies/comprobante.bussnies';
 import {
   GenerarComprobanteRequest,
@@ -45,5 +47,18 @@ export class ComprobanteController {
   @Get('cliente/:id')
   listarPorCliente(@Param('id') id: string) {
     return this.service.listarPorCliente(Number(id));
+  }
+
+  @Get(':id')
+  obtenerPorId(@Param('id') id: string) {
+    return this.service.obtenerPorId(Number(id));
+  }
+
+  @Get(':id/pdf')
+  async pdf(@Res() res: Response, @Param('id') id: string) {
+    const buffer = await this.service.obtenerPdfBuffer(Number(id));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=comprobante_${id}.pdf`);
+    res.send(buffer);
   }
 }
