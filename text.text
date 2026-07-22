@@ -102,3 +102,14 @@ en login auht para los permisos
     }
   ]
 }
+
+
+/*
+  name: 'pgConnection',
+  type: 'postgres',
+  host: 'localhost',
+  port: 5432,
+  username: 'postgres',
+  password: 'forgeNova',
+  database: 'hatunsales_db',
+  */

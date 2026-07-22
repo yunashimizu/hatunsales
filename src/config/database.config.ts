@@ -27,15 +27,6 @@ import { ProductoImagen } from '../models/DBModel/producto-imagen.entity';
 import { Seccion } from '../models/DBModel/seccion.entity';
 
 export const postgresConfig: TypeOrmModuleOptions = {
-  /*
-  name: 'pgConnection',
-  type: 'postgres',
-  host: 'localhost',
-  port: 5432,
-  username: 'postgres',
-  password: 'forgeNova',
-  database: 'hatunsales_db',
-  */
   name: 'pgConnection',
   type: 'postgres',
   host: 'sakura.proxy.rlwy.net',
