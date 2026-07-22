@@ -38,8 +38,11 @@ export const postgresConfig: TypeOrmModuleOptions = {
   */
   name: 'pgConnection',
   type: 'postgres',
-  url: process.env.DATABASE_URL,
-  autoLoadEntities: true,
+  host: 'sakura.proxy.rlwy.net',
+  port: 23642,
+  username: 'postgres',
+  password: 'TU_PASSWORD_RAILWAY',
+  database: 'bhIIAPOxvaOpaKxjVgyJgyNEAeRKuotI',
   entities: [Usuario, Usuarios, VwUsuarioPermisos, Rol, Permiso, Cliente, Documento, Empresa, Proveedor,
     Producto, Inventario, GuiaRemision, GuiaRemisionItem, Proforma, ProformaItem,
     Sucursal, StockSucursal, Categoria, Marca, ProductoImagen, Seccion,
