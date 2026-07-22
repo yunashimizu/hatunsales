@@ -75,6 +75,8 @@ import { ClienteController } from './api/controllers/cliente.controller';
 import { ClienteBussnies } from './bussnies/Bussnies/cliente.bussnies';
 import { ClienteRepository } from './repository/Repository/cliente.repository';
 import { ProductoImagenBussnies } from './bussnies/Bussnies/producto-imagen.bussnies';
+import { CategoriaController } from './api/controllers/categoria.controller';
+import { RolController } from './api/controllers/rol.controller';
 import { StorageService } from './util/storage/storage.service';
 
 @Module({
@@ -98,7 +100,7 @@ import { StorageService } from './util/storage/storage.service';
   controllers: [AppController, UserController, LogController, AuthController,
   loginController, AdminController, SunatController, ComprobanteController, ClienteController,
   ProductoController, InventarioController, GuiaRemisionController, ProformaController,
-  ReportesController, StockSucursalController, ProductoImagenController],
+  ReportesController, StockSucursalController, ProductoImagenController, CategoriaController, RolController],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
   LogRepository, AuthBussnies, AdminBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
