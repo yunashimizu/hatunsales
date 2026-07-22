@@ -1,0 +1,279 @@
+{
+  "productos": [
+    {
+      "column_name": "id_producto",
+      "data_type": "integer",
+      "is_nullable": "NO"
+    },
+    {
+      "column_name": "codigo_barras",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "nombre",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "id_categoria",
+      "data_type": "integer",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "id_marca",
+      "data_type": "integer",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "id_unidad",
+      "data_type": "integer",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "precio_compra",
+      "data_type": "numeric",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "precio_venta",
+      "data_type": "numeric",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "estado",
+      "data_type": "boolean",
+      "is_nullable": "YES"
+    }
+  ],
+  "inventarios": [],
+  "stock_sucursal": [],
+  "productos_imagenes": [
+    {
+      "column_name": "id_imagen",
+      "data_type": "integer",
+      "is_nullable": "NO"
+    },
+    {
+      "column_name": "id_producto",
+      "data_type": "integer",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "url",
+      "data_type": "text",
+      "is_nullable": "YES"
+    }
+  ],
+  "guias_remision": [
+    {
+      "column_name": "id_guia",
+      "data_type": "integer",
+      "is_nullable": "NO"
+    },
+    {
+      "column_name": "id_venta",
+      "data_type": "integer",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "direccion_envio",
+      "data_type": "text",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "fecha",
+      "data_type": "timestamp without time zone",
+      "is_nullable": "YES"
+    }
+  ],
+  "proformas": [],
+  "clientes": [
+    {
+      "column_name": "id_cliente",
+      "data_type": "integer",
+      "is_nullable": "NO"
+    },
+    {
+      "column_name": "nombre",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "dni",
+      "data_type": "bigint",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "telefono",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "email",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "direccion",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "apellido_paterno",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "apellido_materno",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "id_documento",
+      "data_type": "integer",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "id_usuario",
+      "data_type": "integer",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "creado_en",
+      "data_type": "timestamp without time zone",
+      "is_nullable": "YES"
+    }
+  ],
+  "empresas": [
+    {
+      "column_name": "id_empresa",
+      "data_type": "integer",
+      "is_nullable": "NO"
+    },
+    {
+      "column_name": "razon_social",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "ruc",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "direccion",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "telefonos",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "email",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "nombre_comercial",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "ubigeo",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "capital",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "tipo",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "fecha_inscripcion",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "fecha_baja",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "estado",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "condicion",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "departamento",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "provincia",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "distrito",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "creado_en",
+      "data_type": "timestamp without time zone",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "id_usuario",
+      "data_type": "integer",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "nombre",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    }
+  ],
+  "sucursales": [
+    {
+      "column_name": "id_sucursal",
+      "data_type": "integer",
+      "is_nullable": "NO"
+    },
+    {
+      "column_name": "id_empresa",
+      "data_type": "integer",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "nombre",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "direccion",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    },
+    {
+      "column_name": "telefono",
+      "data_type": "character varying",
+      "is_nullable": "YES"
+    }
+  ],
+  "guias_remision_items": [],
+  "proformas_items": []
+}

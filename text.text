@@ -1,0 +1,104 @@
+node -e "const b = require('bcrypt'); b.hash('123456', 12).then(console.log)"
+
+-- esto es para generar el hash // el hash sirve para generar como un permiso viviente por usuario con un tiempo limitado 
+
+{
+  "email": "kenymarallana132@gmail.com",
+  "password": "123456"
+} 
+
+esto es mi login de admin 
+en login auht para los permisos 
+
+
+-. para la prueba de recibos electronicos 
+{
+  "id_venta": 1,
+  "id_cliente": 3,
+  "id_tipo": 2,
+  "id_moneda": 1,
+  "serie": "BBB1",
+  "numero": 1,
+  "cliente_tipo_doc": 1,
+  "cliente_numero_doc": "71739060",
+  "cliente_denominacion": "KENY BRUS MARALLANA GAMBOA",
+  "fecha_de_emision": "18-06-2026",
+  "total_gravada": 100,
+  "total_igv": 18,
+  "total": 118,
+  "items": [
+    {
+      "id_producto": 5,
+      "unidad_de_medida": "NIU",
+      "codigo": "001",
+      "descripcion": "PRODUCTO EJEMPLO",
+      "cantidad": 1,
+      "valor_unitario": 100,
+      "precio_unitario": 118,
+      "subtotal": 100,
+      "tipo_de_igv": 1,
+      "igv": 18,
+      "total": 118
+    }
+  ]
+}
+
+-- el correcto 
+{
+  "id_venta": 1,
+  "id_cliente": 2,
+  "id_tipo": 2,
+  "id_moneda": 1,
+  "serie": "BBB1",
+  "numero": 9,
+  "cliente_tipo_doc": 1,
+  "cliente_numero_doc": "71739060",
+  "cliente_denominacion": "KENY BRUS MARALLANA GAMBOA",
+  "total_gravada": 100,
+  "total_igv": 18,
+  "total": 118,
+  "items": [
+    {
+      "id_producto": 1,
+      "unidad_de_medida": "NIU",
+      "codigo": "001",
+      "descripcion": "PRODUCTO EJEMPLO",
+      "cantidad": 1,
+      "valor_unitario": 100,
+      "precio_unitario": 118,
+      "subtotal": 100,
+      "tipo_de_igv": 1,
+      "igv": 18,
+      "total": 118
+    }
+  ]
+}
+
+
+-- ahora el ejemplo usando los datos de la cuenta iniciada 
+{
+  "id_venta": 1,
+  "id_cliente": 1,
+  "id_tipo": 3,
+  "id_moneda": 1,
+  "serie": "BBB1",
+  "numero": 6,
+  "total_gravada": 100,
+  "total_igv": 18,
+  "total": 118,
+  "items": [
+    {
+      "id_producto": 1,
+      "unidad_de_medida": "NIU",
+      "codigo": "001",
+      "descripcion": "PRODUCTO EJEMPLO",
+      "cantidad": 1,
+      "valor_unitario": 100,
+      "precio_unitario": 118,
+      "subtotal": 100,
+      "tipo_de_igv": 1,
+      "igv": 18,
+      "total": 118
+    }
+  ]
+}

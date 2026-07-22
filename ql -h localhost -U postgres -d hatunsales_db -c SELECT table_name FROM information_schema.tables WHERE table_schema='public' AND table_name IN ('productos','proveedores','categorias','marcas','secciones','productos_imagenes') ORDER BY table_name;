@@ -1,0 +1,52 @@
+                 List of relations
+ Schema |          Name          | Type  |  Owner   
+--------+------------------------+-------+----------
+ public | almacenes              | table | postgres
+ public | aperturas_caja         | table | postgres
+ public | archivos_binarios      | table | postgres
+ public | arqueo_caja            | table | postgres
+ public | auditoria              | table | postgres
+ public | cajas                  | table | postgres
+ public | categorias             | table | postgres
+ public | cierres_caja           | table | postgres
+ public | clientes               | table | postgres
+ public | compras                | table | postgres
+ public | comprobante_items      | table | postgres
+ public | comprobantes           | table | postgres
+ public | configuraciones        | table | postgres
+ public | detalle_compra         | table | postgres
+ public | detalle_venta          | table | postgres
+ public | documento              | table | postgres
+ public | documentos             | table | postgres
+ public | empresas               | table | postgres
+ public | errores_sistema        | table | postgres
+ public | guias_remision         | table | postgres
+ public | impuestos              | table | postgres
+ public | inventario             | table | postgres
+ public | kardex                 | table | postgres
+ public | logs_peticiones        | table | postgres
+ public | marcas                 | table | postgres
+ public | metodos_pago           | table | postgres
+ public | monedas                | table | postgres
+ public | movimientos_caja       | table | postgres
+ public | movimientos_inventario | table | postgres
+ public | permisos               | table | postgres
+ public | procesos_async         | table | postgres
+ public | producto_impuesto      | table | postgres
+ public | producto_proveedor     | table | postgres
+ public | productos              | table | postgres
+ public | productos_imagenes     | table | postgres
+ public | proveedores            | table | postgres
+ public | rol_permiso            | table | postgres
+ public | roles                  | table | postgres
+ public | sesiones               | table | postgres
+ public | sucursales             | table | postgres
+ public | tipos_comprobante      | table | postgres
+ public | unidades_medida        | table | postgres
+ public | usuario                | table | postgres
+ public | usuario_sucursal       | table | postgres
+ public | usuarios               | table | postgres
+ public | venta_pago             | table | postgres
+ public | ventas                 | table | postgres
+(47 rows)
+
