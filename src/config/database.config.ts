@@ -27,6 +27,7 @@ import { ProductoImagen } from '../models/DBModel/producto-imagen.entity';
 import { Seccion } from '../models/DBModel/seccion.entity';
 
 export const postgresConfig: TypeOrmModuleOptions = {
+  /*
   name: 'pgConnection',
   type: 'postgres',
   host: 'localhost',
@@ -34,6 +35,11 @@ export const postgresConfig: TypeOrmModuleOptions = {
   username: 'postgres',
   password: 'forgeNova',
   database: 'hatunsales_db',
+  */
+  name: 'pgConnection',
+  type: 'postgres',
+  url: process.env.DATABASE_URL,
+  autoLoadEntities: true,
   entities: [Usuario, Usuarios, VwUsuarioPermisos, Rol, Permiso, Cliente, Documento, Empresa, Proveedor,
     Producto, Inventario, GuiaRemision, GuiaRemisionItem, Proforma, ProformaItem,
     Sucursal, StockSucursal, Categoria, Marca, ProductoImagen, Seccion,
