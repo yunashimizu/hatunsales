@@ -416,7 +416,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       documento_que_se_modifica_tipo:    '',
       documento_que_se_modifica_serie:   '',
       documento_que_se_modifica_numero:  '',
-      tipo_de_nota_de_credito:           '',
+      tipo_de_nota_de_credito:           '10',
       tipo_de_nota_de_debito:            '',
       enviar_automaticamente_a_la_sunat: dto.enviar_sunat ?? true,
       enviar_automaticamente_al_cliente: dto.enviar_cliente ?? false,
