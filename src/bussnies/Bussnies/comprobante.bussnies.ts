@@ -33,6 +33,9 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
 
   async generar(dto: GenerarComprobanteRequest): Promise<ComprobanteResponse> {
 
+    dto.serie = this.normalizarSerie(dto.serie, dto.id_tipo);
+    dto.numero = this.normalizarNumero(dto.numero);
+
     if (!dto.fecha_de_emision) {
       dto.fecha_de_emision = this.getFechaActual();
     }
@@ -350,6 +353,32 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
   // ── Build payload ────────────────────────────────────────────
 
   private buildPayload(dto: GenerarComprobanteRequest): object {
+    const items = dto.items.map((i) => {
+      const valorUnitario = Number(Number(i.valor_unitario ?? i.precio_unitario ?? 0).toFixed(2));
+      const precioUnitario = Number((valorUnitario * 1.18).toFixed(2));
+      const subtotal = Number((valorUnitario * Number(i.cantidad ?? 1)).toFixed(2));
+      const igv = Number((subtotal * 0.18).toFixed(2));
+      const total = Number((subtotal + igv).toFixed(2));
+
+      return {
+        unidad_de_medida:          i.unidad_de_medida,
+        codigo:                    i.codigo,
+        codigo_producto_sunat:     i.codigo_producto_sunat ?? '10000000',
+        descripcion:               i.descripcion,
+        cantidad:                  i.cantidad,
+        valor_unitario:            valorUnitario,
+        precio_unitario:           precioUnitario,
+        descuento:                 '',
+        subtotal:                  subtotal,
+        tipo_de_igv:               i.tipo_de_igv,
+        igv:                       igv,
+        total:                     total,
+        anticipo_regularizacion:   false,
+        anticipo_documento_serie:  '',
+        anticipo_documento_numero: '',
+      };
+    });
+
     return {
       operacion:                         'generar_comprobante',
       tipo_de_comprobante:               dto.id_tipo,
@@ -397,23 +426,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       orden_compra_servicio:             '',
       formato_de_pdf:                    '',
       generado_por_contingencia:         '',
-      items: dto.items.map((i) => ({
-        unidad_de_medida:          i.unidad_de_medida,
-        codigo:                    i.codigo,
-        codigo_producto_sunat:     i.codigo_producto_sunat ?? '10000000',
-        descripcion:               i.descripcion,
-        cantidad:                  i.cantidad,
-        valor_unitario:            i.valor_unitario,
-        precio_unitario:           i.precio_unitario,
-        descuento:                 '',
-        subtotal:                  i.subtotal,
-        tipo_de_igv:               i.tipo_de_igv,
-        igv:                       i.igv,
-        total:                     i.total,
-        anticipo_regularizacion:   false,
-        anticipo_documento_serie:  '',
-        anticipo_documento_numero: '',
-      })),
+      items,
     };
   }
 
@@ -421,10 +434,18 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
 
   private getFechaActual(): string {
     const hoy = new Date();
-    const dia  = String(hoy.getDate()).padStart(2, '0');
-    const mes  = String(hoy.getMonth() + 1).padStart(2, '0');
-    const anio = hoy.getFullYear();
-    return `${dia}-${mes}-${anio}`;
+    return hoy.toISOString().slice(0, 10);
+  }
+
+  private normalizarSerie(serie?: string, idTipo?: number): string {
+    const base = (serie ?? (idTipo === 1 ? 'F001' : 'B001')).toString().trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return base.slice(0, 4) || (idTipo === 1 ? 'F001' : 'B001');
+  }
+
+  private normalizarNumero(numero?: number): number {
+    const numeric = Number(numero ?? 1);
+    if (!Number.isFinite(numeric) || numeric <= 0) return 1;
+    return Math.min(99999999, Math.floor(numeric));
   }
 
   // ── Mappers ──────────────────────────────────────────────────
