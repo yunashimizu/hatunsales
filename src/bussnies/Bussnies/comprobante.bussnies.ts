@@ -34,7 +34,10 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
   async generar(dto: GenerarComprobanteRequest): Promise<ComprobanteResponse> {
 
     dto.serie = this.normalizarSerie(dto.serie, dto.id_tipo);
-    dto.numero = this.normalizarNumero(dto.numero);
+
+    if (!dto.numero || dto.numero <= 0) {
+      dto.numero = await this.obtenerSiguienteCorrelativo(dto.serie, dto.id_tipo);
+    }
 
     if (!dto.fecha_de_emision) {
       dto.fecha_de_emision = this.getFechaActual();
@@ -498,6 +501,12 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     const numeric = Number(numero ?? 1);
     if (!Number.isFinite(numeric) || numeric <= 0) return 1;
     return Math.min(99999999, Math.floor(numeric));
+  }
+
+  private async obtenerSiguienteCorrelativo(serie: string, id_tipo?: number): Promise<number> {
+    if (!id_tipo) return 1;
+    const ultimo = await this.repo.buscarUltimoNumeroPorSerie(serie, id_tipo);
+    return ultimo + 1;
   }
 
   private mapTipoComprobante(idTipo?: number): string {

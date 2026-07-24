@@ -91,6 +91,15 @@ export class ComprobanteRepository extends CrudRepository<Comprobante> {
     });
   }
 
+  async buscarUltimoNumeroPorSerie(serie: string, id_tipo: number): Promise<number> {
+    const ultimo = await this.comprobanteRepo.findOne({
+      where: { serie, tipo: { id_tipo } as any },
+      order: { numero: 'DESC' },
+      select: ['numero'],
+    });
+    return ultimo?.numero ?? 0;
+  }
+
   async guardarConItems(
     data: Partial<Comprobante>,
     items: Partial<ComprobanteItem>[],
