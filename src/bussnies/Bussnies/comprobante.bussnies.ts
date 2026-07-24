@@ -224,7 +224,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
 
     } catch (error: any) {
       if (error instanceof BadRequestException) throw error;
-      const msg = error?.response?.data?.errors ?? error?.message ?? 'Error al conectar con Nubefact';
+      const msg = this.extraerMensajeNubefact(error);
       throw new ServiceUnavailableException(msg);
     }
   }
@@ -361,16 +361,16 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       const total = Number((subtotal + igv).toFixed(2));
 
       return {
-        unidad_de_medida:          i.unidad_de_medida,
-        codigo:                    i.codigo,
+        unidad_de_medida:          i.unidad_de_medida ?? 'NIU',
+        codigo:                    i.codigo ?? '',
         codigo_producto_sunat:     i.codigo_producto_sunat ?? '10000000',
-        descripcion:               i.descripcion,
-        cantidad:                  i.cantidad,
+        descripcion:               i.descripcion ?? 'Producto',
+        cantidad:                  Number(i.cantidad ?? 1),
         valor_unitario:            valorUnitario,
         precio_unitario:           precioUnitario,
-        descuento:                 '',
+        descuento:                 0,
         subtotal:                  subtotal,
-        tipo_de_igv:               i.tipo_de_igv,
+        tipo_de_igv:               i.tipo_de_igv ?? 1,
         igv:                       igv,
         total:                     total,
         anticipo_regularizacion:   false,
@@ -381,36 +381,36 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
 
     return {
       operacion:                         'generar_comprobante',
-      tipo_de_comprobante:               dto.id_tipo,
+      tipo_de_comprobante:               this.mapTipoComprobante(dto.id_tipo),
       serie:                             dto.serie,
       numero:                            dto.numero,
       sunat_transaction:                 1,
-      cliente_tipo_de_documento:         dto.cliente_tipo_doc,
-      cliente_numero_de_documento:       dto.cliente_numero_doc,
-      cliente_denominacion:              dto.cliente_denominacion,
+      cliente_tipo_de_documento:         this.mapClienteTipoDeDocumento(dto.cliente_tipo_doc),
+      cliente_numero_de_documento:       String(dto.cliente_numero_doc ?? ''),
+      cliente_denominacion:              dto.cliente_denominacion ?? '',
       cliente_direccion:                 dto.cliente_direccion ?? '',
       cliente_email:                     dto.cliente_email ?? '',
       cliente_email_1:                   '',
       cliente_email_2:                   '',
       fecha_de_emision:                  dto.fecha_de_emision,
       fecha_de_vencimiento:              dto.fecha_de_vencimiento ?? '',
-      moneda:                            dto.id_moneda ?? 1,
+      moneda:                            this.mapMoneda(dto.id_moneda),
       tipo_de_cambio:                    '',
       porcentaje_de_igv:                 18.00,
-      descuento_global:                  '',
-      total_descuento:                   '',
-      total_anticipo:                    '',
-      total_gravada:                     dto.total_gravada ?? '',
-      total_inafecta:                    '',
-      total_exonerada:                   '',
-      total_igv:                         dto.total_igv,
-      total_gratuita:                    '',
-      total_otros_cargos:                '',
-      total:                             dto.total,
+      descuento_global:                  0,
+      total_descuento:                   0,
+      total_anticipo:                    0,
+      total_gravada:                     Number(dto.total_gravada ?? 0),
+      total_inafecta:                    0,
+      total_exonerada:                   0,
+      total_igv:                         Number(dto.total_igv ?? 0),
+      total_gratuita:                    0,
+      total_otros_cargos:                0,
+      total:                             Number(dto.total ?? 0),
       percepcion_tipo:                   '',
-      percepcion_base_imponible:         '',
-      total_percepcion:                  '',
-      total_incluido_percepcion:         '',
+      percepcion_base_imponible:         0,
+      total_percepcion:                  0,
+      total_incluido_percepcion:         0,
       detraccion:                        false,
       observaciones:                     dto.observaciones ?? '',
       documento_que_se_modifica_tipo:    '',
@@ -439,13 +439,39 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
 
   private normalizarSerie(serie?: string, idTipo?: number): string {
     const base = (serie ?? (idTipo === 1 ? 'F001' : 'B001')).toString().trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-    return base.slice(0, 4) || (idTipo === 1 ? 'F001' : 'B001');
+    if (base.length >= 4) {
+      return base.slice(0, 4);
+    }
+    return base || (idTipo === 1 ? 'F001' : 'B001');
   }
 
   private normalizarNumero(numero?: number): number {
     const numeric = Number(numero ?? 1);
     if (!Number.isFinite(numeric) || numeric <= 0) return 1;
     return Math.min(99999999, Math.floor(numeric));
+  }
+
+  private mapTipoComprobante(idTipo?: number): string {
+    return idTipo === 1 ? '01' : '03';
+  }
+
+  private mapClienteTipoDeDocumento(tipoDoc?: number): string {
+    return tipoDoc === 6 ? '6' : '1';
+  }
+
+  private mapMoneda(idMoneda?: number): string {
+    return idMoneda === 2 ? 'USD' : 'PEN';
+  }
+
+  private extraerMensajeNubefact(error: any): string {
+    const data = error?.response?.data;
+    if (typeof data === 'string') return data;
+    if (Array.isArray(data?.errors)) return data.errors.join(', ');
+    if (typeof data?.errors === 'string') return data.errors;
+    if (typeof data?.message === 'string') return data.message;
+    if (typeof data?.error === 'string') return data.error;
+    if (typeof error?.message === 'string') return error.message;
+    return 'Error al conectar con Nubefact';
   }
 
   // ── Mappers ──────────────────────────────────────────────────
