@@ -74,7 +74,7 @@ export class GenerarComprobanteRequest {
 
   // ── datos del comprobante ─────────────────────────────────
   @IsInt()
-  @IsIn([1, 2], { message: '1=Factura 2=Boleta' })
+  @IsIn([1, 2, 7, 8], { message: '1=Factura 2=Boleta 7=Nota de crédito 8=Nota de débito' })
   id_tipo!: number;
 
   @IsInt()
@@ -126,6 +126,26 @@ export class GenerarComprobanteRequest {
 
   @IsNumber()
   total!: number;
+
+  @IsString()
+  @IsOptional()
+  tipo_de_nota_de_credito?: string;
+
+  @IsString()
+  @IsOptional()
+  tipo_de_nota_de_debito?: string;
+
+  @IsString()
+  @IsOptional()
+  documento_que_se_modifica_tipo?: string;
+
+  @IsString()
+  @IsOptional()
+  documento_que_se_modifica_serie?: string;
+
+  @IsString()
+  @IsOptional()
+  documento_que_se_modifica_numero?: string;
 
   @IsString()
   @IsOptional()

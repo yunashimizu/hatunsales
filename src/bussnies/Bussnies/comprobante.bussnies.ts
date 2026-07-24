@@ -159,6 +159,18 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       throw new BadRequestException('No se pudieron obtener los datos del receptor del comprobante');
     }
 
+    if (dto.id_tipo === 1 && dto.cliente_tipo_doc === 1) {
+      throw new BadRequestException('Factura no puede emitirse a un cliente con DNI; use Boleta o un cliente con RUC');
+    }
+
+    if (dto.id_tipo === 1 && !dto.serie?.toUpperCase().startsWith('F')) {
+      throw new BadRequestException("Serie de factura inválida. Debe comenzar con 'F'");
+    }
+
+    if (dto.id_tipo === 2 && !dto.serie?.toUpperCase().startsWith('B')) {
+      throw new BadRequestException("Serie de boleta inválida. Debe comenzar con 'B'");
+    }
+
     const payload = this.buildPayload(dto);
 
     try {
@@ -413,11 +425,11 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       total_incluido_percepcion:         0,
       detraccion:                        false,
       observaciones:                     dto.observaciones ?? '',
-      documento_que_se_modifica_tipo:    '',
-      documento_que_se_modifica_serie:   '',
-      documento_que_se_modifica_numero:  '',
-      tipo_de_nota_de_credito:           '10',
-      tipo_de_nota_de_debito:            '',
+      documento_que_se_modifica_tipo:    dto.documento_que_se_modifica_tipo ?? '',
+      documento_que_se_modifica_serie:   dto.documento_que_se_modifica_serie ?? '',
+      documento_que_se_modifica_numero:  dto.documento_que_se_modifica_numero ?? '',
+      tipo_de_nota_de_credito:           this.getTipoNotaCredito(dto),
+      tipo_de_nota_de_debito:            this.getTipoNotaDebito(dto),
       enviar_automaticamente_a_la_sunat: dto.enviar_sunat ?? true,
       enviar_automaticamente_al_cliente: dto.enviar_cliente ?? false,
       condiciones_de_pago:               '',
@@ -438,11 +450,9 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
   }
 
   private normalizarSerie(serie?: string, idTipo?: number): string {
-    const base = (serie ?? (idTipo === 1 ? 'F001' : 'B001')).toString().trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (base.length >= 4) {
-      return base.slice(0, 4);
-    }
-    return base || (idTipo === 1 ? 'F001' : 'B001');
+    const defaultSerie = idTipo === 1 ? 'F001' : idTipo === 2 ? 'B001' : idTipo === 7 ? 'FC01' : idTipo === 8 ? 'FD01' : 'B001';
+    const base = (serie ?? defaultSerie).toString().trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return base || defaultSerie;
   }
 
   private normalizarNumero(numero?: number): number {
@@ -452,7 +462,11 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
   }
 
   private mapTipoComprobante(idTipo?: number): string {
-    return idTipo === 1 ? '01' : '03';
+    if (idTipo === 1) return '01';
+    if (idTipo === 2) return '03';
+    if (idTipo === 7) return '07';
+    if (idTipo === 8) return '08';
+    return '03';
   }
 
   private mapClienteTipoDeDocumento(tipoDoc?: number): string {
@@ -464,6 +478,16 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     if (idMoneda === 3) return 3;
     if (idMoneda === 4) return 4;
     return 1;
+  }
+
+  private getTipoNotaCredito(dto: GenerarComprobanteRequest): string {
+    if (dto.id_tipo !== 7) return '';
+    return dto.tipo_de_nota_de_credito?.trim() || '10';
+  }
+
+  private getTipoNotaDebito(dto: GenerarComprobanteRequest): string {
+    if (dto.id_tipo !== 8) return '';
+    return dto.tipo_de_nota_de_debito?.trim() || '1';
   }
 
   private extraerMensajeNubefact(error: any): string {
