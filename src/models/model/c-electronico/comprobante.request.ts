@@ -168,7 +168,7 @@ export class GenerarComprobanteRequest {
 export class ConsultarComprobanteRequest {
 
   @IsInt()
-  @IsIn([1, 2])
+  @IsIn([1, 2, 7, 8], { message: '1=Factura 2=Boleta 7=Nota de crédito 8=Nota de débito' })
   tipo_de_comprobante!: number;
 
   @IsString()
@@ -181,7 +181,7 @@ export class ConsultarComprobanteRequest {
 export class AnularComprobanteRequest {
 
   @IsInt()
-  @IsIn([1, 2])
+  @IsIn([1, 2, 7, 8], { message: '1=Factura 2=Boleta 7=Nota de crédito 8=Nota de débito' })
   tipo_de_comprobante!: number;
 
   @IsString()

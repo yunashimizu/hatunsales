@@ -171,6 +171,33 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       throw new BadRequestException("Serie de boleta inválida. Debe comenzar con 'B'");
     }
 
+    if (dto.id_tipo === 7) {
+      if (!dto.tipo_de_nota_de_credito?.trim()) {
+        throw new BadRequestException('Tipo de nota de crédito es obligatorio para notas de crédito');
+      }
+      if (!dto.serie?.toUpperCase().startsWith('FC')) {
+        throw new BadRequestException("Serie de nota de crédito inválida. Debe comenzar con 'FC'");
+      }
+      const tipo = dto.tipo_de_nota_de_credito.trim();
+      if (tipo !== '10' && (!dto.documento_que_se_modifica_tipo || !dto.documento_que_se_modifica_serie || !dto.documento_que_se_modifica_numero)) {
+        throw new BadRequestException('Documento a modificar es obligatorio para este tipo de nota de crédito');
+      }
+    }
+
+    if (dto.id_tipo === 8) {
+      if (!dto.tipo_de_nota_de_debito?.trim()) {
+        throw new BadRequestException('Tipo de nota de débito es obligatorio para notas de débito');
+      }
+      if (!dto.serie?.toUpperCase().startsWith('FD')) {
+        throw new BadRequestException("Serie de nota de débito inválida. Debe comenzar con 'FD'");
+      }
+      if (!dto.documento_que_se_modifica_tipo || !dto.documento_que_se_modifica_serie || !dto.documento_que_se_modifica_numero) {
+        throw new BadRequestException('Documento a modificar es obligatorio para notas de débito');
+      }
+    }
+
+    dto.fecha_de_emision = this.normalizarFecha(dto.fecha_de_emision ?? this.getFechaActual());
+
     const payload = this.buildPayload(dto);
 
     try {
@@ -450,9 +477,21 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
   }
 
   private normalizarSerie(serie?: string, idTipo?: number): string {
-    const defaultSerie = idTipo === 1 ? 'F001' : idTipo === 2 ? 'B001' : idTipo === 7 ? 'FC01' : idTipo === 8 ? 'FD01' : 'B001';
+    const defaultSerie = idTipo === 1 ? 'FFF1' : idTipo === 2 ? 'BBB1' : idTipo === 7 ? 'FC01' : idTipo === 8 ? 'FD01' : 'BBB1';
     const base = (serie ?? defaultSerie).toString().trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
     return base || defaultSerie;
+  }
+
+  private normalizarFecha(fecha: string): string {
+    const fechaTrim = fecha.trim();
+    const ddmmyyyy = /^\d{2}-\d{2}-\d{4}$/;
+    if (ddmmyyyy.test(fechaTrim)) return fechaTrim;
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    if (iso.test(fechaTrim)) {
+      const [year, month, day] = fechaTrim.split('-');
+      return `${day}-${month}-${year}`;
+    }
+    return this.getFechaActual();
   }
 
   private normalizarNumero(numero?: number): number {
