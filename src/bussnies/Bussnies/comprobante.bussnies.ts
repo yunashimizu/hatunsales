@@ -459,8 +459,11 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     return tipoDoc === 6 ? '6' : '1';
   }
 
-  private mapMoneda(idMoneda?: number): string {
-    return idMoneda === 2 ? 'USD' : 'PEN';
+  private mapMoneda(idMoneda?: number): number {
+    if (idMoneda === 2) return 2;
+    if (idMoneda === 3) return 3;
+    if (idMoneda === 4) return 4;
+    return 1;
   }
 
   private extraerMensajeNubefact(error: any): string {
