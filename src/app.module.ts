@@ -27,6 +27,7 @@ import { Cliente } from './models/DBModel/cliente.entity';
 import { Documento } from './models/DBModel/documento.entity';
 import { Empresa } from './models/DBModel/empresa.entity';
 import { Proveedor } from './models/DBModel/proveedor.entity';
+import { Rol } from './models/DBModel/role.entity';
 import { Comprobante } from './models/DBModel/c-electronico/comprobante.entity';
 import { ComprobanteItem } from './models/DBModel/c-electronico/comprobante-item.entity';
 import { TipoComprobante } from './models/DBModel/c-electronico/tipos-comprobante.entity';
@@ -85,7 +86,7 @@ import { StorageService } from './util/storage/storage.service';
     TypeOrmModule.forRoot(postgresConfig),
     TypeOrmModule.forRoot(sqliteConfig),
     TypeOrmModule.forFeature(
-      [Usuario, UsuarioAuth, VwUsuarioPermisos, Cliente, Documento, Empresa, Proveedor,
+      [Usuario, UsuarioAuth, VwUsuarioPermisos, Cliente, Documento, Empresa, Proveedor, Rol,
         Producto, Inventario, GuiaRemision, GuiaRemisionItem, Proforma, ProformaItem,
         Sucursal, StockSucursal, Categoria, Marca, ProductoImagen, Seccion, MovimientoInventario,
         Comprobante, ComprobanteItem, TipoComprobante, Moneda],
@@ -107,6 +108,7 @@ import { StorageService } from './util/storage/storage.service';
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
   InventarioRepository, InventarioBussnies, GuiaRemisionRepository, GuiaRemisionBussnies,
   ProformaRepository, ProformaBussnies, ReportesRepository, ReportesBussnies,
-  SucursalRepository, CategoriaRepository, MarcaRepository, ProductoImagenRepository, StockSucursalRepository, MovimientoInventarioRepository, StockSucursalBussnies, ProductoImagenBussnies, StorageService],
+  SucursalRepository, CategoriaRepository, MarcaRepository, ProductoImagenRepository, StockSucursalRepository,
+   MovimientoInventarioRepository, StockSucursalBussnies, ProductoImagenBussnies, StorageService],
 })
 export class AppModule {}
