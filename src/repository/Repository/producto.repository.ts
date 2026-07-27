@@ -96,7 +96,7 @@ export class ProductoRepository extends CrudRepository<Producto> {
         SELECT i.url, i.thumb_url
         FROM productos_imagenes i
         WHERE i.id_producto = p.id_producto
-        ORDER BY i.is_primary DESC, i.orden ASC, i.id_imagen ASC
+        ORDER BY i.is_primary DESC, COALESCE(i.orden, 0) ASC, i.id_imagen ASC
         LIMIT 1
       ) img ON TRUE
       LEFT JOIN LATERAL (
@@ -145,7 +145,7 @@ export class ProductoRepository extends CrudRepository<Producto> {
         SELECT i.url, i.thumb_url
         FROM productos_imagenes i
         WHERE i.id_producto = p.id_producto
-        ORDER BY i.is_primary DESC, i.orden ASC, i.id_imagen ASC
+        ORDER BY i.is_primary DESC, COALESCE(i.orden, 0) ASC, i.id_imagen ASC
         LIMIT 1
       ) img ON TRUE
       LEFT JOIN LATERAL (

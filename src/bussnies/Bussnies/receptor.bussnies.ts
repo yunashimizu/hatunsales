@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ReceptorRepository } from '../../repository/Repository/receptor.repository';
 import { ConsultaDocumentoService } from '../../util/sunat/consulta-documento.service';
 import { ReceptorResponse, SugerenciaReceptor } from '../../models/model/receptor.response';
@@ -58,76 +58,170 @@ export class ReceptorBussnies {
     const enBase = await this.repo.buscarClientePorDni(Number(dni));
     if (enBase) return this.desdeCliente(enBase, 'base');
 
-    const datos = await this.consulta.consultarDni(dni);
-    if (!datos) throw new NotFoundException(`No se encontró ninguna persona con el DNI ${dni}`);
+    try {
+      const datos = await this.consulta.consultarDni(dni);
+      if (!datos) throw new NotFoundException(`No se encontró ninguna persona con el DNI ${dni}`);
 
-    if (!guardar) {
-      return {
-        origen: 'externo',
-        tipo: 'cliente',
-        tipo_documento: TIPO_DOC_DNI,
-        numero_documento: dni,
-        denominacion: datos.nombre_completo,
-        direccion: '',
-        email: '',
-        telefono: '',
-        admite_factura: false,
-      };
+      if (!guardar) {
+        return {
+          origen: 'externo',
+          tipo: 'cliente',
+          tipo_documento: TIPO_DOC_DNI,
+          numero_documento: dni,
+          denominacion: datos.nombre_completo,
+          direccion: '',
+          email: '',
+          telefono: '',
+          admite_factura: false,
+        };
+      }
+
+      const cliente = await this.repo.guardarCliente({
+        dni: Number(dni),
+        nombre: datos.nombres,
+        apellido_paterno: datos.apellido_paterno,
+        apellido_materno: datos.apellido_materno,
+      });
+
+      return this.desdeCliente(cliente, 'externo');
+    } catch (error) {
+      // Sin token o sin red: se deja un borrador para completar a mano en el POS.
+      if (error instanceof ServiceUnavailableException) {
+        return this.borradorPersona(dni, this.textoDeExcepcion(error));
+      }
+      throw error;
     }
-
-    const cliente = await this.repo.guardarCliente({
-      dni: Number(dni),
-      nombre: datos.nombres,
-      apellido_paterno: datos.apellido_paterno,
-      apellido_materno: datos.apellido_materno,
-    });
-
-    return this.desdeCliente(cliente, 'externo');
   }
 
   async buscarEmpresa(ruc: string, guardar = true): Promise<ReceptorResponse> {
     const enBase = await this.repo.buscarEmpresaPorRuc(ruc);
     if (enBase) return this.desdeEmpresa(enBase, 'base');
 
-    const datos = await this.consulta.consultarRuc(ruc);
-    if (!datos) throw new NotFoundException(`No se encontró ninguna empresa con el RUC ${ruc}`);
+    try {
+      const datos = await this.consulta.consultarRuc(ruc);
+      if (!datos) throw new NotFoundException(`No se encontró ninguna empresa con el RUC ${ruc}`);
 
-    if (!guardar) {
-      return {
-        origen: 'externo',
-        tipo: 'empresa',
-        tipo_documento: TIPO_DOC_RUC,
-        numero_documento: ruc,
-        denominacion: datos.razon_social,
+      if (!guardar) {
+        return {
+          origen: 'externo',
+          tipo: 'empresa',
+          tipo_documento: TIPO_DOC_RUC,
+          numero_documento: ruc,
+          denominacion: datos.razon_social,
+          nombre_comercial: datos.nombre_comercial,
+          direccion: datos.direccion,
+          email: '',
+          telefono: datos.telefonos,
+          estado: datos.estado,
+          condicion: datos.condicion,
+          ...this.evaluarRuc(datos.estado, datos.condicion),
+        };
+      }
+
+      const empresa = await this.repo.guardarEmpresa({
+        ruc,
+        razon_social: datos.razon_social,
         nombre_comercial: datos.nombre_comercial,
-        direccion: datos.direccion,
-        email: '',
-        telefono: datos.telefonos,
+        telefonos: datos.telefonos,
+        tipo: datos.tipo,
         estado: datos.estado,
         condicion: datos.condicion,
-        ...this.evaluarRuc(datos.estado, datos.condicion),
-      };
+        direccion: datos.direccion,
+        departamento: datos.departamento,
+        provincia: datos.provincia,
+        distrito: datos.distrito,
+        ubigeo: datos.ubigeo,
+        capital: datos.capital,
+        fecha_inscripcion: datos.fecha_inscripcion,
+        fecha_baja: datos.fecha_baja,
+      });
+
+      return this.desdeEmpresa(empresa, 'externo');
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) {
+        return this.borradorEmpresa(ruc, this.textoDeExcepcion(error));
+      }
+      throw error;
+    }
+  }
+
+  private textoDeExcepcion(error: ServiceUnavailableException): string {
+    const respuesta = error.getResponse();
+    if (typeof respuesta === 'string') return respuesta;
+    if (respuesta && typeof respuesta === 'object' && 'message' in respuesta) {
+      const mensaje = (respuesta as { message?: string | string[] }).message;
+      if (Array.isArray(mensaje)) return mensaje.join('. ');
+      if (typeof mensaje === 'string') return mensaje;
+    }
+    return 'La consulta automática de documentos no está disponible. Complete los datos a mano.';
+  }
+
+  /** Plantilla editable cuando SUNAT no responde o no está configurado. */
+  private borradorPersona(dni: string, motivo: string): ReceptorResponse {
+    return {
+      origen: 'externo',
+      tipo: 'cliente',
+      tipo_documento: TIPO_DOC_DNI,
+      numero_documento: dni,
+      denominacion: '',
+      direccion: '',
+      email: '',
+      telefono: '',
+      admite_factura: false,
+      advertencia: motivo,
+    };
+  }
+
+  private borradorEmpresa(ruc: string, motivo: string): ReceptorResponse {
+    return {
+      origen: 'externo',
+      tipo: 'empresa',
+      tipo_documento: TIPO_DOC_RUC,
+      numero_documento: ruc,
+      denominacion: '',
+      nombre_comercial: '',
+      direccion: '',
+      email: '',
+      telefono: '',
+      admite_factura: true,
+      advertencia: motivo,
+    };
+  }
+
+  /** Alta o actualización con los datos que escribió el cajero a mano. */
+  async registrarManual(
+    documento: string,
+    datos: { denominacion: string; direccion?: string; email?: string; telefono?: string },
+  ): Promise<ReceptorResponse> {
+    const numero = this.limpiar(documento);
+    const nombre = (datos.denominacion ?? '').trim();
+    if (!nombre) throw new BadRequestException('Indique el nombre o razón social');
+
+    if (numero.length === 8) {
+      const partes = nombre.split(/\s+/);
+      const cliente = await this.repo.guardarCliente({
+        dni: Number(numero),
+        nombre: partes[0] ?? nombre,
+        apellido_paterno: partes[1] ?? '',
+        apellido_materno: partes.slice(2).join(' '),
+        direccion: datos.direccion ?? '',
+        email: datos.email ?? '',
+        telefono: datos.telefono ?? '',
+      });
+      return this.desdeCliente(cliente, 'base');
     }
 
-    const empresa = await this.repo.guardarEmpresa({
-      ruc,
-      razon_social: datos.razon_social,
-      nombre_comercial: datos.nombre_comercial,
-      telefonos: datos.telefonos,
-      tipo: datos.tipo,
-      estado: datos.estado,
-      condicion: datos.condicion,
-      direccion: datos.direccion,
-      departamento: datos.departamento,
-      provincia: datos.provincia,
-      distrito: datos.distrito,
-      ubigeo: datos.ubigeo,
-      capital: datos.capital,
-      fecha_inscripcion: datos.fecha_inscripcion,
-      fecha_baja: datos.fecha_baja,
-    });
+    if (numero.length === 11) {
+      const empresa = await this.repo.guardarEmpresa({
+        ruc: numero,
+        razon_social: nombre,
+        direccion: datos.direccion ?? '',
+        telefonos: datos.telefono ?? '',
+      });
+      return this.desdeEmpresa(empresa, 'base');
+    }
 
-    return this.desdeEmpresa(empresa, 'externo');
+    throw new BadRequestException('El documento debe tener 8 dígitos si es DNI u 11 si es RUC');
   }
 
   async porIdCliente(id_cliente: number): Promise<ReceptorResponse> {

@@ -147,6 +147,28 @@ export class ComprobanteRepository extends CrudRepository<Comprobante> {
 
       await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`comprobante:${serie}`]);
 
+      // Tras borrar duplicados a mano la secuencia del PK puede quedar atrás
+      // del MAX(id) y el siguiente INSERT choca con comprobantes_pkey.
+      await manager.query(`
+        DO $seq$
+        DECLARE
+          seq_comp text := pg_get_serial_sequence('comprobantes', 'id_comprobante');
+          seq_item text := pg_get_serial_sequence('comprobante_items', 'id_item');
+          max_comp bigint;
+          max_item bigint;
+        BEGIN
+          IF seq_comp IS NOT NULL THEN
+            SELECT COALESCE(MAX(id_comprobante), 1) INTO max_comp FROM comprobantes;
+            PERFORM setval(seq_comp, max_comp, true);
+          END IF;
+          IF seq_item IS NOT NULL THEN
+            SELECT COALESCE(MAX(id_item), 1) INTO max_item FROM comprobante_items;
+            PERFORM setval(seq_item, max_item, true);
+          END IF;
+        END
+        $seq$;
+      `);
+
       let numero = numeroSolicitado;
 
       if (numero && numero > 0) {

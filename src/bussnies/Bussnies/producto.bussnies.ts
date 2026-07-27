@@ -36,8 +36,10 @@ export class ProductoBussnies implements IProductoBussniees {
       unidad_medida: dto.unidad_medida ?? '',
       estado: dto.estado ?? true,
       destacado: dto.destacado ?? false,
-      id_categoria: dto.id_categoria,
-      id_marca: dto.id_marca,
+      categoria: dto.id_categoria
+        ? ({ id_categoria: dto.id_categoria } as any)
+        : null,
+      marca: dto.id_marca ? ({ id_marca: dto.id_marca } as any) : null,
     } as any);
 
     return this.getById(producto.id_producto);
@@ -63,11 +65,18 @@ export class ProductoBussnies implements IProductoBussniees {
       unidad_medida: dto.unidad_medida,
       estado: dto.estado,
       destacado: dto.destacado,
-      id_categoria: dto.id_categoria,
-      id_marca: dto.id_marca,
     };
 
     if (dto.nombre?.trim()) cambios['slug'] = this.generarSlug(dto.nombre);
+
+    if (dto.id_categoria !== undefined) {
+      cambios['categoria'] = dto.id_categoria
+        ? ({ id_categoria: dto.id_categoria } as any)
+        : null;
+    }
+    if (dto.id_marca !== undefined) {
+      cambios['marca'] = dto.id_marca ? ({ id_marca: dto.id_marca } as any) : null;
+    }
 
     Object.keys(cambios).forEach((clave) => {
       if (cambios[clave] === undefined) delete cambios[clave];

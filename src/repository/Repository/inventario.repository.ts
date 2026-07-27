@@ -119,15 +119,28 @@ export class InventarioRepository extends CrudRepository<Inventario> {
 
     const donde = condiciones.join(' AND ');
 
-    const base = `
+    // Los JOIN van antes del WHERE. Poner el LATERAL después del WHERE
+    // (como estaba) es SQL inválido y devolvía 500 en producción.
+    const from = `
       FROM inventario i
       JOIN productos p ON p.id_producto = i.id_producto
       LEFT JOIN almacenes a ON a.id_almacen = i.id_almacen
       LEFT JOIN sucursales s ON s.id_sucursal = a.id_sucursal
       LEFT JOIN categorias cat ON cat.id_categoria = p.id_categoria
-      WHERE ${donde}`;
+      LEFT JOIN LATERAL (
+             SELECT pi.url
+               FROM productos_imagenes pi
+              WHERE pi.id_producto = p.id_producto
+              ORDER BY pi.is_primary DESC NULLS LAST,
+                       COALESCE(pi.orden, 0) ASC,
+                       pi.id_imagen ASC
+              LIMIT 1
+           ) img ON TRUE`;
 
-    const totales = await this.dataSource.query(`SELECT COUNT(*)::int AS total ${base}`, parametros);
+    const totales = await this.dataSource.query(
+      `SELECT COUNT(*)::int AS total ${from} WHERE ${donde}`,
+      parametros,
+    );
 
     parametros.push(porPagina, (pagina - 1) * porPagina);
 
@@ -147,13 +160,8 @@ export class InventarioRepository extends CrudRepository<Inventario> {
               COALESCE(p.precio_compra, 0)      AS precio_compra,
               COALESCE(p.precio_venta, 0)       AS precio_venta,
               COALESCE(img.url, '')             AS imagen_url
-         ${base}
-         LEFT JOIN LATERAL (
-                SELECT pi.url FROM productos_imagenes pi
-                 WHERE pi.id_producto = p.id_producto
-                 ORDER BY pi.is_primary DESC NULLS LAST, pi.orden ASC NULLS LAST
-                 LIMIT 1
-              ) img ON TRUE
+         ${from}
+        WHERE ${donde}
         ORDER BY (COALESCE(i.stock, 0) <= COALESCE(i.stock_minimo, 0)) DESC, p.nombre ASC
         LIMIT $${parametros.length - 1} OFFSET $${parametros.length}`,
       parametros,

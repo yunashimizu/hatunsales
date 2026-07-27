@@ -63,6 +63,17 @@ export class CrearVentaRequest {
   @IsOptional()
   id_empresa?: number;
 
+  /** Nombre a mano cuando SUNAT no está disponible. */
+  @IsString()
+  @IsOptional()
+  @MaxLength(200)
+  cliente_denominacion?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(255)
+  cliente_direccion?: string;
+
   // ── Comprobante ───────────────────────────────────────────────
   @IsInt()
   @IsIn([1, 2, 7, 8], { message: '1=Factura 2=Boleta 7=Nota de crédito 8=Nota de débito' })

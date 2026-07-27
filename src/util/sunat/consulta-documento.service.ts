@@ -1,13 +1,13 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import axios from 'axios';
 import { sunatConfig } from '../../config/sunat.config';
+import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 
 /**
  * Único punto de salida hacia el servicio de consulta de DNI y RUC.
  *
- * Antes esta llamada estaba copiada en tres sitios distintos, cada uno con su
- * propio manejo de errores y sin tiempo límite, así que una caída del
- * proveedor dejaba peticiones colgadas.
+ * El token se busca en este orden: variables de entorno, tabla `configuraciones`
+ * (`sunat_token`). Así se puede configurar sin redeploy si hace falta.
  */
 
 const TIEMPO_LIMITE_MS = 8000;
@@ -42,10 +42,9 @@ export interface DatosEmpresa {
 export class ConsultaDocumentoService {
 
   private readonly logger = new Logger(ConsultaDocumentoService.name);
+  private tokenEnCache: { valor: string | null; expira: number } | null = null;
 
-  get disponible(): boolean {
-    return Boolean(sunatConfig.token);
-  }
+  constructor(private readonly config: ConfiguracionRepository) {}
 
   /** Devuelve null cuando el documento simplemente no existe en el padrón. */
   async consultarDni(dni: string): Promise<DatosPersona | null> {
@@ -88,16 +87,34 @@ export class ConsultaDocumentoService {
     };
   }
 
+  private async token(): Promise<string | null> {
+    if (sunatConfig.token) return sunatConfig.token;
+
+    if (this.tokenEnCache && this.tokenEnCache.expira > Date.now()) {
+      return this.tokenEnCache.valor;
+    }
+
+    try {
+      const valor = await this.config.obtener('sunat_token');
+      this.tokenEnCache = { valor, expira: Date.now() + 60_000 };
+      return valor;
+    } catch {
+      this.tokenEnCache = { valor: null, expira: Date.now() + 60_000 };
+      return null;
+    }
+  }
+
   private async pedir(url: string, etiqueta: string): Promise<any | null> {
-    if (!this.disponible) {
+    const token = await this.token();
+    if (!token) {
       throw new ServiceUnavailableException(
-        'La consulta automática de documentos no está configurada. Ingrese los datos manualmente.',
+        'La consulta automática de documentos no está configurada. Agregue SUNAT_TOKEN en Railway o la clave sunat_token en configuraciones.',
       );
     }
 
     try {
       const { data } = await axios.get(url, {
-        params: { token: sunatConfig.token },
+        params: { token },
         timeout: TIEMPO_LIMITE_MS,
       });
       return data;

@@ -48,21 +48,15 @@ export class Producto {
   @Column({ nullable: true, type: 'integer' })
   id_unidad!: number;
 
-  // La llave se expone además como columna simple para poder asignarla desde
-  // el panel sin tener que cargar la entidad relacionada completa.
-  @Column({ name: 'id_categoria', nullable: true, type: 'integer' })
-  id_categoria!: number;
-
+  // Solo la relación: declarar también `@Column({ name: 'id_categoria' })`
+  // duplica la metadata en TypeORM y hace fallar el INSERT/UPDATE con 500.
   @ManyToOne(() => Categoria, { nullable: true })
   @JoinColumn({ name: 'id_categoria' })
-  categoria!: Categoria;
-
-  @Column({ name: 'id_marca', nullable: true, type: 'integer' })
-  id_marca!: number;
+  categoria!: Categoria | null;
 
   @ManyToOne(() => Marca, { nullable: true })
   @JoinColumn({ name: 'id_marca' })
-  marca!: Marca;
+  marca!: Marca | null;
 
   @OneToMany(() => ProductoImagen, (img) => img.producto)
   imagenes!: ProductoImagen[];

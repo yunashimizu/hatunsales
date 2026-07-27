@@ -125,6 +125,9 @@ export class VentaBussnies {
       venta.comprobante = await this.comprobantes.generar({
         ...this.aSolicitudComprobante(dto, items),
         id_venta: idVenta,
+        id_cliente: receptor.id_cliente,
+        id_empresa: receptor.id_empresa,
+        documento: receptor.numero_documento,
       });
     } catch (error: any) {
       const mensaje = error?.response?.message ?? error?.message ?? 'No se pudo emitir el comprobante';
@@ -272,7 +275,29 @@ export class VentaBussnies {
 
   private async resolverReceptor(dto: CrearVentaRequest) {
     const documento = (dto.documento ?? '').replace(/\D/g, '');
-    if (documento) return this.receptor.buscarPorDocumento(documento, true);
+    const nombre = dto.cliente_denominacion?.trim();
+    const direccion = dto.cliente_direccion?.trim();
+
+    if (documento) {
+      const receptor = await this.receptor.buscarPorDocumento(documento, true);
+
+      // Si SUNAT no respondió y el cajero escribió el nombre, se guarda aquí.
+      if (!receptor.denominacion?.trim() && nombre) {
+        return this.receptor.registrarManual(documento, {
+          denominacion: nombre,
+          direccion: direccion ?? '',
+        });
+      }
+
+      if (!receptor.denominacion?.trim() && documento !== '00000000') {
+        throw new BadRequestException(
+          'Indique el nombre o razón social del cliente. La consulta automática no está disponible.',
+        );
+      }
+
+      return receptor;
+    }
+
     if (dto.id_empresa) return this.receptor.porIdEmpresa(dto.id_empresa);
     if (dto.id_cliente) return this.receptor.porIdCliente(dto.id_cliente);
     return this.receptor.consumidorFinal();
