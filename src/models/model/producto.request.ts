@@ -63,6 +63,16 @@ export class CrearProductoRequest {
   @IsInt()
   @IsOptional()
   id_proveedor?: number;
+
+  /** Cantidad inicial. Se guarda en `inventario`, no en `productos`. */
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  stock?: number;
+
+  @IsInt()
+  @IsOptional()
+  id_almacen?: number;
 }
 
 export class ActualizarProductoRequest {

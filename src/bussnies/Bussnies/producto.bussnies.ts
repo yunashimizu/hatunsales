@@ -1,5 +1,6 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, Logger } from '@nestjs/common';
 import { ProductoRepository, FilaProducto } from '../../repository/Repository/producto.repository';
+import { InventarioRepository } from '../../repository/Repository/inventario.repository';
 import { CrearProductoRequest, ActualizarProductoRequest } from '../../models/model/producto.request';
 import { ProductoResponse } from '../../models/model/producto.response';
 import { IProductoBussniees } from '../Ibussnies/IProductoBussniees';
@@ -7,7 +8,12 @@ import { IProductoBussniees } from '../Ibussnies/IProductoBussniees';
 @Injectable()
 export class ProductoBussnies implements IProductoBussniees {
 
-  constructor(private readonly repo: ProductoRepository) {}
+  private readonly logger = new Logger(ProductoBussnies.name);
+
+  constructor(
+    private readonly repo: ProductoRepository,
+    private readonly inventarioRepo: InventarioRepository,
+  ) {}
 
   async getAll(): Promise<ProductoResponse[]> {
     const lista = await this.repo.listarDetallado();
@@ -42,7 +48,40 @@ export class ProductoBussnies implements IProductoBussniees {
       marca: dto.id_marca ? ({ id_marca: dto.id_marca } as any) : null,
     } as any);
 
+    // Stock inicial opcional: vive en `inventario`, no en `productos`.
+    if (dto.stock !== undefined && dto.stock !== null) {
+      await this.registrarStockInicial(producto.id_producto, Number(dto.stock) || 0, dto.id_almacen);
+    }
+
     return this.getById(producto.id_producto);
+  }
+
+  /** Crea la fila de inventario del producto recién dado de alta. */
+  private async registrarStockInicial(
+    idProducto: number,
+    stock: number,
+    idAlmacen?: number,
+  ): Promise<void> {
+    let almacenId = idAlmacen ? Number(idAlmacen) : 0;
+
+    if (!almacenId) {
+      const almacenes = await this.inventarioRepo.almacenes();
+      almacenId = almacenes[0]?.id_almacen ? Number(almacenes[0].id_almacen) : 0;
+    }
+
+    if (!almacenId) {
+      this.logger.warn(
+        `Producto ${idProducto} creado sin fila de inventario: no hay almacén configurado`,
+      );
+      return;
+    }
+
+    await this.inventarioRepo.guardarOActualizar({
+      producto: { id_producto: idProducto } as any,
+      almacen: { id_almacen: almacenId } as any,
+      stock: Math.max(0, Math.trunc(stock)),
+      stock_minimo: 0,
+    });
   }
 
   async update(dto: ActualizarProductoRequest, id: number): Promise<ProductoResponse> {
