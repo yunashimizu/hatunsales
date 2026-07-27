@@ -1,5 +1,5 @@
-import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
-import { ProductoRepository } from '../../repository/Repository/producto.repository';
+import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { ProductoRepository, FilaProducto } from '../../repository/Repository/producto.repository';
 import { CrearProductoRequest, ActualizarProductoRequest } from '../../models/model/producto.request';
 import { ProductoResponse } from '../../models/model/producto.response';
 import { IProductoBussniees } from '../Ibussnies/IProductoBussniees';
@@ -10,78 +10,140 @@ export class ProductoBussnies implements IProductoBussniees {
   constructor(private readonly repo: ProductoRepository) {}
 
   async getAll(): Promise<ProductoResponse[]> {
-    const lista = await this.repo.getAll();
-    return lista.map((p) => this.mapProducto(p));
+    const lista = await this.repo.listarDetallado();
+    return lista.map((p) => this.mapFila(p));
   }
 
   async getById(id: number): Promise<ProductoResponse> {
-    const producto = await this.repo.getById(id);
+    const producto = await this.repo.detallePorId(id);
     if (!producto) throw new NotFoundException(`Producto ${id} no encontrado`);
-    return this.mapProducto(producto);
+    return this.mapFila(producto);
   }
 
   async create(dto: CrearProductoRequest): Promise<ProductoResponse> {
-    if (dto.codigo_barras) {
-      const existe = await this.repo.buscarPorCodigoBarras(dto.codigo_barras);
-      if (existe) throw new ConflictException('Ya existe un producto con ese código de barras');
-    }
+    await this.verificarUnicidad(dto.codigo_barras, dto.sku);
 
     const producto = await this.repo.create({
-      nombre: dto.nombre,
+      nombre: dto.nombre?.trim(),
       descripcion: dto.descripcion ?? '',
-      codigo_barras: dto.codigo_barras ?? '',
+      descripcion_corta: dto.descripcion_corta ?? '',
+      codigo_barras: dto.codigo_barras?.trim() ?? '',
+      sku: dto.sku?.trim() ?? '',
+      slug: this.generarSlug(dto.nombre),
       precio_compra: dto.precio_compra ?? 0,
       precio_venta: dto.precio_venta ?? 0,
+      descuento: dto.descuento ?? 0,
       unidad_medida: dto.unidad_medida ?? '',
-    });
+      estado: dto.estado ?? true,
+      destacado: dto.destacado ?? false,
+      id_categoria: dto.id_categoria,
+      id_marca: dto.id_marca,
+    } as any);
 
-    return this.mapProducto(producto);
+    return this.getById(producto.id_producto);
   }
 
   async update(dto: ActualizarProductoRequest, id: number): Promise<ProductoResponse> {
     const existente = await this.repo.getById(id);
     if (!existente) throw new NotFoundException(`Producto ${id} no encontrado`);
 
-    if (dto.codigo_barras) {
-      const existe = await this.repo.buscarPorCodigoBarras(dto.codigo_barras);
-      if (existe && existe.id_producto !== id) {
-        throw new ConflictException('Ese código de barras ya está asociado a otro producto');
-      }
-    }
+    await this.verificarUnicidad(dto.codigo_barras, dto.sku, id);
 
-    const actualizado = await this.repo.actualizar(id, {
-      nombre: dto.nombre,
+    // Solo se tocan los campos que llegaron: así una edición parcial desde el
+    // panel no borra datos que ese formulario no muestra.
+    const cambios: Record<string, any> = {
+      nombre: dto.nombre?.trim(),
       descripcion: dto.descripcion,
-      codigo_barras: dto.codigo_barras,
+      descripcion_corta: dto.descripcion_corta,
+      codigo_barras: dto.codigo_barras?.trim(),
+      sku: dto.sku?.trim(),
       precio_compra: dto.precio_compra,
       precio_venta: dto.precio_venta,
+      descuento: dto.descuento,
       unidad_medida: dto.unidad_medida,
+      estado: dto.estado,
+      destacado: dto.destacado,
+      id_categoria: dto.id_categoria,
+      id_marca: dto.id_marca,
+    };
+
+    if (dto.nombre?.trim()) cambios['slug'] = this.generarSlug(dto.nombre);
+
+    Object.keys(cambios).forEach((clave) => {
+      if (cambios[clave] === undefined) delete cambios[clave];
     });
 
-    return this.mapProducto(actualizado);
+    if (Object.keys(cambios).length) {
+      await this.repo.actualizar(id, cambios as any);
+    }
+
+    return this.getById(id);
   }
 
   async delete(id: number): Promise<number> {
-    await this.getById(id);
+    const existe = await this.repo.getById(id);
+    if (!existe) throw new NotFoundException(`Producto ${id} no encontrado`);
     return this.repo.delete(id);
   }
 
   async buscarPorCodigoBarras(codigo_barras: string): Promise<ProductoResponse> {
     const producto = await this.repo.buscarPorCodigoBarras(codigo_barras);
     if (!producto) throw new NotFoundException(`Código de barras ${codigo_barras} no encontrado`);
-    return this.mapProducto(producto);
+    return this.getById(producto.id_producto);
   }
 
-  private mapProducto(p: any): ProductoResponse {
+  // ── Auxiliares ───────────────────────────────────────────────
+
+  private async verificarUnicidad(codigoBarras?: string, sku?: string, idActual?: number): Promise<void> {
+    const codigo = codigoBarras?.trim();
+    if (codigo) {
+      const existe = await this.repo.buscarPorCodigoBarras(codigo);
+      if (existe && existe.id_producto !== idActual) {
+        throw new ConflictException('Ya existe un producto con ese código de barras');
+      }
+    }
+
+    const codigoInterno = sku?.trim();
+    if (codigoInterno) {
+      const existe = await this.repo.buscarPorSku(codigoInterno);
+      if (existe && existe.id_producto !== idActual) {
+        throw new ConflictException('Ya existe un producto con ese SKU');
+      }
+    }
+  }
+
+  private generarSlug(nombre?: string): string {
+    return (nombre ?? '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 120);
+  }
+
+  private mapFila(p: FilaProducto): ProductoResponse {
     return {
       id_producto: p.id_producto,
       nombre: p.nombre ?? '',
       descripcion: p.descripcion ?? '',
+      descripcion_corta: p.descripcion_corta ?? '',
       codigo_barras: p.codigo_barras ?? '',
+      sku: p.sku ?? '',
       precio_compra: Number(p.precio_compra ?? 0),
       precio_venta: Number(p.precio_venta ?? 0),
+      descuento: Number(p.descuento ?? 0),
       unidad_medida: p.unidad_medida ?? '',
-      id_proveedor: undefined,
+      id_categoria: p.id_categoria ?? undefined,
+      categoria: p.categoria ?? '',
+      id_marca: p.id_marca ?? undefined,
+      marca: p.marca ?? '',
+      estado: p.estado ?? true,
+      destacado: p.destacado ?? false,
+      imagen_url: p.imagen_url ?? '',
+      thumb_url: p.thumb_url ?? p.imagen_url ?? '',
+      total_imagenes: Number(p.total_imagenes ?? 0),
+      stock_total: Number(p.stock_total ?? 0),
       creado_en: p.creado_en,
     };
   }

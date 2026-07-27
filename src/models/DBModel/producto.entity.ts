@@ -48,9 +48,17 @@ export class Producto {
   @Column({ nullable: true, type: 'integer' })
   id_unidad!: number;
 
+  // La llave se expone además como columna simple para poder asignarla desde
+  // el panel sin tener que cargar la entidad relacionada completa.
+  @Column({ name: 'id_categoria', nullable: true, type: 'integer' })
+  id_categoria!: number;
+
   @ManyToOne(() => Categoria, { nullable: true })
   @JoinColumn({ name: 'id_categoria' })
   categoria!: Categoria;
+
+  @Column({ name: 'id_marca', nullable: true, type: 'integer' })
+  id_marca!: number;
 
   @ManyToOne(() => Marca, { nullable: true })
   @JoinColumn({ name: 'id_marca' })

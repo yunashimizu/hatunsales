@@ -37,6 +37,13 @@ export class ProductoImagen {
   @Column({ nullable: true, type: 'integer', default: 0 })
   orden!: number;
 
+  /** Identificador en el proveedor de almacenamiento, para poder borrarla. */
+  @Column({ nullable: true })
+  clave_almacen!: string;
+
+  @Column({ nullable: true })
+  proveedor!: string;
+
   @CreateDateColumn()
   creado_en!: Date;
 }

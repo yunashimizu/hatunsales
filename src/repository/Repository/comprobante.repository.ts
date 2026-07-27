@@ -1,11 +1,19 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, DataSource, Brackets } from 'typeorm';
 import { Comprobante } from '../../models/DBModel/c-electronico/comprobante.entity';
 import { ComprobanteItem } from '../../models/DBModel/c-electronico/comprobante-item.entity';
-import { Cliente } from '../../models/DBModel/cliente.entity';
-import { Empresa } from '../../models/DBModel/empresa.entity';
 import { CrudRepository } from '../Irepository/GenericIRepository/crud.Irepository';
+
+export interface FiltroComprobantes {
+  texto?: string;
+  id_tipo?: number;
+  estado?: string;
+  desde?: string;
+  hasta?: string;
+  pagina?: number;
+  por_pagina?: number;
+}
 
 @Injectable()
 export class ComprobanteRepository extends CrudRepository<Comprobante> {
@@ -20,109 +28,36 @@ export class ComprobanteRepository extends CrudRepository<Comprobante> {
     super(comprobanteRepo);
   }
 
-  // ── Cliente ──────────────────────────────────────────────────
-
-  async buscarClientePorId(id_cliente: number): Promise<Cliente | null> {
-    return this.comprobanteRepo.manager.findOne(Cliente, {
-      where: { id_cliente },
-      relations: ['documento'],
-    });
+  private get dataSource(): DataSource {
+    return this.comprobanteRepo.manager.connection;
   }
 
-  async buscarClientePorDni(dni: number): Promise<Cliente | null> {
-    return this.comprobanteRepo.manager.findOne(Cliente, {
-      where: { dni },
-      relations: ['documento'],
-    });
-  }
+  // ── Consultas ────────────────────────────────────────────────
 
-  async guardarCliente(data: Partial<Cliente>): Promise<Cliente> {
-    const existe = data.dni
-      ? await this.buscarClientePorDni(data.dni as number)
-      : null;
-
-    if (existe) {
-      await this.comprobanteRepo.manager.update(Cliente, existe.id_cliente, data);
-      return this.comprobanteRepo.manager.findOne(Cliente, {
-        where: { id_cliente: existe.id_cliente },
-      }) as Promise<Cliente>;
-    }
-
-    const nuevo = this.comprobanteRepo.manager.create(Cliente, data);
-    return this.comprobanteRepo.manager.save(Cliente, nuevo);
-  }
-
-  // ── Empresa ──────────────────────────────────────────────────
-
-  async buscarEmpresaPorId(id_empresa: number): Promise<Empresa | null> {
-    return this.comprobanteRepo.manager.findOne(Empresa, {
-      where: { id_empresa },
-    });
-  }
-
-  async buscarEmpresaPorRuc(ruc: string): Promise<Empresa | null> {
-    return this.comprobanteRepo.manager.findOne(Empresa, {
-      where: { ruc },
-    });
-  }
-
-  async guardarEmpresa(data: Partial<Empresa>): Promise<Empresa> {
-    const existe = data.ruc
-      ? await this.buscarEmpresaPorRuc(data.ruc as string)
-      : null;
-
-    if (existe) {
-      await this.comprobanteRepo.manager.update(Empresa, existe.id_empresa, data);
-      return this.comprobanteRepo.manager.findOne(Empresa, {
-        where: { id_empresa: existe.id_empresa },
-      }) as Promise<Empresa>;
-    }
-
-    const nueva = this.comprobanteRepo.manager.create(Empresa, data);
-    return this.comprobanteRepo.manager.save(Empresa, nueva);
-  }
-
-  // ── Comprobante ──────────────────────────────────────────────
-
-  async buscarPorSerieNumero(serie: string, numero: number): Promise<Comprobante | null> {
+  buscarPorSerieNumero(serie: string, numero: number): Promise<Comprobante | null> {
     return this.comprobanteRepo.findOne({
       where: { serie, numero },
       relations: ['items', 'cliente', 'tipo', 'moneda'],
     });
   }
 
-  async buscarUltimoNumeroPorSerie(serie: string, id_tipo: number): Promise<number> {
-    const ultimo = await this.comprobanteRepo.findOne({
-      where: { serie, tipo: { id_tipo } as any },
-      order: { numero: 'DESC' },
-      select: ['numero'],
-    });
-    return ultimo?.numero ?? 0;
-  }
-
-  async guardarConItems(
-    data: Partial<Comprobante>,
-    items: Partial<ComprobanteItem>[],
-  ): Promise<Comprobante> {
-    const nuevo = this.comprobanteRepo.create(data);
-    const guardado = await this.comprobanteRepo.save(nuevo);
-
-    const itemsEntidad = items.map((i) =>
-      this.itemRepo.create({ ...i, comprobante: guardado })
-    );
-    await this.itemRepo.save(itemsEntidad);
-
+  buscarPorId(id_comprobante: number): Promise<Comprobante | null> {
     return this.comprobanteRepo.findOne({
-      where: { id_comprobante: guardado.id_comprobante },
+      where: { id_comprobante },
       relations: ['items', 'cliente', 'tipo', 'moneda'],
-    }) as Promise<Comprobante>;
+    });
   }
 
-  async actualizarRespuesta(id: number, data: Partial<Comprobante>): Promise<void> {
-    await this.comprobanteRepo.update(id, data);
+  async buscarUltimoNumeroPorSerie(serie: string): Promise<number> {
+    const fila = await this.comprobanteRepo
+      .createQueryBuilder('c')
+      .select('COALESCE(MAX(c.numero), 0)', 'ultimo')
+      .where('c.serie = :serie', { serie })
+      .getRawOne();
+    return Number(fila?.ultimo ?? 0);
   }
 
-  async listarPorVenta(id_venta: number): Promise<Comprobante[]> {
+  listarPorVenta(id_venta: number): Promise<Comprobante[]> {
     return this.comprobanteRepo.find({
       where: { id_venta },
       relations: ['items', 'cliente', 'tipo', 'moneda'],
@@ -130,7 +65,7 @@ export class ComprobanteRepository extends CrudRepository<Comprobante> {
     });
   }
 
-  async listarPorCliente(id_cliente: number): Promise<Comprobante[]> {
+  listarPorCliente(id_cliente: number): Promise<Comprobante[]> {
     return this.comprobanteRepo
       .createQueryBuilder('c')
       .leftJoinAndSelect('c.items', 'items')
@@ -141,10 +76,129 @@ export class ComprobanteRepository extends CrudRepository<Comprobante> {
       .getMany();
   }
 
-  async buscarPorId(id_comprobante: number): Promise<Comprobante | null> {
-    return this.comprobanteRepo.findOne({
-      where: { id_comprobante },
-      relations: ['items', 'cliente', 'tipo', 'moneda'],
+  /**
+   * Listado paginado para la pantalla de documentos. Reemplaza al recorrido que
+   * pedía los comprobantes cliente por cliente.
+   */
+  async listar(filtro: FiltroComprobantes): Promise<{ datos: Comprobante[]; total: number; pagina: number; por_pagina: number }> {
+    const pagina = Math.max(1, Number(filtro.pagina) || 1);
+    const porPagina = Math.min(100, Math.max(1, Number(filtro.por_pagina) || 20));
+
+    const query = this.comprobanteRepo
+      .createQueryBuilder('c')
+      .leftJoinAndSelect('c.tipo', 'tipo')
+      .leftJoinAndSelect('c.moneda', 'moneda')
+      .leftJoinAndSelect('c.cliente', 'cliente');
+
+    if (filtro.id_tipo) {
+      query.andWhere('c.id_tipo = :idTipo', { idTipo: filtro.id_tipo });
+    }
+
+    if (filtro.estado) {
+      if (filtro.estado === 'anulado') query.andWhere('c.anulado = true');
+      else query.andWhere('c.estado = :estado AND c.anulado = false', { estado: filtro.estado });
+    }
+
+    if (filtro.desde) query.andWhere('c.creado_en >= :desde', { desde: filtro.desde });
+    if (filtro.hasta) query.andWhere('c.creado_en <= :hasta', { hasta: `${filtro.hasta} 23:59:59` });
+
+    const texto = filtro.texto?.trim();
+    if (texto) {
+      query.andWhere(
+        new Brackets((qb) => {
+          qb.where('LOWER(c.cliente_denominacion) LIKE :patron', { patron: `%${texto.toLowerCase()}%` })
+            .orWhere('c.cliente_numero_doc LIKE :patron', { patron: `%${texto}%` })
+            .orWhere("UPPER(c.serie || '-' || LPAD(c.numero::text, 8, '0')) LIKE :serie", {
+              serie: `%${texto.toUpperCase()}%`,
+            });
+        }),
+      );
+    }
+
+    const [datos, total] = await query
+      .orderBy('c.creado_en', 'DESC')
+      .skip((pagina - 1) * porPagina)
+      .take(porPagina)
+      .getManyAndCount();
+
+    return { datos, total, pagina, por_pagina: porPagina };
+  }
+
+  // ── Escritura ────────────────────────────────────────────────
+
+  /**
+   * Reserva el correlativo y deja el comprobante en estado pendiente antes de
+   * salir a la red.
+   *
+   * Se hace así para que un fallo a mitad del envío deje rastro: si NUBEFACT
+   * aceptó el documento pero la respuesta nunca llegó, la fila queda pendiente
+   * y se puede reconsultar, en vez de perder el número y emitir otro encima.
+   *
+   * El bloqueo de aviso serializa a los cajeros que emiten en la misma serie al
+   * mismo tiempo, que es lo que produce números duplicados.
+   */
+  async reservarCorrelativo(
+    datos: Partial<Comprobante>,
+    items: Partial<ComprobanteItem>[],
+    numeroSolicitado?: number,
+  ): Promise<Comprobante> {
+    return this.dataSource.transaction(async (manager) => {
+      const serie = datos.serie as string;
+
+      await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`comprobante:${serie}`]);
+
+      let numero = numeroSolicitado;
+
+      if (numero && numero > 0) {
+        const ocupado = await manager.findOne(Comprobante, { where: { serie, numero } });
+        if (ocupado) {
+          throw new Error(`El número ${serie}-${String(numero).padStart(8, '0')} ya fue emitido`);
+        }
+      } else {
+        const fila = await manager
+          .createQueryBuilder(Comprobante, 'c')
+          .select('COALESCE(MAX(c.numero), 0)', 'ultimo')
+          .where('c.serie = :serie', { serie })
+          .getRawOne();
+        numero = Number(fila?.ultimo ?? 0) + 1;
+      }
+
+      const comprobante = await manager.save(
+        Comprobante,
+        manager.create(Comprobante, { ...datos, numero, estado: 'pendiente' }),
+      );
+
+      if (items.length) {
+        await manager.save(
+          ComprobanteItem,
+          items.map((i) => manager.create(ComprobanteItem, { ...i, comprobante })),
+        );
+      }
+
+      return comprobante;
     });
+  }
+
+  async actualizarRespuesta(id: number, data: Partial<Comprobante>): Promise<void> {
+    await this.comprobanteRepo.update(id, data);
+  }
+
+  async marcarError(id: number, mensaje: string): Promise<void> {
+    await this.comprobanteRepo.update(id, {
+      estado: 'error',
+      error_mensaje: mensaje.slice(0, 1000),
+      aceptada_sunat: false,
+    });
+  }
+
+  async eliminar(id: number): Promise<void> {
+    await this.itemRepo.delete({ comprobante: { id_comprobante: id } as any });
+    await this.comprobanteRepo.delete(id);
+  }
+
+  /** Comprobante emitido para una venta, si existe, sin traer relaciones. */
+  async existePorVenta(id_venta: number): Promise<boolean> {
+    const cuenta = await this.comprobanteRepo.count({ where: { id_venta, anulado: false } });
+    return cuenta > 0;
   }
 }

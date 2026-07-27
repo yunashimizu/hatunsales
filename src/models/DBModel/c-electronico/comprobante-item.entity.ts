@@ -32,6 +32,9 @@ export class ComprobanteItem {
   precio_unitario!: number;
 
   @Column({ type: 'numeric', nullable: true })
+  descuento!: number;
+
+  @Column({ type: 'numeric', nullable: true })
   subtotal!: number;
 
   @Column({ default: 1 })

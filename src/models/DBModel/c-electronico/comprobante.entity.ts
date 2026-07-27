@@ -65,10 +65,22 @@ export class Comprobante {
   total_gravada!: number;
 
   @Column({ type: 'numeric', nullable: true })
+  total_exonerada!: number;
+
+  @Column({ type: 'numeric', nullable: true })
+  total_inafecta!: number;
+
+  @Column({ type: 'numeric', nullable: true })
+  total_descuento!: number;
+
+  @Column({ type: 'numeric', nullable: true })
   total_igv!: number;
 
   @Column({ type: 'numeric', nullable: true })
   total!: number;
+
+  @Column({ nullable: true })
+  importe_en_letras!: string;
 
   @Column({ nullable: true, type: 'text' })
   observaciones!: string;
@@ -118,6 +130,20 @@ export class Comprobante {
 
   @Column({ nullable: true })
   sunat_ticket!: string;
+
+  /** pendiente mientras se envía, luego emitido, error o anulado. */
+  @Column({ nullable: true, default: 'emitido' })
+  estado!: string;
+
+  /** Motivo por el que el envío quedó en error, para poder reintentarlo. */
+  @Column({ nullable: true, type: 'text' })
+  error_mensaje!: string;
+
+  @Column({ nullable: true, type: 'integer' })
+  id_usuario!: number;
+
+  @Column({ nullable: true, type: 'integer' })
+  id_sucursal!: number;
 
   @CreateDateColumn()
   creado_en!: Date;

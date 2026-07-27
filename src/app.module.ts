@@ -123,6 +123,20 @@ import { CheckoutController, PagoWebhookController } from './api/controllers/tie
 import { PedidoController, PedidoAdminController } from './api/controllers/tienda/pedido.controller';
 import { CuentaTiendaController } from './api/controllers/tienda/cuenta.controller';
 
+import { ConfiguracionRepository } from './repository/Repository/configuracion.repository';
+import { ReceptorRepository } from './repository/Repository/receptor.repository';
+import { ReceptorBussnies } from './bussnies/Bussnies/receptor.bussnies';
+import { ReceptorController } from './api/controllers/receptor.controller';
+import { ConsultaDocumentoService } from './util/sunat/consulta-documento.service';
+import { VentaRepository } from './repository/Repository/venta.repository';
+import { VentaBussnies } from './bussnies/Bussnies/venta.bussnies';
+import { VentaController } from './api/controllers/venta.controller';
+import { CloudinaryAlmacen } from './util/storage/cloudinary.almacen';
+import { BaseDatosAlmacen } from './util/storage/base-datos.almacen';
+import { DiscoAlmacen } from './util/storage/disco.almacen';
+import { almacenProvider } from './util/storage/almacen.provider';
+import { ArchivoController } from './api/controllers/archivo.controller';
+
 @Module({
   imports: [
     TypeOrmModule.forRoot(postgresConfig),
@@ -148,7 +162,8 @@ import { CuentaTiendaController } from './api/controllers/tienda/cuenta.controll
   ProductoController, InventarioController, GuiaRemisionController, ProformaController,
   ReportesController, StockSucursalController, ProductoImagenController, CategoriaController, RolController, RolesAdminController,
   CatalogoController, CarritoController, CheckoutController, PagoWebhookController,
-  PedidoController, PedidoAdminController, CuentaTiendaController],
+  PedidoController, PedidoAdminController, CuentaTiendaController,
+  ReceptorController, VentaController, ArchivoController],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
   LogRepository, AuthBussnies, AdminBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
@@ -159,6 +174,9 @@ import { CuentaTiendaController } from './api/controllers/tienda/cuenta.controll
    CatalogoRepository, CarritoRepository, PedidoRepository, CuentaTiendaRepository, CheckoutRepository,
    StockTiendaRepository, VentaTiendaRepository,
    CatalogoBussnies, CarritoBussnies, PedidoBussnies, CuentaTiendaBussnies, CheckoutBussnies, PagoBussnies,
-   CulqiPasarela, PasarelaSimulada, pasarelaProvider],
+   CulqiPasarela, PasarelaSimulada, pasarelaProvider,
+   ConfiguracionRepository, ReceptorRepository, ReceptorBussnies, ConsultaDocumentoService,
+   VentaRepository, VentaBussnies,
+   CloudinaryAlmacen, BaseDatosAlmacen, DiscoAlmacen, almacenProvider],
 })
 export class AppModule {}

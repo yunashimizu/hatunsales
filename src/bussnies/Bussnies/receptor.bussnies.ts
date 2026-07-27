@@ -1,0 +1,234 @@
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { ReceptorRepository } from '../../repository/Repository/receptor.repository';
+import { ConsultaDocumentoService } from '../../util/sunat/consulta-documento.service';
+import { ReceptorResponse, SugerenciaReceptor } from '../../models/model/receptor.response';
+import { TIPO_DOC_DNI, TIPO_DOC_RUC } from '../../util/fiscal/nubefact.catalogo';
+import { Cliente } from '../../models/DBModel/cliente.entity';
+import { Empresa } from '../../models/DBModel/empresa.entity';
+
+/**
+ * Resuelve quién recibe un comprobante.
+ *
+ * El flujo es siempre el mismo: se busca el documento en la base local y solo
+ * si no está se consulta el servicio externo, guardando el resultado para que
+ * la siguiente venta a esa persona ya no dependa de internet.
+ */
+
+/** Tope que fija SUNAT para emitir boleta sin identificar al comprador. */
+export const TOPE_BOLETA_SIN_DOCUMENTO = 700;
+
+const CONSUMIDOR_FINAL: ReceptorResponse = {
+  origen: 'generico',
+  tipo: 'cliente',
+  tipo_documento: TIPO_DOC_DNI,
+  numero_documento: '00000000',
+  denominacion: 'CLIENTES VARIOS',
+  direccion: '',
+  email: '',
+  telefono: '',
+  admite_factura: false,
+};
+
+@Injectable()
+export class ReceptorBussnies {
+
+  constructor(
+    private readonly repo: ReceptorRepository,
+    private readonly consulta: ConsultaDocumentoService,
+  ) {}
+
+  consumidorFinal(): ReceptorResponse {
+    return { ...CONSUMIDOR_FINAL };
+  }
+
+  /**
+   * Busca un documento de 8 u 11 dígitos. Cuando `guardar` es verdadero, lo que
+   * venga del servicio externo queda registrado en `clientes` o en `empresas`.
+   */
+  async buscarPorDocumento(documento: string, guardar = true): Promise<ReceptorResponse> {
+    const numero = this.limpiar(documento);
+
+    if (numero.length === 8) return this.buscarPersona(numero, guardar);
+    if (numero.length === 11) return this.buscarEmpresa(numero, guardar);
+
+    throw new BadRequestException('El documento debe tener 8 dígitos si es DNI u 11 si es RUC');
+  }
+
+  async buscarPersona(dni: string, guardar = true): Promise<ReceptorResponse> {
+    const enBase = await this.repo.buscarClientePorDni(Number(dni));
+    if (enBase) return this.desdeCliente(enBase, 'base');
+
+    const datos = await this.consulta.consultarDni(dni);
+    if (!datos) throw new NotFoundException(`No se encontró ninguna persona con el DNI ${dni}`);
+
+    if (!guardar) {
+      return {
+        origen: 'externo',
+        tipo: 'cliente',
+        tipo_documento: TIPO_DOC_DNI,
+        numero_documento: dni,
+        denominacion: datos.nombre_completo,
+        direccion: '',
+        email: '',
+        telefono: '',
+        admite_factura: false,
+      };
+    }
+
+    const cliente = await this.repo.guardarCliente({
+      dni: Number(dni),
+      nombre: datos.nombres,
+      apellido_paterno: datos.apellido_paterno,
+      apellido_materno: datos.apellido_materno,
+    });
+
+    return this.desdeCliente(cliente, 'externo');
+  }
+
+  async buscarEmpresa(ruc: string, guardar = true): Promise<ReceptorResponse> {
+    const enBase = await this.repo.buscarEmpresaPorRuc(ruc);
+    if (enBase) return this.desdeEmpresa(enBase, 'base');
+
+    const datos = await this.consulta.consultarRuc(ruc);
+    if (!datos) throw new NotFoundException(`No se encontró ninguna empresa con el RUC ${ruc}`);
+
+    if (!guardar) {
+      return {
+        origen: 'externo',
+        tipo: 'empresa',
+        tipo_documento: TIPO_DOC_RUC,
+        numero_documento: ruc,
+        denominacion: datos.razon_social,
+        nombre_comercial: datos.nombre_comercial,
+        direccion: datos.direccion,
+        email: '',
+        telefono: datos.telefonos,
+        estado: datos.estado,
+        condicion: datos.condicion,
+        ...this.evaluarRuc(datos.estado, datos.condicion),
+      };
+    }
+
+    const empresa = await this.repo.guardarEmpresa({
+      ruc,
+      razon_social: datos.razon_social,
+      nombre_comercial: datos.nombre_comercial,
+      telefonos: datos.telefonos,
+      tipo: datos.tipo,
+      estado: datos.estado,
+      condicion: datos.condicion,
+      direccion: datos.direccion,
+      departamento: datos.departamento,
+      provincia: datos.provincia,
+      distrito: datos.distrito,
+      ubigeo: datos.ubigeo,
+      capital: datos.capital,
+      fecha_inscripcion: datos.fecha_inscripcion,
+      fecha_baja: datos.fecha_baja,
+    });
+
+    return this.desdeEmpresa(empresa, 'externo');
+  }
+
+  async porIdCliente(id_cliente: number): Promise<ReceptorResponse> {
+    const cliente = await this.repo.buscarClientePorId(id_cliente);
+    if (!cliente) throw new NotFoundException(`No existe el cliente ${id_cliente}`);
+    return this.desdeCliente(cliente, 'base');
+  }
+
+  async porIdEmpresa(id_empresa: number): Promise<ReceptorResponse> {
+    const empresa = await this.repo.buscarEmpresaPorId(id_empresa);
+    if (!empresa) throw new NotFoundException(`No existe la empresa ${id_empresa}`);
+    return this.desdeEmpresa(empresa, 'base');
+  }
+
+  /** Sugerencias para el autocompletado del punto de venta. */
+  async autocompletar(termino: string, limite = 8): Promise<SugerenciaReceptor[]> {
+    const texto = (termino ?? '').trim();
+    if (texto.length < 2) return [];
+
+    const [clientes, empresas] = await Promise.all([
+      this.repo.sugerirClientes(texto, limite),
+      this.repo.sugerirEmpresas(texto, limite),
+    ]);
+
+    const sugerencias: SugerenciaReceptor[] = [
+      ...empresas.map((e) => ({
+        tipo: 'empresa' as const,
+        id_empresa: e.id_empresa,
+        tipo_documento: TIPO_DOC_RUC,
+        numero_documento: e.ruc,
+        denominacion: e.razon_social ?? e.nombre_comercial ?? e.ruc,
+      })),
+      ...clientes.map((c) => ({
+        tipo: 'cliente' as const,
+        id_cliente: c.id_cliente,
+        tipo_documento: TIPO_DOC_DNI,
+        numero_documento: c.dni ? String(c.dni) : '',
+        denominacion: this.nombreCompleto(c),
+      })),
+    ];
+
+    return sugerencias.slice(0, limite);
+  }
+
+  // ── Conversión a la forma común ──────────────────────────────
+
+  private desdeCliente(cliente: Cliente, origen: 'base' | 'externo'): ReceptorResponse {
+    return {
+      origen,
+      tipo: 'cliente',
+      id_cliente: cliente.id_cliente,
+      tipo_documento: TIPO_DOC_DNI,
+      numero_documento: cliente.dni ? String(cliente.dni).padStart(8, '0') : '',
+      denominacion: this.nombreCompleto(cliente),
+      direccion: cliente.direccion ?? '',
+      email: cliente.email ?? '',
+      telefono: cliente.telefono ?? '',
+      admite_factura: false,
+    };
+  }
+
+  private desdeEmpresa(empresa: Empresa, origen: 'base' | 'externo'): ReceptorResponse {
+    return {
+      origen,
+      tipo: 'empresa',
+      id_empresa: empresa.id_empresa,
+      tipo_documento: TIPO_DOC_RUC,
+      numero_documento: empresa.ruc,
+      denominacion: empresa.razon_social ?? empresa.nombre_comercial ?? empresa.ruc,
+      nombre_comercial: empresa.nombre_comercial ?? '',
+      direccion: empresa.direccion ?? '',
+      email: '',
+      telefono: empresa.telefonos ?? '',
+      estado: empresa.estado ?? '',
+      condicion: empresa.condicion ?? '',
+      ...this.evaluarRuc(empresa.estado, empresa.condicion),
+    };
+  }
+
+  /**
+   * Un RUC de baja o no habido sigue permitiendo emitir, pero conviene avisarlo
+   * en pantalla porque suele terminar en observación por parte de SUNAT.
+   */
+  private evaluarRuc(estado?: string, condicion?: string): { admite_factura: boolean; advertencia?: string } {
+    const activo = !estado || estado.toUpperCase().includes('ACTIVO');
+    const noHabido = Boolean(condicion) && condicion!.toUpperCase().includes('NO HABIDO');
+    const habido = !noHabido;
+
+    if (!activo) return { admite_factura: true, advertencia: `El RUC figura como ${estado} en SUNAT` };
+    if (!habido) return { admite_factura: true, advertencia: `El RUC figura como ${condicion} en SUNAT` };
+    return { admite_factura: true };
+  }
+
+  private nombreCompleto(cliente: Cliente): string {
+    return [cliente.nombre, cliente.apellido_paterno, cliente.apellido_materno]
+      .filter(Boolean)
+      .join(' ')
+      .trim() || `Cliente ${cliente.id_cliente}`;
+  }
+
+  private limpiar(documento: string): string {
+    return (documento ?? '').toString().replace(/\D/g, '');
+  }
+}
