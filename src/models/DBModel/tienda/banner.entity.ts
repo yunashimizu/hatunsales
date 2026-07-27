@@ -1,30 +1,40 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn } from 'typeorm';
 
-@Entity('categorias')
-export class Categoria {
+@Entity('banners')
+export class Banner {
+
   @PrimaryGeneratedColumn()
-  id_categoria!: number;
+  id_banner!: number;
 
   @Column({ nullable: true })
-  nombre!: string;
+  titulo!: string;
 
   @Column({ nullable: true })
-  descripcion!: string;
+  subtitulo!: string;
 
   @Column({ nullable: true })
-  slug!: string;
-
-  @Column({ nullable: true })
-  icono!: string;
+  etiqueta!: string;
 
   @Column({ nullable: true })
   imagen_url!: string;
+
+  @Column({ nullable: true })
+  cta_texto!: string;
+
+  @Column({ nullable: true })
+  cta_url!: string;
 
   @Column({ nullable: true, type: 'integer', default: 0 })
   orden!: number;
 
   @Column({ nullable: true, default: true })
   activo!: boolean;
+
+  @Column({ nullable: true, type: 'date' })
+  fecha_inicio!: Date;
+
+  @Column({ nullable: true, type: 'date' })
+  fecha_fin!: Date;
 
   @CreateDateColumn()
   creado_en!: Date;

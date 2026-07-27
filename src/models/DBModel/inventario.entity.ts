@@ -1,7 +1,8 @@
 import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinColumn, CreateDateColumn } from 'typeorm';
 import { Producto } from './producto.entity';
+import { Almacen } from './almacen.entity';
 
-@Entity('inventarios')
+@Entity('inventario')
 export class Inventario {
 
   @PrimaryGeneratedColumn()
@@ -10,6 +11,10 @@ export class Inventario {
   @ManyToOne(() => Producto, { nullable: false })
   @JoinColumn({ name: 'id_producto' })
   producto!: Producto;
+
+  @ManyToOne(() => Almacen, { nullable: true })
+  @JoinColumn({ name: 'id_almacen' })
+  almacen!: Almacen;
 
   @Column({ type: 'integer', default: 0 })
   stock!: number;

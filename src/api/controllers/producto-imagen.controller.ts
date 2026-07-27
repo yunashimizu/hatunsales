@@ -10,9 +10,8 @@ import { ProductoImagenBussnies } from '../../bussnies/Bussnies/producto-imagen.
 export class ProductoImagenController {
   constructor(private readonly service: ProductoImagenBussnies) {}
 
+  // Lectura pública: la ficha de producto de la tienda necesita la galería.
   @Get(':id/images')
-  @UseGuards(JwtGuard, RolesGuard)
-  @Roles('admin', 'vendedor', 'caja')
   list(@Param('id') id: string) {
     return this.service.listByProduct(Number(id));
   }

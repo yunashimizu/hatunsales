@@ -1,11 +1,13 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';
+import { join } from 'path';
 import cookieParser from 'cookie-parser';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const allowedOrigins = (process.env.CORS_ORIGIN ?? '').split(',').map((origin) => origin.trim()).filter(Boolean);
 
   app.use(cookieParser());
@@ -14,6 +16,9 @@ async function bootstrap() {
     origin: allowedOrigins.length > 0 ? allowedOrigins : true,
   });
   app.useGlobalPipes(new ValidationPipe());
+
+  // Las imágenes de producto se guardan en disco; la tienda las consume por HTTP.
+  app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads/' });
 
   const config = new DocumentBuilder()
     .setTitle('HatunSales API')

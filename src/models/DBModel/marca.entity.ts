@@ -8,6 +8,15 @@ export class Marca {
   @Column({ nullable: true })
   nombre!: string;
 
+  @Column({ nullable: true })
+  slug!: string;
+
+  @Column({ nullable: true })
+  logo_url!: string;
+
+  @Column({ nullable: true, default: true })
+  activo!: boolean;
+
   @CreateDateColumn()
   creado_en!: Date;
 }

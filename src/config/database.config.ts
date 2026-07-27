@@ -25,6 +25,21 @@ import { Categoria } from '../models/DBModel/categoria.entity';
 import { Marca } from '../models/DBModel/marca.entity';
 import { ProductoImagen } from '../models/DBModel/producto-imagen.entity';
 import { Seccion } from '../models/DBModel/seccion.entity';
+import { Almacen } from '../models/DBModel/almacen.entity';
+import { Banner } from '../models/DBModel/tienda/banner.entity';
+import { ProductoAtributo } from '../models/DBModel/tienda/producto-atributo.entity';
+import { DireccionEnvio } from '../models/DBModel/tienda/direccion-envio.entity';
+import { MetodoEnvio } from '../models/DBModel/tienda/metodo-envio.entity';
+import { MetodoPago } from '../models/DBModel/tienda/metodo-pago.entity';
+import { Cupon } from '../models/DBModel/tienda/cupon.entity';
+import { Carrito } from '../models/DBModel/tienda/carrito.entity';
+import { CarritoItem } from '../models/DBModel/tienda/carrito-item.entity';
+import { Pedido } from '../models/DBModel/tienda/pedido.entity';
+import { PedidoItem } from '../models/DBModel/tienda/pedido-item.entity';
+import { PedidoEstado } from '../models/DBModel/tienda/pedido-estado.entity';
+import { PedidoPago } from '../models/DBModel/tienda/pedido-pago.entity';
+import { Favorito } from '../models/DBModel/tienda/favorito.entity';
+import { Resena } from '../models/DBModel/tienda/resena.entity';
 
 export const postgresConfig: TypeOrmModuleOptions = {
   name: 'pgConnection',
@@ -36,8 +51,11 @@ export const postgresConfig: TypeOrmModuleOptions = {
   database: 'railway',
   entities: [Usuario, Usuarios, VwUsuarioPermisos, Rol, Permiso, Cliente, Documento, Empresa, Proveedor,
     Producto, Inventario, GuiaRemision, GuiaRemisionItem, Proforma, ProformaItem,
-    Sucursal, StockSucursal, Categoria, Marca, ProductoImagen, Seccion,
+    Sucursal, StockSucursal, Categoria, Marca, ProductoImagen, Seccion, Almacen,
     Comprobante, ComprobanteItem, TipoComprobante, Moneda,
+    // Módulo tienda
+    Banner, ProductoAtributo, DireccionEnvio, MetodoEnvio, MetodoPago, Cupon,
+    Carrito, CarritoItem, Pedido, PedidoItem, PedidoEstado, PedidoPago, Favorito, Resena,
   ],
   synchronize: false,
 };

@@ -34,6 +34,9 @@ export class ProductoImagen {
   @Column({ nullable: true })
   descripcion!: string;
 
+  @Column({ nullable: true, type: 'integer', default: 0 })
+  orden!: number;
+
   @CreateDateColumn()
   creado_en!: Date;
 }

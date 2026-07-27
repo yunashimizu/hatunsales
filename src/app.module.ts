@@ -81,6 +81,48 @@ import { RolController } from './api/controllers/rol.controller';
 import { RolesAdminController } from './api/controllers/roles-admin.controller';
 import { StorageService } from './util/storage/storage.service';
 
+// ----------------------------------------------------------------- tienda
+import { Almacen } from './models/DBModel/almacen.entity';
+import { Banner } from './models/DBModel/tienda/banner.entity';
+import { ProductoAtributo } from './models/DBModel/tienda/producto-atributo.entity';
+import { DireccionEnvio } from './models/DBModel/tienda/direccion-envio.entity';
+import { MetodoEnvio } from './models/DBModel/tienda/metodo-envio.entity';
+import { MetodoPago } from './models/DBModel/tienda/metodo-pago.entity';
+import { Cupon } from './models/DBModel/tienda/cupon.entity';
+import { Carrito } from './models/DBModel/tienda/carrito.entity';
+import { CarritoItem } from './models/DBModel/tienda/carrito-item.entity';
+import { Pedido } from './models/DBModel/tienda/pedido.entity';
+import { PedidoItem } from './models/DBModel/tienda/pedido-item.entity';
+import { PedidoEstado } from './models/DBModel/tienda/pedido-estado.entity';
+import { PedidoPago } from './models/DBModel/tienda/pedido-pago.entity';
+import { Favorito } from './models/DBModel/tienda/favorito.entity';
+import { Resena } from './models/DBModel/tienda/resena.entity';
+
+import { CatalogoRepository } from './repository/Repository/tienda/catalogo.repository';
+import { CarritoRepository } from './repository/Repository/tienda/carrito.repository';
+import { PedidoRepository } from './repository/Repository/tienda/pedido.repository';
+import { CuentaTiendaRepository } from './repository/Repository/tienda/cuenta.repository';
+import { CheckoutRepository } from './repository/Repository/tienda/checkout.repository';
+import { StockTiendaRepository } from './repository/Repository/tienda/stock-tienda.repository';
+import { VentaTiendaRepository } from './repository/Repository/tienda/venta-tienda.repository';
+
+import { CatalogoBussnies } from './bussnies/Bussnies/tienda/catalogo.bussnies';
+import { CarritoBussnies } from './bussnies/Bussnies/tienda/carrito.bussnies';
+import { PedidoBussnies } from './bussnies/Bussnies/tienda/pedido.bussnies';
+import { CuentaTiendaBussnies } from './bussnies/Bussnies/tienda/cuenta.bussnies';
+import { CheckoutBussnies } from './bussnies/Bussnies/tienda/checkout.bussnies';
+import { PagoBussnies } from './bussnies/Bussnies/tienda/pago.bussnies';
+
+import { CulqiPasarela } from './util/pasarela/culqi.pasarela';
+import { PasarelaSimulada } from './util/pasarela/simulada.pasarela';
+import { pasarelaProvider } from './util/pasarela/pasarela.provider';
+
+import { CatalogoController } from './api/controllers/tienda/catalogo.controller';
+import { CarritoController } from './api/controllers/tienda/carrito.controller';
+import { CheckoutController, PagoWebhookController } from './api/controllers/tienda/checkout.controller';
+import { PedidoController, PedidoAdminController } from './api/controllers/tienda/pedido.controller';
+import { CuentaTiendaController } from './api/controllers/tienda/cuenta.controller';
+
 @Module({
   imports: [
     TypeOrmModule.forRoot(postgresConfig),
@@ -89,7 +131,9 @@ import { StorageService } from './util/storage/storage.service';
       [Usuario, UsuarioAuth, VwUsuarioPermisos, Cliente, Documento, Empresa, Proveedor, Rol,
         Producto, Inventario, GuiaRemision, GuiaRemisionItem, Proforma, ProformaItem,
         Sucursal, StockSucursal, Categoria, Marca, ProductoImagen, Seccion, MovimientoInventario,
-        Comprobante, ComprobanteItem, TipoComprobante, Moneda],
+        Comprobante, ComprobanteItem, TipoComprobante, Moneda,
+        Almacen, Banner, ProductoAtributo, DireccionEnvio, MetodoEnvio, MetodoPago, Cupon,
+        Carrito, CarritoItem, Pedido, PedidoItem, PedidoEstado, PedidoPago, Favorito, Resena],
       'pgConnection',
     ),
     TypeOrmModule.forFeature([Log], 'sqliteConnection'),
@@ -102,13 +146,19 @@ import { StorageService } from './util/storage/storage.service';
   controllers: [AppController, UserController, LogController, AuthController,
   loginController, AdminController, SunatController, ComprobanteController, ClienteController,
   ProductoController, InventarioController, GuiaRemisionController, ProformaController,
-  ReportesController, StockSucursalController, ProductoImagenController, CategoriaController, RolController, RolesAdminController],
+  ReportesController, StockSucursalController, ProductoImagenController, CategoriaController, RolController, RolesAdminController,
+  CatalogoController, CarritoController, CheckoutController, PagoWebhookController,
+  PedidoController, PedidoAdminController, CuentaTiendaController],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
   LogRepository, AuthBussnies, AdminBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
   InventarioRepository, InventarioBussnies, GuiaRemisionRepository, GuiaRemisionBussnies,
   ProformaRepository, ProformaBussnies, ReportesRepository, ReportesBussnies,
   SucursalRepository, CategoriaRepository, MarcaRepository, ProductoImagenRepository, StockSucursalRepository,
-   MovimientoInventarioRepository, StockSucursalBussnies, ProductoImagenBussnies, StorageService],
+   MovimientoInventarioRepository, StockSucursalBussnies, ProductoImagenBussnies, StorageService,
+   CatalogoRepository, CarritoRepository, PedidoRepository, CuentaTiendaRepository, CheckoutRepository,
+   StockTiendaRepository, VentaTiendaRepository,
+   CatalogoBussnies, CarritoBussnies, PedidoBussnies, CuentaTiendaBussnies, CheckoutBussnies, PagoBussnies,
+   CulqiPasarela, PasarelaSimulada, pasarelaProvider],
 })
 export class AppModule {}
