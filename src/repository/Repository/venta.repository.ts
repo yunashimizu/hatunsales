@@ -25,6 +25,12 @@ export interface DatosVenta {
   origen: string;
   clave_idempotencia?: string;
   observaciones?: string;
+  credito?: {
+    monto: number;
+    dias: number;
+    id_cliente?: number | null;
+    id_empresa?: number | null;
+  };
 }
 
 export interface FiltroVentas {
@@ -98,9 +104,45 @@ export class VentaRepository {
     return filas.map((f: any) => this.mapProducto(f));
   }
 
+  /**
+   * Match exacto para el lector USB (HID): primero codigo_barras, luego SKU.
+   * No usa LIKE para no agregar un producto equivocado.
+   */
   async buscarPorCodigoBarras(codigo: string): Promise<ProductoVentaResponse | null> {
-    const filas = await this.buscarProductos(codigo, 1);
-    return filas[0] ?? null;
+    const valor = codigo.trim();
+    if (!valor) return null;
+
+    const filas = await this.dataSource.query(
+      `SELECT p.id_producto,
+              p.nombre,
+              COALESCE(p.sku, '')            AS sku,
+              COALESCE(p.codigo_barras, '')  AS codigo_barras,
+              COALESCE(p.unidad_medida, '')  AS unidad_medida,
+              COALESCE(p.precio_venta, 0)    AS precio_venta,
+              COALESCE(p.descuento, 0)       AS descuento,
+              COALESCE(inv.stock, 0)         AS stock_disponible,
+              COALESCE(img.url, '')          AS imagen_url
+         FROM productos p
+         LEFT JOIN LATERAL (
+                SELECT SUM(i.stock) AS stock FROM inventario i WHERE i.id_producto = p.id_producto
+              ) inv ON TRUE
+         LEFT JOIN LATERAL (
+                SELECT pi.url FROM productos_imagenes pi
+                 WHERE pi.id_producto = p.id_producto
+                 ORDER BY pi.is_primary DESC NULLS LAST, pi.orden ASC NULLS LAST
+                 LIMIT 1
+              ) img ON TRUE
+        WHERE COALESCE(p.estado, TRUE) = TRUE
+          AND (
+                COALESCE(p.codigo_barras, '') = $1
+             OR LOWER(COALESCE(p.sku, '')) = LOWER($1)
+          )
+        ORDER BY (COALESCE(p.codigo_barras, '') = $1) DESC
+        LIMIT 1`,
+      [valor],
+    );
+
+    return filas[0] ? this.mapProducto(filas[0]) : null;
   }
 
   /** Trae los datos oficiales de los productos que se van a vender. */
@@ -164,7 +206,7 @@ export class VentaRepository {
   async registrar(
     datos: DatosVenta,
     lineas: LineaVentaPersistida[],
-    pagos: { id_metodo?: number; monto: number; referencia?: string }[],
+    pagos: { id_metodo?: number; monto: number; referencia?: string; monto_recibido?: number; vuelto?: number }[],
     opciones: { descontarStock: boolean; idAlmacenPreferido?: number },
   ): Promise<number> {
     return this.dataSource.transaction(async (manager) => {
@@ -201,8 +243,40 @@ export class VentaRepository {
       for (const pago of pagos) {
         if (!pago.monto) continue;
         await manager.query(
-          'INSERT INTO venta_pago (id_venta, id_metodo, monto) VALUES ($1, $2, $3)',
-          [idVenta, pago.id_metodo ?? null, pago.monto],
+          `INSERT INTO venta_pago
+             (id_venta, id_metodo, monto, referencia, monto_recibido, vuelto,
+              id_cuenta_bancaria, voucher_pos, validacion, referencia_externa)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [
+            idVenta,
+            pago.id_metodo ?? null,
+            pago.monto,
+            (pago as any).referencia ?? null,
+            (pago as any).monto_recibido ?? null,
+            (pago as any).vuelto ?? null,
+            (pago as any).id_cuenta_bancaria ?? null,
+            (pago as any).voucher_pos ?? null,
+            (pago as any).validacion ?? null,
+            (pago as any).referencia_externa ?? null,
+          ],
+        );
+      }
+
+      if (datos.credito && Number(datos.credito.monto) > 0) {
+        const dias = Math.max(1, Number(datos.credito.dias) || 15);
+        const vencimiento = new Date();
+        vencimiento.setDate(vencimiento.getDate() + dias);
+        await manager.query(
+          `INSERT INTO cuentas_por_cobrar
+             (id_venta, id_cliente, id_empresa, monto_total, saldo, fecha_emision, fecha_vencimiento, estado)
+           VALUES ($1, $2, $3, $4, $4, NOW(), $5::date, 'pendiente')`,
+          [
+            idVenta,
+            datos.credito.id_cliente ?? null,
+            datos.credito.id_empresa ?? null,
+            Number(datos.credito.monto),
+            vencimiento.toISOString().slice(0, 10),
+          ],
         );
       }
 
@@ -434,10 +508,13 @@ export class VentaRepository {
     });
   }
 
-  async metodosPago(): Promise<{ id_metodo: number; nombre: string }[]> {
+  async metodosPago(): Promise<{ id_metodo: number; nombre: string; tipo: string }[]> {
     try {
       return await this.dataSource.query(
-        `SELECT id_metodo, nombre FROM metodos_pago WHERE COALESCE(activo, TRUE) = TRUE ORDER BY id_metodo`,
+        `SELECT id_metodo, nombre, COALESCE(tipo, '') AS tipo
+           FROM metodos_pago
+          WHERE COALESCE(activo, TRUE) = TRUE
+          ORDER BY COALESCE(orden, id_metodo), id_metodo`,
       );
     } catch {
       return [];

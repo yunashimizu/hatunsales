@@ -80,6 +80,14 @@ import { ProductoImagenBussnies } from './bussnies/Bussnies/producto-imagen.buss
 import { CategoriaController } from './api/controllers/categoria.controller';
 import { MarcaController } from './api/controllers/marca.controller';
 import { AlmacenController } from './api/controllers/almacen.controller';
+import { CuentaPorCobrar } from './models/DBModel/cuenta-por-cobrar.entity';
+import { AbonoCredito } from './models/DBModel/abono-credito.entity';
+import { CreditoController } from './api/controllers/credito.controller';
+import { CreditoRepository } from './repository/Repository/credito.repository';
+import { CreditoBussnies } from './bussnies/Bussnies/credito.bussnies';
+import { CajaPagosController } from './api/controllers/caja-pagos.controller';
+import { CajaPagosRepository } from './repository/Repository/caja-pagos.repository';
+import { CajaPagosBussnies } from './bussnies/Bussnies/caja-pagos.bussnies';
 import { RolController } from './api/controllers/rol.controller';
 import { RolesAdminController } from './api/controllers/roles-admin.controller';
 import { StorageService } from './util/storage/storage.service';
@@ -150,7 +158,8 @@ import { ArchivoController } from './api/controllers/archivo.controller';
         Sucursal, StockSucursal, Categoria, Marca, ProductoImagen, Seccion, MovimientoInventario,
         Comprobante, ComprobanteItem, TipoComprobante, Moneda,
         Almacen, Banner, ProductoAtributo, DireccionEnvio, MetodoEnvio, MetodoPago, Cupon,
-        Carrito, CarritoItem, Pedido, PedidoItem, PedidoEstado, PedidoPago, Favorito, Resena],
+        Carrito, CarritoItem, Pedido, PedidoItem, PedidoEstado, PedidoPago, Favorito, Resena,
+        CuentaPorCobrar, AbonoCredito],
       'pgConnection',
     ),
     TypeOrmModule.forFeature([Log], 'sqliteConnection'),
@@ -166,7 +175,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
   ReportesController, StockSucursalController, ProductoImagenController, CategoriaController, MarcaController, AlmacenController, RolController, RolesAdminController,
   CatalogoController, CarritoController, CheckoutController, PagoWebhookController,
   PedidoController, PedidoAdminController, CuentaTiendaController,
-  ReceptorController, VentaController, ArchivoController],
+  ReceptorController, VentaController, ArchivoController, CreditoController, CajaPagosController],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
   LogRepository, AuthBussnies, AdminBussnies, RolBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
@@ -179,7 +188,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
    CatalogoBussnies, CarritoBussnies, PedidoBussnies, CuentaTiendaBussnies, CheckoutBussnies, PagoBussnies,
    CulqiPasarela, PasarelaSimulada, pasarelaProvider,
    ConfiguracionRepository, ReceptorRepository, ReceptorBussnies, ConsultaDocumentoService,
-   VentaRepository, VentaBussnies,
+   VentaRepository, VentaBussnies, CreditoRepository, CreditoBussnies, CajaPagosRepository, CajaPagosBussnies,
    CloudinaryAlmacen, BaseDatosAlmacen, DiscoAlmacen, almacenProvider],
 })
 export class AppModule {}

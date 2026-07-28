@@ -1,12 +1,15 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { VentaRepository, FiltroVentas, LineaVentaPersistida } from '../../repository/Repository/venta.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
+import { CreditoRepository } from '../../repository/Repository/credito.repository';
 import { ComprobanteBussnies } from './comprobante.bussnies';
 import { ReceptorBussnies } from './receptor.bussnies';
+import { CreditoBussnies } from './credito.bussnies';
 import { CrearVentaRequest, ItemVentaRequest } from '../../models/model/venta/venta.request';
 import { VentaResponse } from '../../models/model/venta/venta.response';
 import { GenerarComprobanteRequest } from '../../models/model/c-electronico/comprobante.request';
 import { PreviewComprobanteResponse } from '../../models/model/c-electronico/comprobante.response';
+import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import {
   calcularComprobante,
   PORCENTAJE_IGV_POR_DEFECTO,
@@ -30,6 +33,8 @@ export class VentaBussnies {
     private readonly config: ConfiguracionRepository,
     private readonly comprobantes: ComprobanteBussnies,
     private readonly receptor: ReceptorBussnies,
+    private readonly creditoRepo: CreditoRepository,
+    private readonly credito: CreditoBussnies,
   ) {}
 
   // ── Apoyo al mostrador ───────────────────────────────────────
@@ -44,8 +49,9 @@ export class VentaBussnies {
     return producto;
   }
 
-  metodosPago() {
-    return this.repo.metodosPago();
+  async metodosPago() {
+    await this.creditoRepo.asegurarSchema();
+    return this.creditoRepo.metodosConTipo();
   }
 
   /** Vista previa del comprobante desde el carrito del mostrador. */
@@ -56,22 +62,19 @@ export class VentaBussnies {
 
   // ── Registrar ────────────────────────────────────────────────
 
-  async registrar(dto: CrearVentaRequest, idUsuario?: number): Promise<VentaResponse> {
+  async registrar(dto: CrearVentaRequest, usuario?: UsuarioToken): Promise<VentaResponse> {
     if (!Array.isArray(dto.items) || dto.items.length === 0) {
       throw new BadRequestException('Agregue al menos un producto a la venta');
     }
 
-    // Un doble clic o un reintento por conexión lenta devuelve la venta anterior
-    // en vez de duplicarla.
     if (dto.clave_idempotencia) {
       const existente = await this.repo.buscarPorClaveIdempotencia(dto.clave_idempotencia);
       if (existente) return this.obtener(existente);
     }
 
     const { items, resumen } = await this.armarLineas(dto);
-
     const receptor = await this.resolverReceptor(dto);
-    const pagos = this.validarPagos(dto, resumen.total);
+    const { pagos, credito } = await this.validarPagosYCredito(dto, resumen.total, receptor, usuario);
 
     const lineas: LineaVentaPersistida[] = items.map((item, indice) => {
       const linea = resumen.lineas[indice];
@@ -95,7 +98,7 @@ export class VentaBussnies {
         {
           id_cliente: receptor.id_cliente,
           id_caja: dto.id_caja,
-          id_usuario: idUsuario,
+          id_usuario: usuario?.id_usuario,
           subtotal: resumen.total_gravada + resumen.total_exonerada + resumen.total_inafecta,
           igv: resumen.total_igv,
           descuento: resumen.total_descuento,
@@ -103,6 +106,7 @@ export class VentaBussnies {
           origen: 'mostrador',
           clave_idempotencia: dto.clave_idempotencia,
           observaciones: dto.observaciones,
+          credito,
         },
         lineas,
         pagos,
@@ -119,16 +123,17 @@ export class VentaBussnies {
 
     if (dto.emitir_comprobante === false) return venta;
 
-    // Desde aquí la venta ya existe. Si el comprobante falla se informa, pero
-    // no se revierte nada.
     try {
+      const medio = await this.nombreMedioPago(pagos);
       venta.comprobante = await this.comprobantes.generar({
         ...this.aSolicitudComprobante(dto, items),
         id_venta: idVenta,
         id_cliente: receptor.id_cliente,
         id_empresa: receptor.id_empresa,
         documento: receptor.numero_documento,
-      });
+        medio_de_pago: medio,
+        condiciones_de_pago: credito ? 'Crédito' : 'Contado',
+      } as any);
     } catch (error: any) {
       const mensaje = error?.response?.message ?? error?.message ?? 'No se pudo emitir el comprobante';
       this.logger.warn(`Venta ${idVenta} registrada sin comprobante: ${mensaje}`);
@@ -303,11 +308,19 @@ export class VentaBussnies {
     return this.receptor.consumidorFinal();
   }
 
-  private validarPagos(dto: CrearVentaRequest, total: number) {
-    const pagos = (dto.pagos ?? []).filter((p) => Number(p.monto) > 0);
+  private async validarPagosYCredito(
+    dto: CrearVentaRequest,
+    total: number,
+    receptor: { id_cliente?: number; id_empresa?: number; numero_documento?: string },
+    usuario?: UsuarioToken,
+  ) {
+    await this.creditoRepo.asegurarSchema();
+    const metodos = await this.creditoRepo.metodosConTipo();
+    const mapaTipo = new Map(metodos.map((m) => [Number(m.id_metodo), String(m.tipo || '').toLowerCase()]));
+    const idCredito = await this.creditoRepo.idMetodoCredito();
 
-    // Sin desglose se asume un único pago por el total, que es el caso común.
-    if (!pagos.length) return [{ monto: total }];
+    let pagos = (dto.pagos ?? []).filter((p) => Number(p.monto) > 0);
+    if (!pagos.length) pagos = [{ monto: total }];
 
     const suma = redondear(pagos.reduce((acumulado, p) => acumulado + Number(p.monto), 0));
     if (Math.abs(suma - total) > 0.05) {
@@ -316,7 +329,149 @@ export class VentaBussnies {
       );
     }
 
-    return pagos.map((p) => ({ id_metodo: p.id_metodo, monto: Number(p.monto), referencia: p.referencia }));
+    const montoCredito = redondear(
+      pagos
+        .filter((p) => {
+          const tipo = mapaTipo.get(Number(p.id_metodo)) ?? '';
+          return tipo === 'credito' || (idCredito && Number(p.id_metodo) === idCredito);
+        })
+        .reduce((a, p) => a + Number(p.monto), 0),
+    );
+
+    let credito: {
+      monto: number;
+      dias: number;
+      id_cliente?: number | null;
+      id_empresa?: number | null;
+    } | undefined;
+
+    if (montoCredito > 0) {
+      this.credito.assertPuedeDarCredito(usuario);
+
+      const doc = String(receptor.numero_documento ?? '');
+      if (doc === '00000000' || (!receptor.id_cliente && !receptor.id_empresa)) {
+        throw new BadRequestException(
+          'El crédito solo aplica a clientes o empresas registradas. Busque DNI/RUC antes de cobrar.',
+        );
+      }
+
+      const linea = receptor.id_empresa
+        ? await this.creditoRepo.lineaEmpresa(Number(receptor.id_empresa))
+        : await this.creditoRepo.lineaCliente(Number(receptor.id_cliente));
+
+      if (!linea?.credito_activo) {
+        throw new BadRequestException(
+          'Este cliente/empresa no tiene crédito activo. Actívelo en Cuentas por cobrar (límite y días).',
+        );
+      }
+      if (montoCredito > linea.disponible + 0.05) {
+        throw new BadRequestException(
+          `Crédito insuficiente. Disponible S/ ${linea.disponible.toFixed(2)} (límite ${linea.limite_credito.toFixed(2)}, deuda ${linea.saldo_pendiente.toFixed(2)}).`,
+        );
+      }
+
+      credito = {
+        monto: montoCredito,
+        dias: linea.dias_credito || 15,
+        id_cliente: receptor.id_cliente ?? null,
+        id_empresa: receptor.id_empresa ?? null,
+      };
+    }
+
+    const mapaNombre = new Map(
+      metodos.map((m) => [Number(m.id_metodo), String(m.nombre || '').toLowerCase()]),
+    );
+
+    for (const p of pagos) {
+      const tipo = mapaTipo.get(Number(p.id_metodo)) ?? '';
+      const nombre = mapaNombre.get(Number(p.id_metodo)) ?? '';
+      const esYape = tipo === 'billetera' && nombre.includes('yape');
+      const esPlin = tipo === 'billetera' && nombre.includes('plin');
+      const esTransfer = tipo === 'transferencia' || nombre.includes('transfer');
+      const esTarjeta = tipo === 'tarjeta' || nombre.includes('tarjeta');
+
+      if (esTransfer) {
+        if (!p.id_cuenta_bancaria) {
+          throw new BadRequestException('Transferencia: elige la cuenta bancaria destino');
+        }
+        if (!String(p.referencia ?? '').trim()) {
+          throw new BadRequestException('Transferencia: indica el N° de operación');
+        }
+        p.validacion = p.validacion || 'manual';
+      }
+
+      if (esYape) {
+        const ext = String(p.referencia_externa ?? '').trim();
+        const ref = String(p.referencia ?? '').trim();
+        if (p.validacion === 'culqi' && ext) {
+          // Cobro verificado por orden Culqi
+          p.referencia = p.referencia || ext;
+        } else if (!ref) {
+          throw new BadRequestException(
+            'Yape: verifica el cobro con Culqi o indica el N° de operación manual',
+          );
+        } else {
+          p.validacion = p.validacion || 'manual';
+        }
+      }
+
+      if (esPlin && !String(p.referencia ?? '').trim()) {
+        throw new BadRequestException('Plin: indica el N° de operación');
+      }
+
+      if (esTarjeta) {
+        const voucher = String(p.voucher_pos ?? p.referencia ?? '').trim();
+        if (!voucher) {
+          throw new BadRequestException(
+            'Tarjeta: registra el N° de voucher del POS físico',
+          );
+        }
+        p.voucher_pos = p.voucher_pos || voucher;
+        p.referencia = p.referencia || voucher;
+        p.validacion = 'pos_fisico';
+      }
+    }
+
+    return {
+      pagos: pagos.map((p) => ({
+        id_metodo: p.id_metodo,
+        monto: Number(p.monto),
+        referencia: p.referencia,
+        monto_recibido: p.monto_recibido,
+        vuelto: p.vuelto,
+        id_cuenta_bancaria: p.id_cuenta_bancaria,
+        voucher_pos: p.voucher_pos,
+        validacion: p.validacion,
+        referencia_externa: p.referencia_externa,
+      })),
+      credito,
+    };
+  }
+
+  private async nombreMedioPago(pagos: { id_metodo?: number }[]) {
+    const metodos = await this.creditoRepo.metodosConTipo();
+    const nombres = pagos
+      .map((p) => metodos.find((m) => Number(m.id_metodo) === Number(p.id_metodo))?.nombre)
+      .filter(Boolean);
+    return nombres.join(' + ') || '';
+  }
+
+  private validarPagos(dto: CrearVentaRequest, total: number) {
+    const pagos = (dto.pagos ?? []).filter((p) => Number(p.monto) > 0);
+    if (!pagos.length) return [{ monto: total }];
+    const suma = redondear(pagos.reduce((acumulado, p) => acumulado + Number(p.monto), 0));
+    if (Math.abs(suma - total) > 0.05) {
+      throw new BadRequestException(
+        `Los pagos suman S/ ${suma.toFixed(2)} y el total es S/ ${total.toFixed(2)}`,
+      );
+    }
+    return pagos.map((p) => ({
+      id_metodo: p.id_metodo,
+      monto: Number(p.monto),
+      referencia: p.referencia,
+      monto_recibido: p.monto_recibido,
+      vuelto: p.vuelto,
+    }));
   }
 
   private async almacenPorDefecto(): Promise<number | undefined> {

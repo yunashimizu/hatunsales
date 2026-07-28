@@ -38,7 +38,7 @@ export class VentaController {
 
   @Post()
   registrar(@Body() body: CrearVentaRequest, @UsuarioActual() usuario: UsuarioToken) {
-    return this.service.registrar(body, usuario?.id_usuario);
+    return this.service.registrar(body, usuario);
   }
 
   @Get()

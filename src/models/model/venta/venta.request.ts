@@ -46,6 +46,38 @@ export class PagoVentaRequest {
   @IsOptional()
   @MaxLength(120)
   referencia?: string;
+
+  /** Solo efectivo: billete con el que paga el cliente. */
+  @IsNumber()
+  @IsOptional()
+  monto_recibido?: number;
+
+  @IsNumber()
+  @IsOptional()
+  vuelto?: number;
+
+  /** Cuenta destino (transferencia / depósito). */
+  @IsInt()
+  @IsOptional()
+  id_cuenta_bancaria?: number;
+
+  /** Voucher del POS físico (tarjeta). */
+  @IsString()
+  @IsOptional()
+  @MaxLength(80)
+  voucher_pos?: string;
+
+  /** manual | culqi | pos_fisico */
+  @IsString()
+  @IsOptional()
+  @MaxLength(40)
+  validacion?: string;
+
+  /** order_id Culqi u otra referencia externa verificada. */
+  @IsString()
+  @IsOptional()
+  @MaxLength(120)
+  referencia_externa?: string;
 }
 
 export class CrearVentaRequest {
