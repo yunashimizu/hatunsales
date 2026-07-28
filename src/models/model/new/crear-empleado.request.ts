@@ -1,4 +1,4 @@
-import { IsString, IsEmail, IsInt, IsOptional, IsBoolean, MinLength, Min, Max } from 'class-validator';
+import { IsString, IsEmail, IsInt, IsOptional, IsBoolean, MinLength, Min } from 'class-validator';
 
 export class CrearEmpleadoRequest {
 
@@ -12,9 +12,9 @@ export class CrearEmpleadoRequest {
   @MinLength(6)
   password!: string;
 
+  /** Cualquier rol existente en la tabla `roles`, excepto cliente. */
   @IsInt()
   @Min(1)
-  @Max(4)
   id_rol!: number;
 
   @IsBoolean()

@@ -1,4 +1,15 @@
-import { Body, Controller, Get, Param, Post, Put, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  ConflictException,
+  Controller,
+  Get,
+  InternalServerErrorException,
+  Param,
+  Post,
+  Put,
+  UseGuards,
+} from '@nestjs/common';
 import { JwtGuard } from 'src/guards/jwt.guard';
 import { RolesGuard } from 'src/guards/roles.guard';
 import { Roles } from 'src/guards/roles.decorator';
@@ -30,50 +41,125 @@ export class RolesAdminController {
   async listarUsuarios() {
     const usuarios = await this.usuarioRepo.find({
       relations: ['rol'],
-      order: { id_usuario: 'ASC' },
+      order: { id_usuario: 'DESC' },
     });
 
     return usuarios.map((usuario) => ({
       id_usuario: usuario.id_usuario,
       nombre: usuario.nombre,
       email: usuario.email,
+      id_rol: usuario.rol?.id_rol ?? null,
       rol: usuario.rol?.nombre ?? 'sin rol',
       estado: usuario.estado,
     }));
   }
 
   @Post('usuarios')
-  async crearUsuario(@Body() body: { nombre: string; email: string; password: string; id_rol: number }) {
-    if (Number(body.id_rol) === 5) {
-      return { success: false, message: 'Para clientes use el registro de la tienda' };
+  async crearUsuario(
+    @Body() body: { nombre?: string; email?: string; password?: string; id_rol?: number },
+  ) {
+    const nombre = (body?.nombre ?? '').trim();
+    const email = (body?.email ?? '').trim().toLowerCase();
+    const password = body?.password ?? '';
+    const idRol = Number(body?.id_rol);
+
+    if (!nombre || !email || !password) {
+      throw new BadRequestException('Nombre, correo y contraseña son obligatorios');
+    }
+    if (!Number.isFinite(idRol) || idRol <= 0) {
+      throw new BadRequestException('Seleccione un rol válido');
+    }
+    if (idRol === 5) {
+      throw new BadRequestException('Para clientes use el registro de la tienda');
     }
 
-    const existe = await this.usuarioRepo.findOne({ where: { email: body.email } });
-    if (existe) return { success: false, message: 'El email ya está registrado' };
+    const existe = await this.usuarioRepo.findOne({ where: { email } });
+    if (existe) throw new ConflictException('El email ya está registrado');
 
-    const hashedPassword = await HashUtil.hashPassword(body.password);
-    const rol = await this.rolRepo.findOne({ where: { id_rol: body.id_rol } });
+    const rol = await this.rolRepo.findOne({ where: { id_rol: idRol } });
+    if (!rol) throw new BadRequestException(`El rol #${idRol} no existe`);
 
-    const creado = await this.usuarioRepo.save(this.usuarioRepo.create({
-      nombre: body.nombre,
-      email: body.email,
-      password: hashedPassword,
-      estado: true,
-      rol: rol ? ({ id_rol: rol.id_rol } as Rol) : ({ id_rol: body.id_rol } as Rol),
-    }));
+    try {
+      const hashedPassword = await HashUtil.hashPassword(password);
 
-    return { success: true, id_usuario: creado.id_usuario, rol: rol?.nombre ?? body.id_rol };
+      // Insert por SQL parametrizado: evita fallos de TypeORM con la relación parcial.
+      const filas: Array<{ id_usuario: number }> = await this.usuarioRepo.query(
+        `INSERT INTO usuarios (nombre, email, password, estado, id_rol)
+         VALUES ($1, $2, $3, true, $4)
+         RETURNING id_usuario`,
+        [nombre, email, hashedPassword, rol.id_rol],
+      );
+
+      const idUsuario = Number(filas?.[0]?.id_usuario);
+      if (!idUsuario) {
+        throw new InternalServerErrorException('No se obtuvo el id del usuario creado');
+      }
+
+      return {
+        success: true,
+        id_usuario: idUsuario,
+        rol: rol.nombre,
+      };
+    } catch (error: any) {
+      if (error instanceof BadRequestException || error instanceof ConflictException) {
+        throw error;
+      }
+      const code = error?.code ?? error?.driverError?.code;
+      if (code === '23505') {
+        throw new ConflictException('El email ya está registrado');
+      }
+      if (code === '23503') {
+        throw new BadRequestException('Rol inválido para este usuario');
+      }
+
+      // Fallback al save de TypeORM (mismo patrón que auth/register).
+      try {
+        const hashedPassword = await HashUtil.hashPassword(password);
+        const creado = await this.usuarioRepo.save(
+          this.usuarioRepo.create({
+            nombre,
+            email,
+            password: hashedPassword,
+            estado: true,
+            rol: { id_rol: rol.id_rol } as Rol,
+          }),
+        );
+        return { success: true, id_usuario: creado.id_usuario, rol: rol.nombre };
+      } catch (fallbackError: any) {
+        const msg =
+          fallbackError?.driverError?.detail ||
+          fallbackError?.message ||
+          error?.message ||
+          'Error al crear usuario';
+        throw new InternalServerErrorException(msg);
+      }
+    }
   }
 
   @Put('usuarios/:id/rol')
   async cambiarRol(@Param('id') id: string, @Body() body: { id_rol: number }) {
-    const usuario = await this.usuarioRepo.findOne({ where: { id_usuario: Number(id) }, relations: ['rol'] });
-    if (!usuario) return { success: false, message: 'Usuario no encontrado' };
+    const idUsuario = Number(id);
+    const idRol = Number(body?.id_rol);
 
-    const rol = await this.rolRepo.findOne({ where: { id_rol: body.id_rol } });
-    if (!rol) return { success: false, message: 'Rol no encontrado' };
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id_usuario: idUsuario },
+      relations: ['rol'],
+    });
+    if (!usuario) throw new BadRequestException('Usuario no encontrado');
 
-    await this.usuarioRepo.update(Number(id), { rol: { id_rol: rol.id_rol } as Rol });
-    return { success: true, id_usuario: Number(id), rol: rol.nombre };
+    const rol = await this.rolRepo.findOne({ where: { id_rol: idRol } });
+    if (!rol) throw new BadRequestException('Rol no encontrado');
+    if (idRol === 5) {
+      throw new BadRequestException('No asigne rol cliente desde el panel de usuarios');
+    }
+
+    await this.usuarioRepo
+      .createQueryBuilder()
+      .update(Usuarios)
+      .set({ rol: { id_rol: rol.id_rol } as Rol })
+      .where('id_usuario = :id', { id: idUsuario })
+      .execute();
+
+    return { success: true, id_usuario: idUsuario, rol: rol.nombre };
   }
 }

@@ -78,6 +78,8 @@ import { ClienteBussnies } from './bussnies/Bussnies/cliente.bussnies';
 import { ClienteRepository } from './repository/Repository/cliente.repository';
 import { ProductoImagenBussnies } from './bussnies/Bussnies/producto-imagen.bussnies';
 import { CategoriaController } from './api/controllers/categoria.controller';
+import { MarcaController } from './api/controllers/marca.controller';
+import { AlmacenController } from './api/controllers/almacen.controller';
 import { RolController } from './api/controllers/rol.controller';
 import { RolesAdminController } from './api/controllers/roles-admin.controller';
 import { StorageService } from './util/storage/storage.service';
@@ -161,7 +163,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
   controllers: [AppController, UserController, LogController, AuthController,
   loginController, AdminController, SunatController, ComprobanteController, ClienteController,
   ProductoController, InventarioController, GuiaRemisionController, ProformaController,
-  ReportesController, StockSucursalController, ProductoImagenController, CategoriaController, RolController, RolesAdminController,
+  ReportesController, StockSucursalController, ProductoImagenController, CategoriaController, MarcaController, AlmacenController, RolController, RolesAdminController,
   CatalogoController, CarritoController, CheckoutController, PagoWebhookController,
   PedidoController, PedidoAdminController, CuentaTiendaController,
   ReceptorController, VentaController, ArchivoController],

@@ -4,6 +4,7 @@ import { RolesGuard } from 'src/guards/roles.guard';
 import { Roles } from 'src/guards/roles.decorator';
 import { AdminBussnies } from 'src/bussnies/Bussnies/admin.bussnies';
 import { CrearEmpleadoRequest } from 'src/models/model/new/crear-empleado.request';
+import { ActualizarEmpleadoRequest } from 'src/models/model/new/actualizar-empleado.request';
 import { CambiarRolRequest } from 'src/models/model/new/cambiar-rol.request';
 import { EliminarUsuarioRequest } from 'src/models/model/new/eliminar-usuario.request';
 import { ApiBearerAuth } from '@nestjs/swagger/dist/decorators/api-bearer.decorator';
@@ -28,6 +29,11 @@ export class AdminController {
   @Post('crear-empleado')
   crearEmpleado(@Body() body: CrearEmpleadoRequest) {
     return this.adminService.crearEmpleado(body);
+  }
+
+  @Put('actualizar-empleado')
+  actualizarEmpleado(@Body() body: ActualizarEmpleadoRequest) {
+    return this.adminService.actualizarEmpleado(body);
   }
 
   @Put('cambiar-rol')

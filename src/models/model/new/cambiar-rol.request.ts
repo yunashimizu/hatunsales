@@ -1,4 +1,4 @@
-import { IsInt, IsOptional, IsEmail, Min, Max } from 'class-validator';
+import { IsInt, IsOptional, IsEmail, Min } from 'class-validator';
 
 export class CambiarRolRequest {
 
@@ -10,8 +10,8 @@ export class CambiarRolRequest {
   @IsOptional()
   email?: string;
 
+  /** Cualquier rol existente en la tabla `roles`, excepto cliente. */
   @IsInt()
   @Min(1)
-  @Max(4)
   id_rol!: number;
 }

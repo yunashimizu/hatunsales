@@ -38,6 +38,7 @@ export class ReportesController {
 
   @Get('ventas/excel')
   @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin', 'vendedor', 'caja')
   ventasExcel(
     @Res() res: Response,
     @Query('periodo') periodo = 'diario',
@@ -57,6 +58,7 @@ export class ReportesController {
 
   @Get('ventas/pdf')
   @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin', 'vendedor', 'caja')
   ventasPdf(
     @Res() res: Response,
     @Query('periodo') periodo = 'diario',

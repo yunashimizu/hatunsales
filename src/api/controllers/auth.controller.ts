@@ -2,7 +2,7 @@ import { Controller, Post, Get, Put, Body, Res, Req, UseGuards } from '@nestjs/c
 import type { Response, Request } from 'express';
 import { AuthBussnies } from 'src/bussnies/Bussnies/auth.bussnies';
 import { JwtGuard } from 'src/guards/jwt.guard';
-import { LoginRequest, RegisterRequest } from 'src/models/model/login-request';
+import { LoginRequest, RegisterRequest, GoogleAuthRequest } from 'src/models/model/login-request';
 import { ActualizarPerfilRequest } from 'src/models/model/actualizar-perfil.request';
 
 @Controller('auth')
@@ -18,9 +18,25 @@ export class AuthController {
     return this.authService.login(body, res);
   }
 
+  /** Solo clientes de tienda. Empleados se crean en el admin. */
   @Post('register')
   register(@Body() body: RegisterRequest) {
     return this.authService.register(body);
+  }
+
+  /** Client ID público para el botón de Google Identity Services. */
+  @Get('google/config')
+  googleConfig() {
+    return this.authService.googleClientId();
+  }
+
+  /** Login o alta automática de cliente con credential de Google. */
+  @Post('google')
+  loginGoogle(
+    @Body() body: GoogleAuthRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.authService.loginConGoogle(body.credential, res);
   }
 
   @Post('logout')
