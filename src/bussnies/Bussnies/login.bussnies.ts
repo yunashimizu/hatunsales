@@ -55,11 +55,7 @@ export class AuthBussnies {
       expiresIn: expiresIn as any,  // ← agregar "as any" aquí
     });
 
-    res.cookie('access_token', token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      maxAge: TokenUtil.getCookieMaxAge(rol),
-    });
+    res.cookie('access_token', token, TokenUtil.cookieOptions(rol));
 
     return {
       id_usuario: usuario.id_usuario,

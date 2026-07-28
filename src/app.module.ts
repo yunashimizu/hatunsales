@@ -165,7 +165,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
     TypeOrmModule.forFeature([Log], 'sqliteConnection'),
     JwtModule.register({
       secret: jwtConfig.secret,
-      signOptions: { expiresIn: '1h' },
+      signOptions: { expiresIn: '12h' },
       global: true,
     }),
   ],
