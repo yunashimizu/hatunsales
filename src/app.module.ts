@@ -20,6 +20,7 @@ import { jwtConfig } from './config/jwt.config';
 import { loginController } from './api/controllers/login.controller';
 import { AdminController } from './api/controllers/admin.controller';
 import { AdminBussnies } from './bussnies/Bussnies/admin.bussnies';
+import { RolBussnies } from './bussnies/Bussnies/rol.bussnies';
 import { SunatRepository } from './repository/Repository/sunat.repository';
 import { SunatBussnies } from './bussnies/Bussnies/sunat.bussnies';
 import { SunatController } from './api/controllers/sunat.controller';
@@ -165,7 +166,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
   PedidoController, PedidoAdminController, CuentaTiendaController,
   ReceptorController, VentaController, ArchivoController],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
-  LogRepository, AuthBussnies, AdminBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
+  LogRepository, AuthBussnies, AdminBussnies, RolBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
   InventarioRepository, InventarioBussnies, GuiaRemisionRepository, GuiaRemisionBussnies,
   ProformaRepository, ProformaBussnies, ReportesRepository, ReportesBussnies,

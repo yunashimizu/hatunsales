@@ -1,27 +1,38 @@
-import { Controller, Get, Param, UseGuards } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Controller, Get, Post, Put, Delete, Body, Param, UseGuards } from '@nestjs/common';
 import { JwtGuard } from 'src/guards/jwt.guard';
 import { RolesGuard } from 'src/guards/roles.guard';
 import { Roles } from 'src/guards/roles.decorator';
-import { Rol } from 'src/models/DBModel/role.entity';
+import { RolBussnies } from 'src/bussnies/Bussnies/rol.bussnies';
+import { ActualizarRolRequest, CrearRolRequest } from 'src/models/model/rol.request';
 
 @UseGuards(JwtGuard, RolesGuard)
 @Roles('admin')
 @Controller('rol')
 export class RolController {
-  constructor(
-    @InjectRepository(Rol, 'pgConnection')
-    private readonly rolRepo: Repository<Rol>,
-  ) {}
+  constructor(private readonly service: RolBussnies) {}
 
   @Get()
-  getAll() {
-    return this.rolRepo.find({ order: { id_rol: 'ASC' } });
+  listar() {
+    return this.service.listar();
   }
 
   @Get(':id')
-  getById(@Param('id') id: string) {
-    return this.rolRepo.findOne({ where: { id_rol: Number(id) } });
+  obtener(@Param('id') id: string) {
+    return this.service.obtener(Number(id));
+  }
+
+  @Post()
+  crear(@Body() body: CrearRolRequest) {
+    return this.service.crear(body);
+  }
+
+  @Put(':id')
+  actualizar(@Param('id') id: string, @Body() body: ActualizarRolRequest) {
+    return this.service.actualizar(Number(id), body);
+  }
+
+  @Delete(':id')
+  eliminar(@Param('id') id: string) {
+    return this.service.eliminar(Number(id));
   }
 }

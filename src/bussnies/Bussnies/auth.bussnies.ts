@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, ConflictException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, ConflictException, NotFoundException, BadRequestException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -10,6 +10,9 @@ import { TokenUtil } from '../../util/jwt/token.util';
 import { jwtConfig } from '../../config/jwt.config';
 import { VwUsuarioPermisos } from 'src/models/DBModel/vw-usuario-permisos.entity';
 import { LoginRequest, RegisterRequest } from 'src/models/model/login-request';
+import { ActualizarPerfilRequest } from 'src/models/model/actualizar-perfil.request';
+import { RolBussnies } from './rol.bussnies';
+import { ROL_IDS } from '../../config/roles.config';
 
 interface JwtPayload {
   sub: number;
@@ -33,6 +36,7 @@ export class AuthBussnies {
     private readonly clienteRepo: Repository<Cliente>,
 
     private readonly jwtService: JwtService,
+    private readonly rolService: RolBussnies,
   ) {}
 
   private normalizeRoleName(role?: string): string {
@@ -49,6 +53,7 @@ export class AuthBussnies {
       empleado: 'vendedor',
       empleados: 'vendedor',
       cliente: 'cliente',
+      usuario: 'usuario',
     };
 
     return aliases[normalized] ?? normalized;
@@ -118,16 +123,15 @@ export class AuthBussnies {
     const hashedPassword = await HashUtil.hashPassword(dto.password);
     const normalizedEmail = dto.email.trim().toLowerCase();
 
-    const rolCliente = await this.usuarioRepo.manager.findOne(Rol, {
-      where: { nombre: 'cliente' },
-    });
+    // Clientes de tienda → siempre rol id 5 (cliente).
+    const rolCliente = await this.rolService.asegurarRolCliente();
 
     const nuevoUsuario = this.usuarioRepo.create({
       nombre: dto.nombre,
       email: normalizedEmail,
       password: hashedPassword,
       estado: true,
-      rol: rolCliente ? ({ id_rol: rolCliente.id_rol } as Rol) : ({ id_rol: 4 } as Rol),
+      rol: { id_rol: rolCliente.id_rol || ROL_IDS.CLIENTE } as Rol,
     });
 
     const guardado = await this.usuarioRepo.save(nuevoUsuario);
@@ -152,5 +156,110 @@ export class AuthBussnies {
   async logout(res: any): Promise<any> {
     res.clearCookie('access_token');
     return { message: 'Sesión cerrada correctamente' };
+  }
+
+  /** Perfil del usuario autenticado (desde BD, no solo el JWT). */
+  async obtenerPerfil(idUsuario: number) {
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id_usuario: idUsuario, estado: true },
+      relations: ['rol'],
+    });
+    if (!usuario) throw new NotFoundException('Usuario no encontrado');
+
+    const filas = await this.vwRepo.find({ where: { id_usuario: idUsuario } });
+    const permisos = filas.map((f) => f.permiso);
+    const rol = this.normalizeRoleName(usuario.rol?.nombre ?? 'cliente');
+
+    return {
+      id_usuario: usuario.id_usuario,
+      nombre: usuario.nombre,
+      email: usuario.email,
+      rol: { idRol: usuario.rol?.id_rol ?? null, nombre: rol },
+      permisos,
+    };
+  }
+
+  /**
+   * Actualiza nombre/email/contraseña del usuario logueado.
+   * Devuelve un token nuevo para que el front refresque la sesión.
+   */
+  async actualizarPerfil(idUsuario: number, dto: ActualizarPerfilRequest, res: any) {
+    const usuario = await this.usuarioRepo.findOne({
+      where: { id_usuario: idUsuario, estado: true },
+      relations: ['rol'],
+    });
+    if (!usuario) throw new NotFoundException('Usuario no encontrado');
+
+    if (dto.nombre?.trim()) {
+      usuario.nombre = dto.nombre.trim();
+    }
+
+    if (dto.email?.trim()) {
+      const email = dto.email.trim().toLowerCase();
+      if (email !== usuario.email?.toLowerCase()) {
+        const existe = await this.usuarioRepo.findOne({ where: { email } });
+        if (existe && existe.id_usuario !== idUsuario) {
+          throw new ConflictException('Ese correo ya está en uso');
+        }
+        usuario.email = email;
+      }
+    }
+
+    if (dto.password_nueva) {
+      if (!dto.password_actual) {
+        throw new BadRequestException('Indique la contraseña actual para cambiarla');
+      }
+      const ok = await HashUtil.comparePassword(dto.password_actual, usuario.password);
+      if (!ok) throw new UnauthorizedException('La contraseña actual no es correcta');
+      usuario.password = await HashUtil.hashPassword(dto.password_nueva);
+    }
+
+    await this.usuarioRepo.save(usuario);
+
+    // Si el usuario también es cliente de tienda, alinear nombre/email.
+    const cliente = await this.clienteRepo.findOne({
+      where: { usuario: { id_usuario: idUsuario } as any },
+    });
+    if (cliente) {
+      if (dto.nombre?.trim()) cliente.nombre = dto.nombre.trim();
+      if (dto.email?.trim()) cliente.email = dto.email.trim().toLowerCase();
+      await this.clienteRepo.save(cliente);
+    }
+
+    const filas = await this.vwRepo.find({ where: { id_usuario: idUsuario } });
+    const permisos = filas.map((f) => f.permiso);
+    const rol = this.normalizeRoleName(usuario.rol?.nombre ?? 'cliente');
+    const expiresIn = TokenUtil.getExpiresIn(rol);
+
+    const payload: JwtPayload = {
+      sub: usuario.id_usuario,
+      nombre: usuario.nombre,
+      email: usuario.email,
+      rol,
+      permisos,
+    };
+
+    const token = this.jwtService.sign(payload as any, {
+      secret: jwtConfig.secret,
+      expiresIn: expiresIn as any,
+    });
+
+    res.cookie('access_token', token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: TokenUtil.getCookieMaxAge(rol),
+    });
+
+    return {
+      success: true,
+      mensaje: 'Perfil actualizado',
+      id_usuario: usuario.id_usuario,
+      nombre: usuario.nombre,
+      email: usuario.email,
+      rol: { idRol: usuario.rol?.id_rol ?? null, nombre: rol },
+      permisos,
+      access_token: token,
+      expires_in: expiresIn,
+    };
   }
 }

@@ -44,6 +44,10 @@ export class RolesAdminController {
 
   @Post('usuarios')
   async crearUsuario(@Body() body: { nombre: string; email: string; password: string; id_rol: number }) {
+    if (Number(body.id_rol) === 5) {
+      return { success: false, message: 'Para clientes use el registro de la tienda' };
+    }
+
     const existe = await this.usuarioRepo.findOne({ where: { email: body.email } });
     if (existe) return { success: false, message: 'El email ya está registrado' };
 

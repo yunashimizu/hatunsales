@@ -35,7 +35,7 @@ export class AdminBussnies {
   }
 
   async crearEmpleado(dto: CrearEmpleadoRequest): Promise<any> {
-    if (dto.id_rol === 2) {
+    if (dto.id_rol === 5) {
       throw new ForbiddenException('Para clientes usa /auth/register');
     }
 
