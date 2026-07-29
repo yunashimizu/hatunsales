@@ -261,7 +261,11 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     this.validar(dto, receptor, resumen, serie);
 
     const idMoneda = monedaNubefact(dto.id_moneda);
-    const fechaEmision = this.normalizarFecha(dto.fecha_de_emision);
+    // Siempre el día calendario de Perú al emitir (Railway/UTC no debe desfasar).
+    const fechaEmision = this.fechaHoyLima();
+    const fechaVencimiento = dto.fecha_de_vencimiento?.trim()
+      ? this.normalizarFecha(dto.fecha_de_vencimiento)
+      : fechaEmision;
 
     return {
       dto,
@@ -270,7 +274,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       items: this.armarItems(dto.items, resumen),
       serie,
       fechaEmision,
-      fechaVencimiento: this.normalizarFecha(dto.fecha_de_vencimiento ?? dto.fecha_de_emision),
+      fechaVencimiento,
       idMoneda,
       importeEnLetras: numeroALetras(resumen.total, idMoneda),
       advertencias,
@@ -812,6 +816,21 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       .trim();
   }
 
+  /** Fecha de hoy en Perú (dd-mm-yyyy) para NUBEFACT / SUNAT. */
+  private fechaHoyLima(): string {
+    const partes = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Lima',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+
+    const anio = partes.find((p) => p.type === 'year')?.value ?? '1970';
+    const mes = partes.find((p) => p.type === 'month')?.value ?? '01';
+    const dia = partes.find((p) => p.type === 'day')?.value ?? '01';
+    return `${dia}-${mes}-${anio}`;
+  }
+
   private normalizarFecha(fecha?: string): string {
     const texto = (fecha ?? '').trim();
 
@@ -821,10 +840,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       return `${dia}-${mes}-${anio}`;
     }
 
-    const hoy = new Date();
-    const dia = String(hoy.getDate()).padStart(2, '0');
-    const mes = String(hoy.getMonth() + 1).padStart(2, '0');
-    return `${dia}-${mes}-${hoy.getFullYear()}`;
+    return this.fechaHoyLima();
   }
 
   private estadoVisible(c: Comprobante): string {

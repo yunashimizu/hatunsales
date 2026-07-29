@@ -88,6 +88,10 @@ import { CreditoBussnies } from './bussnies/Bussnies/credito.bussnies';
 import { CajaPagosController } from './api/controllers/caja-pagos.controller';
 import { CajaPagosRepository } from './repository/Repository/caja-pagos.repository';
 import { CajaPagosBussnies } from './bussnies/Bussnies/caja-pagos.bussnies';
+import { ProveedorController } from './api/controllers/proveedor.controller';
+import { RecepcionController } from './api/controllers/recepcion.controller';
+import { RecepcionRepository } from './repository/Repository/recepcion.repository';
+import { RecepcionBussnies } from './bussnies/Bussnies/recepcion.bussnies';
 import { RolController } from './api/controllers/rol.controller';
 import { RolesAdminController } from './api/controllers/roles-admin.controller';
 import { StorageService } from './util/storage/storage.service';
@@ -175,7 +179,8 @@ import { ArchivoController } from './api/controllers/archivo.controller';
   ReportesController, StockSucursalController, ProductoImagenController, CategoriaController, MarcaController, AlmacenController, RolController, RolesAdminController,
   CatalogoController, CarritoController, CheckoutController, PagoWebhookController,
   PedidoController, PedidoAdminController, CuentaTiendaController,
-  ReceptorController, VentaController, ArchivoController, CreditoController, CajaPagosController],
+  ReceptorController, VentaController, ArchivoController, CreditoController, CajaPagosController,
+  ProveedorController, RecepcionController],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
   LogRepository, AuthBussnies, AdminBussnies, RolBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
@@ -189,6 +194,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
    CulqiPasarela, PasarelaSimulada, pasarelaProvider,
    ConfiguracionRepository, ReceptorRepository, ReceptorBussnies, ConsultaDocumentoService,
    VentaRepository, VentaBussnies, CreditoRepository, CreditoBussnies, CajaPagosRepository, CajaPagosBussnies,
+   RecepcionRepository, RecepcionBussnies,
    CloudinaryAlmacen, BaseDatosAlmacen, DiscoAlmacen, almacenProvider],
 })
 export class AppModule {}
