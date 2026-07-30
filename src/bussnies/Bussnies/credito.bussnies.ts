@@ -64,14 +64,26 @@ export class CreditoBussnies {
     }
   }
 
-  actualizarCliente(id: number, body: any, usuario?: UsuarioToken) {
+  async actualizarCliente(id: number, body: any, usuario?: UsuarioToken) {
     this.assertPuedeConfigurar(usuario);
-    return this.repo.actualizarLineaCliente(id, body);
+    const linea = await this.repo.actualizarLineaCliente(id, body);
+    if (!linea) {
+      throw new NotFoundException(
+        `No hay cliente con id ${id}. Busca por DNI/nombre en Cuentas por cobrar o créalo primero en Clientes.`,
+      );
+    }
+    return { tipo: 'cliente', id, ...linea };
   }
 
-  actualizarEmpresa(id: number, body: any, usuario?: UsuarioToken) {
+  async actualizarEmpresa(id: number, body: any, usuario?: UsuarioToken) {
     this.assertPuedeConfigurar(usuario);
-    return this.repo.actualizarLineaEmpresa(id, body);
+    const linea = await this.repo.actualizarLineaEmpresa(id, body);
+    if (!linea) {
+      throw new NotFoundException(
+        `No hay empresa con id ${id}. Busca por RUC/razón social en Cuentas por cobrar o créala primero en Clientes.`,
+      );
+    }
+    return { tipo: 'empresa', id, ...linea };
   }
 
   /** Admin y caja pueden dar crédito / cobrar abonos. */
