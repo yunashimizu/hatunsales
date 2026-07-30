@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 export interface LineaReserva {
   id_producto: number;
@@ -13,12 +13,26 @@ export interface ReservaAplicada {
   cantidad: number;
 }
 
+export type ModoStockTienda = 'exclusivo' | 'spillover';
+
+export interface PoliticaStockTienda {
+  /** exclusivo = solo tienda_id_almacen; spillover = puede derramar a otros. */
+  modo: ModoStockTienda;
+  /** Almacén de despacho web, si está configurado. */
+  idAlmacen?: number;
+  /** true cuando se descuenta solo de idAlmacen (sin derrame). */
+  exclusivo: boolean;
+}
+
 /**
  * Movimiento de stock del pedido web.
  *
  * Todo ocurre dentro de una transacción con `SELECT … FOR UPDATE`: mientras un
  * pedido descuenta, cualquier otro que toque las mismas filas espera. Así dos
  * clientes no pueden llevarse la misma última unidad.
+ *
+ * Fase 6 (D2): por defecto exclusivo si hay `tienda_id_almacen` (como el POS).
+ * `tienda_stock_modo=spillover` restaura el derrame legacy.
  */
 @Injectable()
 export class StockTiendaRepository {
@@ -38,29 +52,60 @@ export class StockTiendaRepository {
     return valor === undefined || valor === null || valor === '' ? null : String(valor);
   }
 
+  /** Política de stock web: exclusivo (default) o spillover. */
+  async politicaStock(): Promise<PoliticaStockTienda> {
+    const modoRaw = ((await this.configuracion('tienda_stock_modo')) ?? 'exclusivo').toLowerCase();
+    const modo: ModoStockTienda = modoRaw === 'spillover' ? 'spillover' : 'exclusivo';
+    const configurado = await this.configuracion('tienda_id_almacen');
+    const idAlmacen = configurado ? Number(configurado) : NaN;
+    const almacenOk = Number.isFinite(idAlmacen) && idAlmacen > 0 ? idAlmacen : undefined;
+    const exclusivo = modo === 'exclusivo' && almacenOk != null;
+    return { modo, idAlmacen: almacenOk, exclusivo };
+  }
+
   /**
    * Descuenta el stock de todas las líneas del pedido.
    * Devuelve de qué almacén salió cada una para poder revertirlo luego.
    * Si alguna línea no alcanza, se cae toda la transacción y no se descuenta nada.
+   *
+   * Con almacén preferido y modo exclusivo: SOLO ese almacén (sin derrame).
+   * Sin almacén o modo spillover: preferido primero, luego el de más stock.
+   * `managerExterno`: participa de una TX externa (checkout atómico Fase 8).
    */
-  async reservar(lineas: LineaReserva[], idAlmacenPreferido?: number): Promise<ReservaAplicada[]> {
+  async reservar(
+    lineas: LineaReserva[],
+    idAlmacenPreferido?: number,
+    modo: ModoStockTienda = 'exclusivo',
+    managerExterno?: EntityManager,
+  ): Promise<ReservaAplicada[]> {
     if (lineas.length === 0) return [];
 
-    return this.dataSource.transaction(async (manager) => {
+    const exclusivo =
+      modo !== 'spillover'
+      && idAlmacenPreferido != null
+      && Number.isFinite(idAlmacenPreferido)
+      && idAlmacenPreferido > 0;
+
+    const ejecutar = async (manager: EntityManager) => {
       const aplicadas: ReservaAplicada[] = [];
 
       for (const linea of lineas) {
-        // Bloqueamos las filas de inventario del producto y priorizamos el
-        // almacén configurado para la tienda; si no alcanza, seguimos con el
-        // que tenga más stock.
-        const filas = await manager.query(
-          `SELECT id_inventario, id_almacen, stock
-             FROM inventario
-            WHERE id_producto = $1 AND stock > 0
-            ORDER BY (id_almacen = $2) DESC, stock DESC
-              FOR UPDATE`,
-          [linea.id_producto, idAlmacenPreferido ?? -1],
-        );
+        const filas = exclusivo
+          ? await manager.query(
+              `SELECT id_inventario, id_almacen, stock
+                 FROM inventario
+                WHERE id_producto = $1 AND id_almacen = $2 AND stock > 0
+                  FOR UPDATE`,
+              [linea.id_producto, idAlmacenPreferido],
+            )
+          : await manager.query(
+              `SELECT id_inventario, id_almacen, stock
+                 FROM inventario
+                WHERE id_producto = $1 AND stock > 0
+                ORDER BY (id_almacen = $2) DESC, stock DESC
+                  FOR UPDATE`,
+              [linea.id_producto, idAlmacenPreferido ?? -1],
+            );
 
         let pendiente = linea.cantidad;
 
@@ -90,7 +135,10 @@ export class StockTiendaRepository {
 
       await this.registrarMovimientos(manager, aplicadas, 'salida', 'Reserva por pedido web');
       return aplicadas;
-    });
+    };
+
+    if (managerExterno) return ejecutar(managerExterno);
+    return this.dataSource.transaction(ejecutar);
   }
 
   /** Devuelve al inventario lo reservado por un pedido cancelado. */

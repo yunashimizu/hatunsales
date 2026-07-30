@@ -124,6 +124,24 @@ export class ComprobanteRepository extends CrudRepository<Comprobante> {
     return { datos, total, pagina, por_pagina: porPagina };
   }
 
+  /** CPE que requieren atención (pendiente o error, no anulados). */
+  async contarAtencion(): Promise<{ pendientes: number; errores: number; total: number }> {
+    const filas = await this.dataSource.query(
+      `SELECT
+          COUNT(*) FILTER (WHERE estado = 'pendiente')::int AS pendientes,
+          COUNT(*) FILTER (WHERE estado = 'error')::int AS errores,
+          COUNT(*)::int AS total
+         FROM comprobantes
+        WHERE COALESCE(anulado, FALSE) = FALSE
+          AND estado IN ('pendiente', 'error')`,
+    );
+    return {
+      pendientes: Number(filas[0]?.pendientes ?? 0),
+      errores: Number(filas[0]?.errores ?? 0),
+      total: Number(filas[0]?.total ?? 0),
+    };
+  }
+
   // ── Escritura ────────────────────────────────────────────────
 
   /**

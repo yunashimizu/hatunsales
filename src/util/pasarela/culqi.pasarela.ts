@@ -101,9 +101,9 @@ export class CulqiPasarela implements PasarelaPago {
     const secreto = pasarelaConfig.culqi.webhookSecret;
     const firma = String(cabeceras['x-culqi-signature'] ?? cabeceras['X-Culqi-Signature'] ?? '');
 
-    // Sin secreto configurado no podemos validar; se acepta pero queda en la
-    // bitácora para revisión manual.
-    const valido = secreto ? this.firmaValida(cuerpo, firma, secreto) : true;
+    // Sin secreto: en producción se rechaza; en desarrollo se acepta (bitácora).
+    const enProduccion = (process.env.NODE_ENV ?? '').toLowerCase() === 'production';
+    const valido = secreto ? this.firmaValida(cuerpo, firma, secreto) : !enProduccion;
     const objeto = cuerpo?.data ?? cuerpo?.object ?? cuerpo ?? {};
     const tipo = String(cuerpo?.type ?? cuerpo?.event ?? 'desconocido');
 

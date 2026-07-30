@@ -49,7 +49,16 @@ export class CheckoutRepository {
       .getOne();
   }
 
-  async incrementarUsoCupon(idCupon: number): Promise<void> {
-    await this.cuponRepo.increment({ id_cupon: idCupon }, 'usos_actuales', 1);
+  async incrementarUsoCupon(idCupon: number, manager?: { query: (sql: string, p?: any[]) => Promise<any> }): Promise<boolean> {
+    const q = manager ?? this.cuponRepo.manager;
+    const filas = await q.query(
+      `UPDATE cupones
+          SET usos_actuales = COALESCE(usos_actuales, 0) + 1
+        WHERE id_cupon = $1
+          AND (usos_maximos IS NULL OR COALESCE(usos_actuales, 0) < usos_maximos)
+        RETURNING id_cupon`,
+      [idCupon],
+    );
+    return (filas?.length ?? 0) > 0;
   }
 }

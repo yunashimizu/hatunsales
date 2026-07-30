@@ -78,7 +78,8 @@ export class CheckoutBussnies {
     return { cupon, descuento };
   }
 
-  async registrarUso(idCupon: number): Promise<void> {
-    await this.repo.incrementarUsoCupon(idCupon);
+  async registrarUso(idCupon: number, manager?: { query: (sql: string, p?: any[]) => Promise<any> }): Promise<void> {
+    const ok = await this.repo.incrementarUsoCupon(idCupon, manager);
+    if (!ok) throw new BadRequestException('El cupón alcanzó su límite de usos');
   }
 }

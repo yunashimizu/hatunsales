@@ -34,7 +34,10 @@ export class CatalogoRepository {
     return this.productoRepo.manager;
   }
 
-  private construirWhere(filtros: FiltrosCatalogo): { where: string; params: any[] } {
+  private construirWhere(
+    filtros: FiltrosCatalogo,
+    politica?: { exclusivo: boolean; idAlmacen?: number },
+  ): { where: string; params: any[] } {
     const condiciones: string[] = ['COALESCE(c.estado, TRUE) = TRUE'];
     const params: any[] = [];
 
@@ -72,7 +75,17 @@ export class CatalogoRepository {
     }
 
     if (filtros.solo_stock) {
-      condiciones.push('c.stock > 0');
+      if (politica?.exclusivo && politica.idAlmacen) {
+        params.push(politica.idAlmacen);
+        condiciones.push(`EXISTS (
+          SELECT 1 FROM inventario i
+           WHERE i.id_producto = c.id_producto
+             AND i.id_almacen = $${params.length}
+             AND i.stock > 0
+        )`);
+      } else {
+        condiciones.push('c.stock > 0');
+      }
     }
 
     if (filtros.solo_oferta) {
@@ -111,7 +124,8 @@ export class CatalogoRepository {
   }
 
   async buscar(filtros: FiltrosCatalogo): Promise<{ rows: any[]; total: number }> {
-    const { where, params } = this.construirWhere(filtros);
+    const politica = await this.politicaStockWeb();
+    const { where, params } = this.construirWhere(filtros, politica);
     const offset = (filtros.pagina - 1) * filtros.limite;
 
     const [{ total }] = await this.manager.query(
@@ -127,7 +141,7 @@ export class CatalogoRepository {
       params,
     );
 
-    return { rows, total: Number(total ?? 0) };
+    return { rows: await this.aplicarStockTienda(rows, politica), total: Number(total ?? 0) };
   }
 
   async obtenerPorId(id: number): Promise<any | null> {
@@ -135,7 +149,8 @@ export class CatalogoRepository {
       'SELECT * FROM vw_catalogo c WHERE c.id_producto = $1 LIMIT 1',
       [id],
     );
-    return rows[0] ?? null;
+    const mapeadas = await this.aplicarStockTienda(rows);
+    return mapeadas[0] ?? null;
   }
 
   async obtenerPorSlug(slug: string): Promise<any | null> {
@@ -143,7 +158,8 @@ export class CatalogoRepository {
       'SELECT * FROM vw_catalogo c WHERE c.slug = $1 LIMIT 1',
       [slug],
     );
-    return rows[0] ?? null;
+    const mapeadas = await this.aplicarStockTienda(rows);
+    return mapeadas[0] ?? null;
   }
 
   async obtenerImagenes(idProducto: number): Promise<any[]> {
@@ -176,21 +192,23 @@ export class CatalogoRepository {
   }
 
   async obtenerRelacionados(idProducto: number, idCategoria: number | null, limite: number): Promise<any[]> {
+    let rows: any[];
     if (!idCategoria) {
-      return this.manager.query(
+      rows = await this.manager.query(
         `SELECT * FROM vw_catalogo c
          WHERE c.id_producto <> $1 AND COALESCE(c.estado, TRUE) = TRUE
          ORDER BY c.destacado DESC, c.id_producto DESC LIMIT $2`,
         [idProducto, limite],
       );
+    } else {
+      rows = await this.manager.query(
+        `SELECT * FROM vw_catalogo c
+         WHERE c.id_categoria = $1 AND c.id_producto <> $2 AND COALESCE(c.estado, TRUE) = TRUE
+         ORDER BY c.destacado DESC, c.id_producto DESC LIMIT $3`,
+        [idCategoria, idProducto, limite],
+      );
     }
-
-    return this.manager.query(
-      `SELECT * FROM vw_catalogo c
-       WHERE c.id_categoria = $1 AND c.id_producto <> $2 AND COALESCE(c.estado, TRUE) = TRUE
-       ORDER BY c.destacado DESC, c.id_producto DESC LIMIT $3`,
-      [idCategoria, idProducto, limite],
-    );
+    return this.aplicarStockTienda(rows);
   }
 
   async obtenerCategorias(): Promise<any[]> {
@@ -258,10 +276,70 @@ export class CatalogoRepository {
   }
 
   async obtenerStockTotal(idProducto: number): Promise<number> {
+    const politica = await this.politicaStockWeb();
+    if (politica.exclusivo && politica.idAlmacen) {
+      const rows = await this.manager.query(
+        `SELECT COALESCE(stock, 0)::INTEGER AS stock
+           FROM inventario
+          WHERE id_producto = $1 AND id_almacen = $2
+          LIMIT 1`,
+        [idProducto, politica.idAlmacen],
+      );
+      return Number(rows[0]?.stock ?? 0);
+    }
+
     const rows = await this.manager.query(
       'SELECT COALESCE(stock_total, 0)::INTEGER AS stock FROM vw_producto_stock WHERE id_producto = $1',
       [idProducto],
     );
     return Number(rows[0]?.stock ?? 0);
+  }
+
+  /** Fase 6 / D2: exclusivo si hay tienda_id_almacen y modo ≠ spillover. */
+  private async politicaStockWeb(): Promise<{ exclusivo: boolean; idAlmacen?: number }> {
+    const filas = await this.manager.query(
+      `SELECT clave, valor FROM configuraciones
+        WHERE clave IN ('tienda_stock_modo', 'tienda_id_almacen')`,
+    );
+    const mapa = new Map<string, string>();
+    for (const f of filas ?? []) {
+      if (f.valor !== undefined && f.valor !== null && String(f.valor).trim() !== '') {
+        mapa.set(String(f.clave), String(f.valor));
+      }
+    }
+    const modo = (mapa.get('tienda_stock_modo') ?? 'exclusivo').toLowerCase();
+    const idAlmacen = Number(mapa.get('tienda_id_almacen'));
+    const almacenOk = Number.isFinite(idAlmacen) && idAlmacen > 0 ? idAlmacen : undefined;
+    return {
+      exclusivo: modo !== 'spillover' && almacenOk != null,
+      idAlmacen: almacenOk,
+    };
+  }
+
+  /** Sustituye el stock SUM del catálogo por el del almacén de despacho web. */
+  private async aplicarStockTienda(
+    rows: any[],
+    politica?: { exclusivo: boolean; idAlmacen?: number },
+  ): Promise<any[]> {
+    if (!rows?.length) return rows ?? [];
+    const pol = politica ?? (await this.politicaStockWeb());
+    if (!pol.exclusivo || !pol.idAlmacen) return rows;
+
+    const ids = rows.map((r) => Number(r.id_producto)).filter((id) => Number.isFinite(id));
+    if (!ids.length) return rows;
+
+    const stocks = await this.manager.query(
+      `SELECT id_producto, COALESCE(stock, 0)::INTEGER AS stock
+         FROM inventario
+        WHERE id_almacen = $1 AND id_producto = ANY($2)`,
+      [pol.idAlmacen, ids],
+    );
+    const mapa = new Map<number, number>();
+    for (const s of stocks ?? []) mapa.set(Number(s.id_producto), Number(s.stock ?? 0));
+
+    return rows.map((r) => ({
+      ...r,
+      stock: mapa.get(Number(r.id_producto)) ?? 0,
+    }));
   }
 }

@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { VentaRepository, FiltroVentas, LineaVentaPersistida } from '../../repository/Repository/venta.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { CreditoRepository } from '../../repository/Repository/credito.repository';
+import { CajaPagosRepository } from '../../repository/Repository/caja-pagos.repository';
 import { ComprobanteBussnies } from './comprobante.bussnies';
 import { ReceptorBussnies } from './receptor.bussnies';
 import { CreditoBussnies } from './credito.bussnies';
@@ -15,6 +16,8 @@ import {
   PORCENTAJE_IGV_POR_DEFECTO,
   redondear,
 } from '../../util/fiscal/calculo-fiscal';
+import { CodigoError, cuerpoError } from '../../util/errores-operativos';
+import { pasarelaConfig } from '../../config/pasarela.config';
 
 /**
  * Punto de venta de mostrador.
@@ -35,6 +38,7 @@ export class VentaBussnies {
     private readonly receptor: ReceptorBussnies,
     private readonly creditoRepo: CreditoRepository,
     private readonly credito: CreditoBussnies,
+    private readonly cajaPagosRepo: CajaPagosRepository,
   ) {}
 
   // ── Apoyo al mostrador ───────────────────────────────────────
@@ -85,7 +89,9 @@ export class VentaBussnies {
 
   async registrar(dto: CrearVentaRequest, usuario?: UsuarioToken): Promise<VentaResponse> {
     if (!Array.isArray(dto.items) || dto.items.length === 0) {
-      throw new BadRequestException('Agregue al menos un producto a la venta');
+      throw new BadRequestException(
+        cuerpoError(CodigoError.VENTA_SIN_ITEMS, 'Agregue al menos un producto a la venta'),
+      );
     }
 
     if (dto.clave_idempotencia) {
@@ -118,6 +124,7 @@ export class VentaBussnies {
       idVenta = await this.repo.registrar(
         {
           id_cliente: receptor.id_cliente,
+          id_empresa: receptor.id_empresa,
           id_caja: dto.id_caja,
           id_usuario: usuario?.id_usuario,
           subtotal: resumen.total_gravada + resumen.total_exonerada + resumen.total_inafecta,
@@ -182,6 +189,7 @@ export class VentaBussnies {
       fecha: venta.fecha,
       origen: venta.origen,
       id_cliente: venta.id_cliente ? Number(venta.id_cliente) : undefined,
+      id_empresa: venta.id_empresa ? Number(venta.id_empresa) : undefined,
       cliente_denominacion: venta.cliente_denominacion?.trim() || 'CLIENTES VARIOS',
       subtotal: Number(venta.subtotal ?? 0),
       igv: Number(venta.igv ?? 0),
@@ -214,13 +222,56 @@ export class VentaBussnies {
     return this.repo.listar(filtro);
   }
 
-  /** Anula la venta devolviendo el stock. El comprobante se anula por separado. */
-  async anular(idVenta: number): Promise<{ anulada: boolean }> {
+  /** Anula la venta: stock al almacén de salida, cierra CxC. El CPE se anula aparte en Documentos. */
+  async anular(idVenta: number): Promise<{
+    anulada: boolean;
+    ya_anulada?: boolean;
+    cxc_cerradas: number;
+    stock_devuelto: boolean;
+    comprobante_aviso?: string;
+  }> {
     const venta = await this.repo.obtener(idVenta);
     if (!venta) throw new NotFoundException(`No existe la venta ${idVenta}`);
 
-    await this.repo.devolverStock(idVenta);
-    return { anulada: true };
+    let resultado: { stock_devuelto: boolean; cxc_cerradas: number; ya_anulada: boolean };
+    try {
+      resultado = await this.repo.anularVentaCompleta(idVenta);
+    } catch (error: any) {
+      if (String(error?.message) === 'VENTA_NO_ENCONTRADA') {
+        throw new NotFoundException(`No existe la venta ${idVenta}`);
+      }
+      throw error;
+    }
+
+    if (resultado.ya_anulada) {
+      return {
+        anulada: true,
+        ya_anulada: true,
+        cxc_cerradas: 0,
+        stock_devuelto: false,
+      };
+    }
+
+    const comprobantes = await this.comprobantes.listarPorVenta(idVenta);
+    const emitidos = (comprobantes ?? []).filter(
+      (c: any) => !c.anulado && (c.estado === 'aceptado' || c.estado === 'enviado' || c.pdf_url || c.numero),
+    );
+
+    let comprobante_aviso: string | undefined;
+    if (emitidos.length > 0) {
+      comprobante_aviso =
+        'La venta se anuló en el sistema (stock y crédito). Si el comprobante ya fue aceptado por SUNAT, emita una nota de crédito o anúlelo desde Documentos.';
+    } else if ((comprobantes ?? []).length > 0) {
+      comprobante_aviso =
+        'La venta se anuló. Había un comprobante pendiente/error: revíselo en Documentos si hace falta.';
+    }
+
+    return {
+      anulada: true,
+      cxc_cerradas: resultado.cxc_cerradas,
+      stock_devuelto: resultado.stock_devuelto,
+      ...(comprobante_aviso ? { comprobante_aviso } : {}),
+    };
   }
 
   // ── Interno ──────────────────────────────────────────────────
@@ -351,7 +402,10 @@ export class VentaBussnies {
     const suma = redondear(pagos.reduce((acumulado, p) => acumulado + Number(p.monto), 0));
     if (Math.abs(suma - total) > 0.05) {
       throw new BadRequestException(
-        `Los pagos suman S/ ${suma.toFixed(2)} y el total es S/ ${total.toFixed(2)}`,
+        cuerpoError(
+          CodigoError.PAGOS_NO_CUADRAN,
+          `Los pagos suman S/ ${suma.toFixed(2)} y el total es S/ ${total.toFixed(2)}`,
+        ),
       );
     }
 
@@ -377,7 +431,10 @@ export class VentaBussnies {
       const doc = String(receptor.numero_documento ?? '');
       if (doc === '00000000' || (!receptor.id_cliente && !receptor.id_empresa)) {
         throw new BadRequestException(
-          'El crédito solo aplica a clientes o empresas registradas. Busque DNI/RUC antes de cobrar.',
+          cuerpoError(
+            CodigoError.CREDITO_SIN_CLIENTE,
+            'El crédito solo aplica a clientes o empresas registradas. Busque DNI/RUC antes de cobrar.',
+          ),
         );
       }
 
@@ -387,12 +444,18 @@ export class VentaBussnies {
 
       if (!linea?.credito_activo) {
         throw new BadRequestException(
-          'Este cliente/empresa no tiene crédito activo. Actívelo en Cuentas por cobrar (límite y días).',
+          cuerpoError(
+            CodigoError.CREDITO_INACTIVO,
+            'Este cliente/empresa no tiene crédito activo. Actívelo en Cuentas por cobrar (límite y días).',
+          ),
         );
       }
       if (montoCredito > linea.disponible + 0.05) {
         throw new BadRequestException(
-          `Crédito insuficiente. Disponible S/ ${linea.disponible.toFixed(2)} (límite ${linea.limite_credito.toFixed(2)}, deuda ${linea.saldo_pendiente.toFixed(2)}).`,
+          cuerpoError(
+            CodigoError.CREDITO_INSUFICIENTE,
+            `Crédito insuficiente. Disponible S/ ${linea.disponible.toFixed(2)} (límite ${linea.limite_credito.toFixed(2)}, deuda ${linea.saldo_pendiente.toFixed(2)}).`,
+          ),
         );
       }
 
@@ -429,9 +492,60 @@ export class VentaBussnies {
       if (esYape) {
         const ext = String(p.referencia_externa ?? '').trim();
         const ref = String(p.referencia ?? '').trim();
+        const hayCulqi = !!pasarelaConfig.culqi.secretKey;
+
         if (p.validacion === 'culqi' && ext) {
-          // Cobro verificado por orden Culqi
-          p.referencia = p.referencia || ext;
+          if (!hayCulqi) {
+            // Keys no pegadas: no exigir Culqi; caer a manual si hay referencia.
+            if (!ref && !ext) {
+              throw new BadRequestException(
+                cuerpoError(
+                  CodigoError.CULQI_NO_CONFIG,
+                  'Culqi no está configurado. Indica el N° de operación de Yape manualmente.',
+                ),
+              );
+            }
+            p.referencia = ref || ext;
+            p.validacion = 'manual';
+          } else {
+            // Keys presentes: reconsultar orden (plug-and-play al pegar).
+            try {
+              const estado = await this.cajaPagosRepo.consultarOrdenCulqi(ext);
+              const montoOrden = Number(estado.amount ?? 0);
+              const montoPago = Number(p.monto);
+              if (!estado.pagado) {
+                throw new BadRequestException(
+                  cuerpoError(
+                    CodigoError.CULQI_NO_CONFIRMADO,
+                    'El cobro Yape/Culqi aún no está pagado. Verifica de nuevo antes de cobrar.',
+                  ),
+                );
+              }
+              if (montoOrden > 0 && Math.abs(montoOrden - montoPago) > 0.05) {
+                throw new BadRequestException(
+                  cuerpoError(
+                    CodigoError.CULQI_NO_CONFIRMADO,
+                    `El monto Culqi (S/ ${montoOrden.toFixed(2)}) no coincide con el pago (S/ ${montoPago.toFixed(2)}).`,
+                  ),
+                );
+              }
+              p.referencia = p.referencia || ext;
+              p.validacion = 'culqi';
+            } catch (error: any) {
+              if (error instanceof BadRequestException) throw error;
+              if (String(error?.message) === 'CULQI_NO_CONFIG') {
+                p.referencia = ref || ext;
+                p.validacion = 'manual';
+              } else {
+                throw new BadRequestException(
+                  cuerpoError(
+                    CodigoError.CULQI_NO_CONFIRMADO,
+                    error?.message || 'No se pudo confirmar el pago Culqi',
+                  ),
+                );
+              }
+            }
+          }
         } else if (!ref) {
           throw new BadRequestException(
             'Yape: verifica el cobro con Culqi o indica el N° de operación manual',
@@ -518,7 +632,44 @@ export class VentaBussnies {
       const [, idProducto, faltante] = mensaje.split(':');
       const producto = items.find((i) => i.id_producto === Number(idProducto));
       return new BadRequestException(
-        `No hay stock suficiente de "${producto?.descripcion ?? `producto ${idProducto}`}". Faltan ${faltante} unidades.`,
+        cuerpoError(
+          CodigoError.STOCK_INSUFICIENTE,
+          `No hay stock suficiente de "${producto?.descripcion ?? `producto ${idProducto}`}". Faltan ${faltante} unidades.`,
+        ),
+      );
+    }
+
+    if (mensaje === 'CREDITO_INACTIVO') {
+      return new BadRequestException(
+        cuerpoError(
+          CodigoError.CREDITO_INACTIVO,
+          'Este cliente/empresa no tiene crédito activo. Actívelo en Cuentas por cobrar (límite y días).',
+        ),
+      );
+    }
+
+    if (mensaje === 'CREDITO_SIN_CLIENTE') {
+      return new BadRequestException(
+        cuerpoError(
+          CodigoError.CREDITO_SIN_CLIENTE,
+          'El crédito solo aplica a clientes o empresas registradas. Busque DNI/RUC antes de cobrar.',
+        ),
+      );
+    }
+
+    if (mensaje.startsWith('CREDITO_INSUFICIENTE:')) {
+      const [, disponible, limite, deuda] = mensaje.split(':');
+      return new BadRequestException(
+        cuerpoError(
+          CodigoError.CREDITO_INSUFICIENTE,
+          `Crédito insuficiente. Disponible S/ ${disponible} (límite ${limite}, deuda ${deuda}).`,
+        ),
+      );
+    }
+
+    if (mensaje.startsWith('CREDITO_ENTIDAD:')) {
+      return new BadRequestException(
+        cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, mensaje.replace('CREDITO_ENTIDAD:', '')),
       );
     }
 

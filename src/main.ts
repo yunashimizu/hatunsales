@@ -2,13 +2,32 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, Logger } from '@nestjs/common';
 import { join } from 'path';
 import cookieParser from 'cookie-parser';
 
+const JWT_DEFAULT = 'hatunsales_secret_key_2024';
+
 async function bootstrap() {
+  const esProd =
+    (process.env.NODE_ENV ?? '').toLowerCase() === 'production' ||
+    !!process.env.RAILWAY_ENVIRONMENT ||
+    !!process.env.RAILWAY_ENVIRONMENT_NAME;
+
+  const jwtSecret = process.env.JWT_SECRET ?? JWT_DEFAULT;
+  if (esProd && (!process.env.JWT_SECRET || jwtSecret === JWT_DEFAULT)) {
+    Logger.error(
+      'JWT_SECRET no está definido (o usa el valor por defecto). Configúralo en Railway antes de subir a producción.',
+      'Bootstrap',
+    );
+    throw new Error('JWT_SECRET obligatorio en producción');
+  }
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
-  const allowedOrigins = (process.env.CORS_ORIGIN ?? '').split(',').map((origin) => origin.trim()).filter(Boolean);
+  const allowedOrigins = (process.env.CORS_ORIGIN ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 
   app.use(cookieParser());
   app.enableCors({
@@ -17,7 +36,6 @@ async function bootstrap() {
   });
   app.useGlobalPipes(new ValidationPipe());
 
-  // Las imágenes de producto se guardan en disco; la tienda las consume por HTTP.
   app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads/' });
 
   const config = new DocumentBuilder()
@@ -25,12 +43,12 @@ async function bootstrap() {
     .setVersion('1.0')
     .addBearerAuth(
       {
-      type: 'http',
-      scheme: 'bearer',
-      bearerFormat: 'JWT',
-    },
-    'access-token', // 👈 nombre del esquema
-    ) // 
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+      },
+      'access-token',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
@@ -38,7 +56,7 @@ async function bootstrap() {
 
   await app.listen(process.env.PORT ?? 3000);
 
-  console.log(`Servidor:  http://localhost:3000`);
-  console.log(`Swagger:   http://localhost:3000/api`);
+  console.log(`Servidor:  http://localhost:${process.env.PORT ?? 3000}`);
+  console.log(`Swagger:   http://localhost:${process.env.PORT ?? 3000}/api`);
 }
 bootstrap();

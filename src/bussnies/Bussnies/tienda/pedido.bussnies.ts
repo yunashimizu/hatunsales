@@ -1,4 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { PedidoRepository } from '../../../repository/Repository/tienda/pedido.repository';
 import { CarritoRepository } from '../../../repository/Repository/tienda/carrito.repository';
 import { StockTiendaRepository } from '../../../repository/Repository/tienda/stock-tienda.repository';
@@ -27,6 +29,8 @@ export class PedidoBussnies {
     private readonly carritoBussnies: CarritoBussnies,
     private readonly checkoutBussnies: CheckoutBussnies,
     private readonly stockRepo: StockTiendaRepository,
+    @InjectDataSource('pgConnection')
+    private readonly dataSource: DataSource,
   ) {}
 
   async crearDesdeCarrito(idCliente: number, dto: CrearPedidoRequest): Promise<PedidoResponse> {
@@ -67,28 +71,70 @@ export class PedidoBussnies {
 
     const total = this.redondear(resumen.total - descuento + costoEnvio);
 
-    let pedido: Pedido;
+    let idPedido: number;
 
     try {
-      pedido = await this.repo.crear({
-        codigo: await this.generarCodigo(),
-        clave_idempotencia: dto.clave_idempotencia,
-        cliente: { id_cliente: idCliente } as Cliente,
-        direccion: dto.id_direccion ? ({ id_direccion: dto.id_direccion } as DireccionEnvio) : undefined,
-        metodo_envio: dto.id_metodo_envio ? ({ id_metodo_envio: dto.id_metodo_envio } as MetodoEnvio) : undefined,
-        metodo_pago: dto.id_metodo_pago ? ({ id_metodo: dto.id_metodo_pago } as MetodoPago) : undefined,
-        cupon: cupon ? ({ id_cupon: cupon.id_cupon } as Cupon) : undefined,
-        subtotal: resumen.subtotal,
-        igv: resumen.igv,
-        descuento,
-        costo_envio: costoEnvio,
-        total,
-        estado: 'pendiente',
-        tipo_comprobante: dto.tipo_comprobante ?? 'boleta',
-        documento_receptor: dto.documento_receptor,
-        nombre_receptor: dto.nombre_receptor,
-        notas: dto.notas,
-        actualizado_en: new Date(),
+      // Fase 8: pedido + ítems + stock + cupón + vaciar carrito en UNA sola TX.
+      idPedido = await this.dataSource.transaction(async (manager) => {
+        const pedido = await this.repo.crear(
+          {
+            codigo: await this.generarCodigo(),
+            clave_idempotencia: dto.clave_idempotencia,
+            cliente: { id_cliente: idCliente } as Cliente,
+            direccion: dto.id_direccion ? ({ id_direccion: dto.id_direccion } as DireccionEnvio) : undefined,
+            metodo_envio: dto.id_metodo_envio
+              ? ({ id_metodo_envio: dto.id_metodo_envio } as MetodoEnvio)
+              : undefined,
+            metodo_pago: dto.id_metodo_pago ? ({ id_metodo: dto.id_metodo_pago } as MetodoPago) : undefined,
+            cupon: cupon ? ({ id_cupon: cupon.id_cupon } as Cupon) : undefined,
+            subtotal: resumen.subtotal,
+            igv: resumen.igv,
+            descuento,
+            costo_envio: costoEnvio,
+            total,
+            estado: 'pendiente',
+            tipo_comprobante: dto.tipo_comprobante ?? 'boleta',
+            documento_receptor: dto.documento_receptor,
+            nombre_receptor: dto.nombre_receptor,
+            notas: dto.notas,
+            actualizado_en: new Date(),
+          },
+          manager,
+        );
+
+        await this.repo.guardarItems(
+          resumen.items.map((item) => {
+            const { subtotal, igv } = this.carritoBussnies.desagregarIgv(item.subtotal);
+            return {
+              pedido: { id_pedido: pedido.id_pedido } as Pedido,
+              producto: { id_producto: item.id_producto } as any,
+              nombre_producto: item.nombre,
+              imagen_url: item.imagen ?? undefined,
+              cantidad: item.cantidad,
+              precio_unitario: item.precio_unitario,
+              descuento: 0,
+              subtotal,
+              igv,
+              total: item.subtotal,
+            };
+          }),
+          manager,
+        );
+
+        await this.reservarStockEnTx(
+          manager,
+          pedido.id_pedido,
+          resumen.items.map((item) => ({ id_producto: item.id_producto, cantidad: item.cantidad })),
+        );
+
+        await this.repo.registrarEstado(pedido.id_pedido, 'pendiente', 'Pedido recibido', manager);
+
+        if (cupon) await this.checkoutBussnies.registrarUso(cupon.id_cupon, manager);
+
+        await this.carritoRepo.vaciar(carrito.id_carrito, manager);
+        await this.carritoRepo.marcarConvertido(carrito.id_carrito, manager);
+
+        return pedido.id_pedido;
       });
     } catch (error: any) {
       // Dos peticiones simultáneas con la misma clave: el índice único frena a
@@ -97,64 +143,6 @@ export class PedidoBussnies {
         const previo = await this.repo.buscarPorClaveIdempotencia(idCliente, dto.clave_idempotencia);
         if (previo) return this.mapPedido(previo);
       }
-      throw error;
-    }
-
-    await this.repo.guardarItems(
-      resumen.items.map((item) => {
-        const { subtotal, igv } = this.carritoBussnies.desagregarIgv(item.subtotal);
-        return {
-          pedido: { id_pedido: pedido.id_pedido } as Pedido,
-          producto: { id_producto: item.id_producto } as any,
-          nombre_producto: item.nombre,
-          imagen_url: item.imagen ?? undefined,
-          cantidad: item.cantidad,
-          precio_unitario: item.precio_unitario,
-          descuento: 0,
-          subtotal,
-          igv,
-          total: item.subtotal,
-        };
-      }),
-    );
-
-    await this.reservarStock(pedido.id_pedido, resumen.items);
-    await this.repo.registrarEstado(pedido.id_pedido, 'pendiente', 'Pedido recibido');
-
-    if (cupon) await this.checkoutBussnies.registrarUso(cupon.id_cupon);
-
-    await this.carritoRepo.vaciar(carrito.id_carrito);
-    await this.carritoRepo.marcarConvertido(carrito.id_carrito);
-
-    return this.obtener(pedido.id_pedido, idCliente);
-  }
-
-  /**
-   * Aparta el stock del pedido. Si algo falla, el pedido se marca como
-   * cancelado en vez de quedar vivo con mercadería que no existe.
-   */
-  private async reservarStock(idPedido: number, items: { id_producto: number; cantidad: number }[]): Promise<void> {
-    const activa = (await this.stockRepo.configuracion('tienda_reservar_stock')) ?? 'true';
-    if (activa !== 'true') return;
-
-    const configurado = await this.stockRepo.configuracion('tienda_id_almacen');
-    const idAlmacenPreferido = configurado ? Number(configurado) : undefined;
-
-    try {
-      const aplicadas = await this.stockRepo.reservar(
-        items.map((item) => ({ id_producto: item.id_producto, cantidad: item.cantidad })),
-        Number.isFinite(idAlmacenPreferido) ? idAlmacenPreferido : undefined,
-      );
-
-      // Cada línea recuerda de qué almacén salió para devolverlo al mismo sitio.
-      const porProducto = new Map<number, number>();
-      aplicadas.forEach((a) => porProducto.set(a.id_producto, a.id_almacen));
-
-      await this.repo.asignarAlmacenAItems(idPedido, porProducto);
-      await this.repo.marcarStockReservado(idPedido, true, aplicadas[0]?.id_almacen);
-    } catch (error: any) {
-      await this.repo.cambiarEstado(idPedido, 'cancelado');
-      await this.repo.registrarEstado(idPedido, 'cancelado', 'Sin stock disponible al confirmar');
 
       if (String(error?.message ?? '').startsWith('STOCK_INSUFICIENTE')) {
         throw new BadRequestException(
@@ -162,9 +150,41 @@ export class PedidoBussnies {
         );
       }
 
-      this.log.error(`No se pudo reservar stock del pedido ${idPedido}: ${error?.message}`);
-      throw new BadRequestException('No pudimos apartar el stock de tu pedido. Inténtalo nuevamente.');
+      if (error instanceof BadRequestException) throw error;
+
+      this.log.error(`Checkout falló: ${error?.message}`);
+      throw error;
     }
+
+    return this.obtener(idPedido, idCliente);
+  }
+
+  /**
+   * Reserva stock dentro de la TX del checkout (Fase 8).
+   * Si falla, toda la TX se revierte: no queda pedido huérfano ni cupón consumido.
+   */
+  private async reservarStockEnTx(
+    manager: EntityManager,
+    idPedido: number,
+    items: { id_producto: number; cantidad: number }[],
+  ): Promise<void> {
+    const activa = (await this.stockRepo.configuracion('tienda_reservar_stock')) ?? 'true';
+    if (activa !== 'true') return;
+
+    const politica = await this.stockRepo.politicaStock();
+
+    const aplicadas = await this.stockRepo.reservar(
+      items,
+      politica.idAlmacen,
+      politica.exclusivo ? 'exclusivo' : 'spillover',
+      manager,
+    );
+
+    const porProducto = new Map<number, number>();
+    aplicadas.forEach((a) => porProducto.set(a.id_producto, a.id_almacen));
+
+    await this.repo.asignarAlmacenAItems(idPedido, porProducto, manager);
+    await this.repo.marcarStockReservado(idPedido, true, aplicadas[0]?.id_almacen, manager);
   }
 
   /** Violación del índice único de la clave de idempotencia. */

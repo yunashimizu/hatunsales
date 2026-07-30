@@ -30,6 +30,7 @@ export interface VentaResponse {
   fecha: Date;
   origen: string;
   id_cliente?: number;
+  id_empresa?: number;
   cliente_denominacion: string;
   subtotal: number;
   igv: number;
@@ -47,6 +48,8 @@ export interface VentaListadoResponse {
   id_venta: number;
   fecha: Date;
   origen: string;
+  id_cliente?: number;
+  id_empresa?: number;
   cliente_denominacion: string;
   total: number;
   cantidad_items: number;

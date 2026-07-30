@@ -667,6 +667,11 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     return { ...resultado, datos: resultado.datos.map((c) => this.mapListado(c)) };
   }
 
+  /** Contador para badge de Documentos (CPE pendiente/error). */
+  async monitorAtencion() {
+    return this.repo.contarAtencion();
+  }
+
   async listarPorVenta(id_venta: number): Promise<ComprobanteResponse[]> {
     const lista = await this.repo.listarPorVenta(id_venta);
     return lista.map((c) => this.mapComprobante(c));

@@ -30,6 +30,12 @@ export class ComprobanteController {
     };
   }
 
+  /** Badge Documentos: CPE pendiente + error (no anulados). */
+  @Get('monitor/atencion')
+  monitorAtencion() {
+    return this.service.monitorAtencion();
+  }
+
   /** Calcula el comprobante y lo devuelve armado, sin emitirlo. */
   @Post('preview')
   preview(@Body() body: GenerarComprobanteRequest) {

@@ -16,6 +16,8 @@ export class RolesGuard implements CanActivate {
       administrador: 'admin',
       administradora: 'admin',
       admin: 'admin',
+      superadmin: 'admin',
+      'super admin': 'admin',
       vendedor: 'vendedor',
       cajero: 'caja',
       caja: 'caja',

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { Pedido } from '../../../models/DBModel/tienda/pedido.entity';
 import { PedidoItem } from '../../../models/DBModel/tienda/pedido-item.entity';
 import { PedidoEstado } from '../../../models/DBModel/tienda/pedido-estado.entity';
@@ -34,17 +34,37 @@ export class PedidoRepository {
     'cliente',
   ];
 
-  async crear(data: Partial<Pedido>): Promise<Pedido> {
-    return this.pedidoRepo.save(this.pedidoRepo.create(data));
+  private pedidos(manager?: EntityManager): Repository<Pedido> {
+    return manager ? manager.getRepository(Pedido) : this.pedidoRepo;
   }
 
-  async guardarItems(items: Partial<PedidoItem>[]): Promise<PedidoItem[]> {
-    return this.itemRepo.save(items.map((item) => this.itemRepo.create(item)));
+  private items(manager?: EntityManager): Repository<PedidoItem> {
+    return manager ? manager.getRepository(PedidoItem) : this.itemRepo;
   }
 
-  async registrarEstado(idPedido: number, estado: string, comentario?: string): Promise<PedidoEstado> {
-    return this.estadoRepo.save(
-      this.estadoRepo.create({
+  private estados(manager?: EntityManager): Repository<PedidoEstado> {
+    return manager ? manager.getRepository(PedidoEstado) : this.estadoRepo;
+  }
+
+  async crear(data: Partial<Pedido>, manager?: EntityManager): Promise<Pedido> {
+    const repo = this.pedidos(manager);
+    return repo.save(repo.create(data));
+  }
+
+  async guardarItems(items: Partial<PedidoItem>[], manager?: EntityManager): Promise<PedidoItem[]> {
+    const repo = this.items(manager);
+    return repo.save(items.map((item) => repo.create(item)));
+  }
+
+  async registrarEstado(
+    idPedido: number,
+    estado: string,
+    comentario?: string,
+    manager?: EntityManager,
+  ): Promise<PedidoEstado> {
+    const repo = this.estados(manager);
+    return repo.save(
+      repo.create({
         pedido: { id_pedido: idPedido } as Pedido,
         estado,
         comentario,
@@ -88,8 +108,13 @@ export class PedidoRepository {
     });
   }
 
-  async marcarStockReservado(idPedido: number, reservado: boolean, idAlmacen?: number): Promise<void> {
-    await this.pedidoRepo.update(idPedido, {
+  async marcarStockReservado(
+    idPedido: number,
+    reservado: boolean,
+    idAlmacen?: number,
+    manager?: EntityManager,
+  ): Promise<void> {
+    await this.pedidos(manager).update(idPedido, {
       stock_reservado: reservado,
       ...(idAlmacen ? { id_almacen: idAlmacen } : {}),
       actualizado_en: new Date(),
@@ -97,9 +122,14 @@ export class PedidoRepository {
   }
 
   /** Asigna a cada línea el almacén del que salió su stock. */
-  async asignarAlmacenAItems(idPedido: number, porProducto: Map<number, number>): Promise<void> {
+  async asignarAlmacenAItems(
+    idPedido: number,
+    porProducto: Map<number, number>,
+    manager?: EntityManager,
+  ): Promise<void> {
+    const repo = this.items(manager);
     for (const [idProducto, idAlmacen] of porProducto) {
-      await this.itemRepo
+      await repo
         .createQueryBuilder()
         .update()
         .set({ id_almacen: idAlmacen })

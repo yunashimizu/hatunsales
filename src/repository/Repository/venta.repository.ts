@@ -16,6 +16,7 @@ export interface LineaVentaPersistida {
 
 export interface DatosVenta {
   id_cliente?: number;
+  id_empresa?: number;
   id_caja?: number;
   id_usuario?: number;
   subtotal: number;
@@ -327,18 +328,27 @@ export class VentaRepository {
           if (previas[0]?.id_venta) return Number(previas[0].id_venta);
         }
 
+        let salidasStock: { id_producto: number; id_almacen: number; cantidad: number }[] = [];
         if (opciones.descontarStock) {
-          await this.descontarStock(manager, lineas, opciones.idAlmacenPreferido);
+          salidasStock = await this.descontarStock(manager, lineas, opciones.idAlmacenPreferido);
         }
 
-        const idCaja = datos.id_caja ?? (await this.cajaAbierta(manager));
+        const idCaja =
+          datos.id_caja
+          ?? (await this.cajaAbierta(manager, {
+            idUsuario: datos.id_usuario,
+            idAlmacen: opciones.idAlmacenPreferido,
+          }));
+
+        await this.asegurarColumnaIdEmpresa(manager);
 
         const insertadas = await manager.query(
-          `INSERT INTO ventas (id_cliente, id_caja, fecha, subtotal, igv, total, origen, clave_idempotencia)
-           VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7)
+          `INSERT INTO ventas (id_cliente, id_empresa, id_caja, fecha, subtotal, igv, total, origen, clave_idempotencia)
+           VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8)
            RETURNING id_venta`,
           [
             datos.id_cliente ?? null,
+            datos.id_empresa ?? null,
             idCaja,
             datos.subtotal,
             datos.igv,
@@ -349,6 +359,15 @@ export class VentaRepository {
         );
 
         const idVenta = Number(insertadas[0]?.id_venta);
+
+        await this.asegurarTablaVentaStock(manager);
+        for (const s of salidasStock) {
+          await manager.query(
+            `INSERT INTO venta_stock_salida (id_venta, id_producto, id_almacen, cantidad)
+             VALUES ($1, $2, $3, $4)`,
+            [idVenta, s.id_producto, s.id_almacen, s.cantidad],
+          );
+        }
 
         for (const linea of lineas) {
           await manager.query(
@@ -380,6 +399,8 @@ export class VentaRepository {
         }
 
         if (datos.credito && Number(datos.credito.monto) > 0) {
+          await this.assertCupoCreditoEnTx(manager, datos.credito);
+
           const dias = Math.max(1, Number(datos.credito.dias) || 15);
           const vencimiento = new Date();
           vencimiento.setDate(vencimiento.getDate() + dias);
@@ -415,18 +436,86 @@ export class VentaRepository {
   }
 
   /**
+   * Rechequea cupo dentro de la TX (PostgreSQL FOR UPDATE) para evitar sobregiro
+   * cuando dos cajas cobran crédito a la vez.
+   */
+  private async assertCupoCreditoEnTx(
+    manager: EntityManager,
+    credito: NonNullable<DatosVenta['credito']>,
+  ): Promise<void> {
+    const monto = Number(credito.monto);
+    if (!(monto > 0)) return;
+
+    let limite = 0;
+    let activo = false;
+
+    if (credito.id_empresa) {
+      const filas = await manager.query(
+        `SELECT COALESCE(credito_activo, FALSE) AS credito_activo,
+                COALESCE(limite_credito, 0)::float AS limite_credito
+           FROM empresas WHERE id_empresa = $1
+           FOR UPDATE`,
+        [credito.id_empresa],
+      );
+      if (!filas[0]) throw new Error('CREDITO_ENTIDAD:Empresa no encontrada');
+      activo = filas[0].credito_activo === true || filas[0].credito_activo === 't';
+      limite = Number(filas[0].limite_credito ?? 0);
+    } else if (credito.id_cliente) {
+      const filas = await manager.query(
+        `SELECT COALESCE(credito_activo, FALSE) AS credito_activo,
+                COALESCE(limite_credito, 0)::float AS limite_credito
+           FROM clientes WHERE id_cliente = $1
+           FOR UPDATE`,
+        [credito.id_cliente],
+      );
+      if (!filas[0]) throw new Error('CREDITO_ENTIDAD:Cliente no encontrado');
+      activo = filas[0].credito_activo === true || filas[0].credito_activo === 't';
+      limite = Number(filas[0].limite_credito ?? 0);
+    } else {
+      throw new Error('CREDITO_SIN_CLIENTE');
+    }
+
+    if (!activo) throw new Error('CREDITO_INACTIVO');
+
+    const deudaFilas = credito.id_empresa
+      ? await manager.query(
+          `SELECT COALESCE(SUM(saldo), 0)::float AS saldo
+             FROM cuentas_por_cobrar
+            WHERE id_empresa = $1 AND estado IN ('pendiente', 'parcial', 'vencido')`,
+          [credito.id_empresa],
+        )
+      : await manager.query(
+          `SELECT COALESCE(SUM(saldo), 0)::float AS saldo
+             FROM cuentas_por_cobrar
+            WHERE id_cliente = $1 AND estado IN ('pendiente', 'parcial', 'vencido')`,
+          [credito.id_cliente],
+        );
+
+    const deuda = Number(deudaFilas[0]?.saldo ?? 0);
+    const disponible = Math.round((limite - deuda + Number.EPSILON) * 100) / 100;
+    if (monto > disponible + 0.05) {
+      throw new Error(
+        `CREDITO_INSUFICIENTE:${disponible.toFixed(2)}:${limite.toFixed(2)}:${deuda.toFixed(2)}`,
+      );
+    }
+  }
+
+  /**
    * Con idAlmacenPreferido: descuenta SOLO de ese almacén (sin derrame).
    * Sin él: comportamiento legacy — preferido si hay, luego el de más stock.
+   * Devuelve de qué almacén salió cada unidad (para anular bien).
    */
   private async descontarStock(
     manager: EntityManager,
     lineas: LineaVentaPersistida[],
     idAlmacenPreferido?: number,
-  ): Promise<void> {
+  ): Promise<{ id_producto: number; id_almacen: number; cantidad: number }[]> {
     const exclusivo =
       idAlmacenPreferido != null
       && Number.isFinite(idAlmacenPreferido)
       && idAlmacenPreferido > 0;
+
+    const salidas: { id_producto: number; id_almacen: number; cantidad: number }[] = [];
 
     for (const linea of lineas) {
       const filas = exclusivo
@@ -458,6 +547,12 @@ export class VentaRepository {
         ]);
         await this.registrarMovimiento(manager, linea.id_producto, Number(fila.id_almacen), tomar, 'salida', 'Venta en mostrador');
 
+        salidas.push({
+          id_producto: linea.id_producto,
+          id_almacen: Number(fila.id_almacen),
+          cantidad: tomar,
+        });
+
         pendiente -= tomar;
       }
 
@@ -465,6 +560,8 @@ export class VentaRepository {
         throw new Error(`STOCK_INSUFICIENTE:${linea.id_producto}:${pendiente}`);
       }
     }
+
+    return salidas;
   }
 
   private async registrarMovimiento(
@@ -503,8 +600,57 @@ export class VentaRepository {
     );
   }
 
-  private async cajaAbierta(manager: EntityManager): Promise<number | null> {
+  /**
+   * Caja abierta para la venta (Fase 7):
+   * 1) Apertura del mismo usuario (si aperturas_caja.id_usuario existe)
+   * 2) Caja de la sucursal del almacén de despacho
+   * 3) Cualquier caja abierta (legacy)
+   */
+  private async cajaAbierta(
+    manager: EntityManager,
+    opts?: { idUsuario?: number; idAlmacen?: number },
+  ): Promise<number | null> {
     try {
+      await this.asegurarColumnaIdUsuarioApertura(manager);
+
+      const idUsuario =
+        opts?.idUsuario != null && Number.isFinite(Number(opts.idUsuario)) && Number(opts.idUsuario) > 0
+          ? Number(opts.idUsuario)
+          : null;
+      const idAlmacen =
+        opts?.idAlmacen != null && Number.isFinite(Number(opts.idAlmacen)) && Number(opts.idAlmacen) > 0
+          ? Number(opts.idAlmacen)
+          : null;
+
+      if (idUsuario) {
+        const porUsuario = await manager.query(
+          `SELECT c.id_caja
+             FROM cajas c
+             JOIN aperturas_caja a ON a.id_caja = c.id_caja
+            WHERE a.id_usuario = $1
+              AND NOT EXISTS (SELECT 1 FROM cierres_caja ci WHERE ci.id_apertura = a.id_apertura)
+            ORDER BY a.fecha DESC
+            LIMIT 1`,
+          [idUsuario],
+        );
+        if (porUsuario[0]?.id_caja) return Number(porUsuario[0].id_caja);
+      }
+
+      if (idAlmacen) {
+        const porSucursal = await manager.query(
+          `SELECT c.id_caja
+             FROM cajas c
+             JOIN aperturas_caja a ON a.id_caja = c.id_caja
+             JOIN almacenes al ON al.id_sucursal = c.id_sucursal
+            WHERE al.id_almacen = $1
+              AND NOT EXISTS (SELECT 1 FROM cierres_caja ci WHERE ci.id_apertura = a.id_apertura)
+            ORDER BY a.fecha DESC
+            LIMIT 1`,
+          [idAlmacen],
+        );
+        if (porSucursal[0]?.id_caja) return Number(porSucursal[0].id_caja);
+      }
+
       const filas = await manager.query(
         `SELECT c.id_caja
            FROM cajas c
@@ -513,22 +659,36 @@ export class VentaRepository {
           ORDER BY a.fecha DESC
           LIMIT 1`,
       );
-      return filas[0]?.id_caja ?? null;
+      return filas[0]?.id_caja != null ? Number(filas[0].id_caja) : null;
     } catch {
       return null;
     }
   }
 
+  private async asegurarColumnaIdUsuarioApertura(manager?: EntityManager): Promise<void> {
+    const q = manager ?? this.dataSource;
+    await q.query(`
+      ALTER TABLE aperturas_caja ADD COLUMN IF NOT EXISTS id_usuario INTEGER
+    `);
+  }
+
   // ── Consultas ────────────────────────────────────────────────
 
   async obtener(idVenta: number): Promise<any | null> {
+    await this.asegurarColumnaIdEmpresa();
     const filas = await this.dataSource.query(
       `SELECT v.id_venta, v.fecha, v.subtotal, v.igv, v.total,
               COALESCE(v.origen, 'mostrador') AS origen,
               v.id_cliente,
-              TRIM(CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno)) AS cliente_denominacion
+              v.id_empresa,
+              COALESCE(
+                NULLIF(TRIM(CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno)), ''),
+                NULLIF(TRIM(COALESCE(e.razon_social, e.nombre_comercial, e.ruc)), ''),
+                'CLIENTES VARIOS'
+              ) AS cliente_denominacion
          FROM ventas v
          LEFT JOIN clientes c ON c.id_cliente = v.id_cliente
+         LEFT JOIN empresas e ON e.id_empresa = v.id_empresa
         WHERE v.id_venta = $1`,
       [idVenta],
     );
@@ -553,6 +713,7 @@ export class VentaRepository {
   }
 
   async listar(filtro: FiltroVentas): Promise<{ datos: any[]; total: number; pagina: number; por_pagina: number }> {
+    await this.asegurarColumnaIdEmpresa();
     const pagina = Math.max(1, Number(filtro.pagina) || 1);
     const porPagina = Math.min(100, Math.max(1, Number(filtro.por_pagina) || 20));
 
@@ -563,6 +724,9 @@ export class VentaRepository {
       parametros.push(`%${filtro.texto.trim().toLowerCase()}%`);
       condiciones.push(
         `(LOWER(TRIM(CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno))) LIKE $${parametros.length}
+          OR LOWER(COALESCE(e.razon_social, '')) LIKE $${parametros.length}
+          OR LOWER(COALESCE(e.nombre_comercial, '')) LIKE $${parametros.length}
+          OR LOWER(COALESCE(e.ruc, '')) LIKE $${parametros.length}
           OR CAST(v.id_venta AS TEXT) LIKE $${parametros.length})`,
       );
     }
@@ -584,6 +748,7 @@ export class VentaRepository {
     const totales = await this.dataSource.query(
       `SELECT COUNT(*)::int AS total FROM ventas v
        LEFT JOIN clientes c ON c.id_cliente = v.id_cliente
+       LEFT JOIN empresas e ON e.id_empresa = v.id_empresa
        WHERE ${donde}`,
       parametros,
     );
@@ -593,7 +758,13 @@ export class VentaRepository {
     const datos = await this.dataSource.query(
       `SELECT v.id_venta, v.fecha, v.total,
               COALESCE(v.origen, 'mostrador') AS origen,
-              COALESCE(NULLIF(TRIM(CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno)), ''), 'CLIENTES VARIOS') AS cliente_denominacion,
+              v.id_cliente,
+              v.id_empresa,
+              COALESCE(
+                NULLIF(TRIM(CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno)), ''),
+                NULLIF(TRIM(COALESCE(e.razon_social, e.nombre_comercial, e.ruc)), ''),
+                'CLIENTES VARIOS'
+              ) AS cliente_denominacion,
               (SELECT COUNT(*)::int FROM detalle_venta d WHERE d.id_venta = v.id_venta) AS cantidad_items,
               cp.id_comprobante,
               cp.serie,
@@ -602,6 +773,7 @@ export class VentaRepository {
               cp.anulado AS comprobante_anulado
          FROM ventas v
          LEFT JOIN clientes c ON c.id_cliente = v.id_cliente
+         LEFT JOIN empresas e ON e.id_empresa = v.id_empresa
          LEFT JOIN LATERAL (
                 SELECT id_comprobante, serie, numero, estado, anulado
                   FROM comprobantes
@@ -618,36 +790,160 @@ export class VentaRepository {
     return { datos, total: totales[0]?.total ?? 0, pagina, por_pagina: porPagina };
   }
 
-  /** Devuelve al inventario lo que salió por una venta anulada. */
-  async devolverStock(idVenta: number): Promise<void> {
-    await this.dataSource.transaction(async (manager) => {
-      const lineas = await manager.query(
-        'SELECT id_producto, cantidad FROM detalle_venta WHERE id_venta = $1 AND id_producto IS NOT NULL',
+  /** Devuelve al inventario lo que salió por una venta anulada (mismo almacén) y cierra CxC. */
+  async anularVentaCompleta(idVenta: number): Promise<{
+    stock_devuelto: boolean;
+    cxc_cerradas: number;
+    ya_anulada: boolean;
+  }> {
+    return this.dataSource.transaction(async (manager) => {
+      await this.asegurarTablaVentaStock(manager);
+      await this.asegurarColumnaEstadoVenta(manager);
+
+      const cab = await manager.query(
+        `SELECT id_venta, COALESCE(estado, 'activa') AS estado FROM ventas WHERE id_venta = $1 FOR UPDATE`,
+        [idVenta],
+      );
+      if (!cab[0]) throw new Error('VENTA_NO_ENCONTRADA');
+      if (String(cab[0].estado).toLowerCase() === 'anulada') {
+        return { stock_devuelto: false, cxc_cerradas: 0, ya_anulada: true };
+      }
+
+      const salidas = await manager.query(
+        `SELECT id_producto, id_almacen, cantidad
+           FROM venta_stock_salida WHERE id_venta = $1`,
         [idVenta],
       );
 
-      for (const linea of lineas) {
-        const existentes = await manager.query(
-          'SELECT id_inventario, id_almacen FROM inventario WHERE id_producto = $1 ORDER BY stock DESC LIMIT 1',
-          [linea.id_producto],
-        );
-
-        if (existentes.length > 0) {
-          await manager.query('UPDATE inventario SET stock = stock + $1 WHERE id_inventario = $2', [
-            Number(linea.cantidad),
-            existentes[0].id_inventario,
-          ]);
-          await this.registrarMovimiento(
+      if (salidas.length > 0) {
+        for (const s of salidas) {
+          await this.devolverAAlmacen(
             manager,
-            Number(linea.id_producto),
-            Number(existentes[0].id_almacen),
-            Number(linea.cantidad),
-            'entrada',
-            'Devolución por venta anulada',
+            Number(s.id_producto),
+            Number(s.id_almacen),
+            Number(s.cantidad),
           );
         }
+      } else {
+        // Ventas anteriores a Fase 4: fallback (mismo comportamiento mejorado por producto).
+        const lineas = await manager.query(
+          'SELECT id_producto, cantidad FROM detalle_venta WHERE id_venta = $1 AND id_producto IS NOT NULL',
+          [idVenta],
+        );
+        for (const linea of lineas) {
+          const existentes = await manager.query(
+            `SELECT id_inventario, id_almacen FROM inventario
+              WHERE id_producto = $1 ORDER BY stock DESC LIMIT 1 FOR UPDATE`,
+            [linea.id_producto],
+          );
+          if (existentes[0]) {
+            await manager.query('UPDATE inventario SET stock = stock + $1 WHERE id_inventario = $2', [
+              Number(linea.cantidad),
+              existentes[0].id_inventario,
+            ]);
+            await this.registrarMovimiento(
+              manager,
+              Number(linea.id_producto),
+              Number(existentes[0].id_almacen),
+              Number(linea.cantidad),
+              'entrada',
+              'Devolución por venta anulada',
+            );
+          }
+        }
       }
+
+      const cxc = await manager.query(
+        `UPDATE cuentas_por_cobrar
+            SET saldo = 0, estado = 'anulado'
+          WHERE id_venta = $1
+            AND estado IN ('pendiente', 'parcial', 'vencido')
+          RETURNING id_cxc`,
+        [idVenta],
+      );
+
+      await manager.query(
+        `UPDATE ventas SET estado = 'anulada' WHERE id_venta = $1`,
+        [idVenta],
+      );
+
+      return {
+        stock_devuelto: true,
+        cxc_cerradas: (cxc ?? []).length,
+        ya_anulada: false,
+      };
     });
+  }
+
+  /** @deprecated Usar anularVentaCompleta */
+  async devolverStock(idVenta: number): Promise<void> {
+    await this.anularVentaCompleta(idVenta);
+  }
+
+  private async devolverAAlmacen(
+    manager: EntityManager,
+    idProducto: number,
+    idAlmacen: number,
+    cantidad: number,
+  ): Promise<void> {
+    const filas = await manager.query(
+      `SELECT id_inventario FROM inventario
+        WHERE id_producto = $1 AND id_almacen = $2
+        FOR UPDATE`,
+      [idProducto, idAlmacen],
+    );
+    if (filas[0]) {
+      await manager.query('UPDATE inventario SET stock = stock + $1 WHERE id_inventario = $2', [
+        cantidad,
+        filas[0].id_inventario,
+      ]);
+    } else {
+      await manager.query(
+        `INSERT INTO inventario (id_producto, id_almacen, stock)
+         VALUES ($1, $2, $3)`,
+        [idProducto, idAlmacen, cantidad],
+      );
+    }
+    await this.registrarMovimiento(
+      manager,
+      idProducto,
+      idAlmacen,
+      cantidad,
+      'entrada',
+      'Devolución por venta anulada',
+    );
+  }
+
+  private async asegurarTablaVentaStock(manager?: EntityManager): Promise<void> {
+    const q = manager ?? this.dataSource;
+    await q.query(`
+      CREATE TABLE IF NOT EXISTS venta_stock_salida (
+        id SERIAL PRIMARY KEY,
+        id_venta INTEGER NOT NULL REFERENCES ventas(id_venta) ON DELETE CASCADE,
+        id_producto INTEGER NOT NULL,
+        id_almacen INTEGER NOT NULL,
+        cantidad NUMERIC(12, 3) NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_venta_stock_salida_venta ON venta_stock_salida (id_venta);
+    `);
+  }
+
+  private async asegurarColumnaEstadoVenta(manager?: EntityManager): Promise<void> {
+    const q = manager ?? this.dataSource;
+    await q.query(`
+      ALTER TABLE ventas ADD COLUMN IF NOT EXISTS estado VARCHAR(20) DEFAULT 'activa';
+    `);
+  }
+
+  private async asegurarColumnaIdEmpresa(manager?: EntityManager): Promise<void> {
+    const q = manager ?? this.dataSource;
+    await q.query(`
+      ALTER TABLE ventas
+        ADD COLUMN IF NOT EXISTS id_empresa INTEGER REFERENCES empresas(id_empresa)
+    `);
+    await q.query(`
+      CREATE INDEX IF NOT EXISTS idx_ventas_id_empresa ON ventas (id_empresa)
+    `);
   }
 
   async metodosPago(): Promise<{ id_metodo: number; nombre: string; tipo: string }[]> {
