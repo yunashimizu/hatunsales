@@ -333,12 +333,13 @@ export class CreditoRepository implements OnModuleInit {
     datos: { credito_activo?: boolean; limite_credito?: number; dias_credito?: number },
   ) {
     await this.asegurarSchema();
-    await this.dataSource.query(
+    const filas = await this.dataSource.query(
       `UPDATE clientes SET
          credito_activo = COALESCE($2, credito_activo),
          limite_credito = COALESCE($3, limite_credito),
          dias_credito = COALESCE($4, dias_credito)
-       WHERE id_cliente = $1`,
+       WHERE id_cliente = $1
+       RETURNING id_cliente`,
       [
         idCliente,
         datos.credito_activo === undefined ? null : datos.credito_activo,
@@ -346,6 +347,7 @@ export class CreditoRepository implements OnModuleInit {
         datos.dias_credito === undefined ? null : datos.dias_credito,
       ],
     );
+    if (!filas?.[0]) return null;
     return this.lineaCliente(idCliente);
   }
 
@@ -354,12 +356,13 @@ export class CreditoRepository implements OnModuleInit {
     datos: { credito_activo?: boolean; limite_credito?: number; dias_credito?: number },
   ) {
     await this.asegurarSchema();
-    await this.dataSource.query(
+    const filas = await this.dataSource.query(
       `UPDATE empresas SET
          credito_activo = COALESCE($2, credito_activo),
          limite_credito = COALESCE($3, limite_credito),
          dias_credito = COALESCE($4, dias_credito)
-       WHERE id_empresa = $1`,
+       WHERE id_empresa = $1
+       RETURNING id_empresa`,
       [
         idEmpresa,
         datos.credito_activo === undefined ? null : datos.credito_activo,
@@ -367,6 +370,7 @@ export class CreditoRepository implements OnModuleInit {
         datos.dias_credito === undefined ? null : datos.dias_credito,
       ],
     );
+    if (!filas?.[0]) return null;
     return this.lineaEmpresa(idEmpresa);
   }
 }
