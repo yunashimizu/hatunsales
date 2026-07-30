@@ -42,6 +42,10 @@ lerna-debug.log*
 .env.production.local
 .env.local
 
+# Notas personales / tokens (nunca subir)
+text.text
+*.text
+
 # temp directory
 .temp
 .tmp

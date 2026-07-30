@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
@@ -5,8 +6,7 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { join } from 'path';
 import cookieParser from 'cookie-parser';
-
-const JWT_DEFAULT = 'hatunsales_secret_key_2024';
+import { JWT_DEFAULT_DEV } from './config/jwt.config';
 
 async function bootstrap() {
   const esProd =
@@ -14,8 +14,8 @@ async function bootstrap() {
     !!process.env.RAILWAY_ENVIRONMENT ||
     !!process.env.RAILWAY_ENVIRONMENT_NAME;
 
-  const jwtSecret = process.env.JWT_SECRET ?? JWT_DEFAULT;
-  if (esProd && (!process.env.JWT_SECRET || jwtSecret === JWT_DEFAULT)) {
+  const jwtSecret = process.env.JWT_SECRET ?? JWT_DEFAULT_DEV;
+  if (esProd && (!process.env.JWT_SECRET || jwtSecret === JWT_DEFAULT_DEV)) {
     Logger.error(
       'JWT_SECRET no está definido (o usa el valor por defecto). Configúralo en Railway antes de subir a producción.',
       'Bootstrap',

@@ -1,4 +1,15 @@
 /**
+ * Secretos JWT.
+ *
+ * El valor real NUNCA va hardcodeado aquí: vive en:
+ *   - `.env` (local, gitignored)
+ *   - Variables de Railway (producción)
+ *
+ * Fail-fast en `main.ts` si en prod falta o es el default débil.
+ */
+export const JWT_DEFAULT_DEV = 'hatunsales_secret_key_2024';
+
+/**
  * Duración del JWT por tipo de usuario.
  *
  * - Staff (admin, caja, vendedor): turno de tienda (~12h)
@@ -9,7 +20,7 @@
  *   JWT_EXPIRES_CLIENTE=2h
  */
 export const jwtConfig = {
-  secret: process.env.JWT_SECRET ?? 'hatunsales_secret_key_2024',
+  secret: process.env.JWT_SECRET ?? JWT_DEFAULT_DEV,
 
   /** Empleados de mostrador y administración */
   staff: {
