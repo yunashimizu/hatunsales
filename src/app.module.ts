@@ -88,6 +88,9 @@ import { CreditoBussnies } from './bussnies/Bussnies/credito.bussnies';
 import { CajaPagosController } from './api/controllers/caja-pagos.controller';
 import { CajaPagosRepository } from './repository/Repository/caja-pagos.repository';
 import { CajaPagosBussnies } from './bussnies/Bussnies/caja-pagos.bussnies';
+import { CajaSesionController } from './api/controllers/caja-sesion.controller';
+import { CajaSesionRepository } from './repository/Repository/caja-sesion.repository';
+import { CajaSesionBussnies } from './bussnies/Bussnies/caja-sesion.bussnies';
 import { ProveedorController } from './api/controllers/proveedor.controller';
 import { RecepcionController } from './api/controllers/recepcion.controller';
 import { RecepcionRepository } from './repository/Repository/recepcion.repository';
@@ -180,6 +183,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
   CatalogoController, CarritoController, CheckoutController, PagoWebhookController,
   PedidoController, PedidoAdminController, CuentaTiendaController,
   ReceptorController, VentaController, ArchivoController, CreditoController, CajaPagosController,
+  CajaSesionController,
   ProveedorController, RecepcionController],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
   LogRepository, AuthBussnies, AdminBussnies, RolBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
@@ -194,6 +198,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
    CulqiPasarela, PasarelaSimulada, pasarelaProvider,
    ConfiguracionRepository, ReceptorRepository, ReceptorBussnies, ConsultaDocumentoService,
    VentaRepository, VentaBussnies, CreditoRepository, CreditoBussnies, CajaPagosRepository, CajaPagosBussnies,
+   CajaSesionRepository, CajaSesionBussnies,
    RecepcionRepository, RecepcionBussnies,
    CloudinaryAlmacen, BaseDatosAlmacen, DiscoAlmacen, almacenProvider],
 })

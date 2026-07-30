@@ -19,8 +19,14 @@ export class RolesGuard implements CanActivate {
       superadmin: 'admin',
       'super admin': 'admin',
       vendedor: 'vendedor',
+      vendedora: 'vendedor',
       cajero: 'caja',
       caja: 'caja',
+      consulta: 'consulta',
+      demo: 'consulta',
+      visor: 'consulta',
+      /** Nombre viejo del rol id 2. */
+      usuario: 'consulta',
       cliente: 'cliente',
     };
 

@@ -18,6 +18,8 @@ import {
 } from '../../util/fiscal/calculo-fiscal';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { pasarelaConfig } from '../../config/pasarela.config';
+import { CajaSesionBussnies } from './caja-sesion.bussnies';
+import { normalizarRol } from '../../config/roles.config';
 
 /**
  * Punto de venta de mostrador.
@@ -39,6 +41,7 @@ export class VentaBussnies {
     private readonly creditoRepo: CreditoRepository,
     private readonly credito: CreditoBussnies,
     private readonly cajaPagosRepo: CajaPagosRepository,
+    private readonly cajaSesion: CajaSesionBussnies,
   ) {}
 
   // ── Apoyo al mostrador ───────────────────────────────────────
@@ -93,6 +96,9 @@ export class VentaBussnies {
         cuerpoError(CodigoError.VENTA_SIN_ITEMS, 'Agregue al menos un producto a la venta'),
       );
     }
+
+    // C4: solo si caja_modo=estricto (default blando = no bloquea). Tienda no aplica.
+    await this.assertCajaModoSiEstricto(usuario);
 
     if (dto.clave_idempotencia) {
       const existente = await this.repo.buscarPorClaveIdempotencia(dto.clave_idempotencia);
@@ -612,6 +618,29 @@ export class VentaBussnies {
       monto_recibido: p.monto_recibido,
       vuelto: p.vuelto,
     }));
+  }
+
+  /**
+   * Modo estricto (opt-in vía configuraciones.caja_modo).
+   * Default blando: no hace nada. Tienda web no usa este camino.
+   */
+  private async assertCajaModoSiEstricto(usuario?: UsuarioToken): Promise<void> {
+    const { modo, bypassAdmin } = await this.cajaSesion.configEstricto();
+    if (modo !== 'estricto') return;
+
+    const rol = normalizarRol(usuario?.rol);
+    if (bypassAdmin && rol === 'admin') return;
+
+    const idUsuario = Number(usuario?.id_usuario);
+    const ok = await this.cajaSesion.usuarioTieneApertura(idUsuario);
+    if (!ok) {
+      throw new BadRequestException(
+        cuerpoError(
+          CodigoError.CAJA_NO_ABIERTA,
+          'Debe abrir una caja antes de cobrar (modo estricto).',
+        ),
+      );
+    }
   }
 
   private async almacenPorDefecto(): Promise<number | undefined> {

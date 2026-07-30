@@ -10,14 +10,14 @@ export class StockSucursalController {
 
   @Get('producto/:id_producto/sucursal/:id_sucursal')
   @UseGuards(JwtGuard, RolesGuard)
-  @Roles('admin', 'vendedor', 'caja')
+  @Roles('admin', 'vendedor', 'caja', 'consulta')
   getStock(@Param('id_producto') id_producto: string, @Param('id_sucursal') id_sucursal: string) {
     return this.service.obtenerStockProductoEnSucursal(Number(id_producto), Number(id_sucursal));
   }
 
   @Get('filtro')
   @UseGuards(JwtGuard, RolesGuard)
-  @Roles('admin', 'vendedor', 'caja')
+  @Roles('admin', 'vendedor', 'caja', 'consulta')
   filteredList(
     @Query('id_producto') id_producto?: string,
     @Query('id_sucursal') id_sucursal?: string,
@@ -41,14 +41,14 @@ export class StockSucursalController {
 
   @Get('bajo-stock')
   @UseGuards(JwtGuard, RolesGuard)
-  @Roles('admin', 'vendedor')
+  @Roles('admin', 'vendedor', 'consulta')
   lowStock(@Query('threshold') threshold = '10') {
     return this.service.listarBajoStock(Number(threshold));
   }
 
   @Get('alertas-stock-minimo')
   @UseGuards(JwtGuard, RolesGuard)
-  @Roles('admin', 'vendedor')
+  @Roles('admin', 'vendedor', 'consulta')
   stockMinAlerts() {
     return this.service.listarAlertasStockMinimo();
   }
@@ -65,7 +65,7 @@ export class StockSucursalController {
 
   @Get('resumen-sucursal')
   @UseGuards(JwtGuard, RolesGuard)
-  @Roles('admin', 'vendedor')
+  @Roles('admin', 'vendedor', 'consulta')
   resumenSucursal() {
     return this.service.resumenPorSucursal();
   }

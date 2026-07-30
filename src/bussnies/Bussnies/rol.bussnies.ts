@@ -14,6 +14,7 @@ import { ROL_IDS } from '../../config/roles.config';
 /** Roles que no se pueden borrar (sostienen auth admin/tienda). */
 const ROLES_PROTEGIDOS = new Set<number>([
   ROL_IDS.ADMIN,
+  ROL_IDS.CONSULTA,
   ROL_IDS.VENDEDOR,
   ROL_IDS.CAJA,
   ROL_IDS.CLIENTE,

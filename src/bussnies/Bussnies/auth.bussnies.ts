@@ -49,6 +49,7 @@ export class AuthBussnies {
       administrador: 'admin',
       administradora: 'admin',
       admin: 'admin',
+      superadmin: 'admin',
       vendedor: 'vendedor',
       cajero: 'caja',
       caja: 'caja',
@@ -56,8 +57,12 @@ export class AuthBussnies {
       trabajadores: 'vendedor',
       empleado: 'vendedor',
       empleados: 'vendedor',
+      consulta: 'consulta',
+      demo: 'consulta',
+      visor: 'consulta',
+      /** Nombre viejo del rol id 2. */
+      usuario: 'consulta',
       cliente: 'cliente',
-      usuario: 'usuario',
     };
 
     return aliases[normalized] ?? normalized;

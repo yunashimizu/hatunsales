@@ -5,6 +5,7 @@ const ROLES_STAFF = new Set([
   'admin',
   'administrador',
   'administradora',
+  'superadmin',
   'caja',
   'cajero',
   'cajeroa',
@@ -14,6 +15,11 @@ const ROLES_STAFF = new Set([
   'empleados',
   'trabajador',
   'trabajadores',
+  'consulta',
+  'demo',
+  'visor',
+  /** Nombre viejo del rol id 2 (consulta). */
+  'usuario',
 ]);
 
 export class TokenUtil {

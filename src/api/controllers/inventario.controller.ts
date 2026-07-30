@@ -16,14 +16,14 @@ export class InventarioController {
   constructor(private readonly service: InventarioBussnies) {}
 
   @Get()
-  @Roles('admin', 'vendedor', 'caja')
+  @Roles('admin', 'vendedor', 'caja', 'consulta')
   getAll() {
     return this.service.getAll();
   }
 
   /** Vista del panel: producto, almacén, sucursal, estado y valorizado. */
   @Get('detallado')
-  @Roles('admin', 'vendedor', 'caja')
+  @Roles('admin', 'vendedor', 'caja', 'consulta')
   detallado(
     @Query('texto') texto?: string,
     @Query('id_almacen') idAlmacen?: string,
@@ -43,19 +43,19 @@ export class InventarioController {
   }
 
   @Get('resumen')
-  @Roles('admin', 'vendedor', 'caja')
+  @Roles('admin', 'vendedor', 'caja', 'consulta')
   resumen() {
     return this.service.resumen();
   }
 
   @Get('almacenes')
-  @Roles('admin', 'vendedor', 'caja')
+  @Roles('admin', 'vendedor', 'caja', 'consulta')
   almacenes() {
     return this.service.almacenes();
   }
 
   @Get('alertas')
-  @Roles('admin', 'vendedor', 'caja')
+  @Roles('admin', 'vendedor', 'caja', 'consulta')
   alertas() {
     return this.service.alertas();
   }
@@ -70,7 +70,7 @@ export class InventarioController {
   }
 
   @Get('producto/:id_producto')
-  @Roles('admin', 'vendedor', 'caja')
+  @Roles('admin', 'vendedor', 'caja', 'consulta')
   getByProducto(@Param('id_producto') id_producto: string) {
     return this.service.getByProducto(Number(id_producto));
   }

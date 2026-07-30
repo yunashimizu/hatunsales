@@ -16,8 +16,12 @@ export const UsuarioActual = createParamDecorator(
 );
 
 /** Roles del personal interno; el resto se considera cliente de la tienda. */
-export const ROLES_INTERNOS = ['admin', 'vendedor', 'caja'];
+export const ROLES_INTERNOS = ['admin', 'vendedor', 'caja', 'consulta', 'superadmin'];
 
 export function esUsuarioInterno(usuario?: UsuarioToken): boolean {
-  return !!usuario && ROLES_INTERNOS.includes((usuario.rol ?? '').toLowerCase());
+  const rol = (usuario?.rol ?? '').trim().toLowerCase();
+  if (!usuario || !rol) return false;
+  if (ROLES_INTERNOS.includes(rol)) return true;
+  // Alias residuales
+  return rol === 'demo' || rol === 'visor' || rol === 'usuario' || rol === 'cajero';
 }
