@@ -16,13 +16,48 @@ export class VentaController {
 
   /** Autocompletado de productos del punto de venta. */
   @Get('productos')
-  buscarProductos(@Query('q') q: string, @Query('limite') limite?: string) {
-    return this.service.buscarProductos(q ?? '', Number(limite) || 12);
+  buscarProductos(
+    @Query('q') q: string,
+    @Query('limite') limite?: string,
+    @Query('id_almacen') idAlmacen?: string,
+  ) {
+    const alm = idAlmacen ? Number(idAlmacen) : undefined;
+    return this.service.buscarProductos(
+      q ?? '',
+      Number(limite) || 12,
+      Number.isFinite(alm) && (alm as number) > 0 ? alm : undefined,
+    );
+  }
+
+  /** Catálogo activo para cache local del mostrador. */
+  @Get('productos/catalogo')
+  catalogoProductos(
+    @Query('limite') limite?: string,
+    @Query('id_almacen') idAlmacen?: string,
+  ) {
+    const alm = idAlmacen ? Number(idAlmacen) : undefined;
+    return this.service.catalogoProductos(
+      Number(limite) || 5000,
+      Number.isFinite(alm) && (alm as number) > 0 ? alm : undefined,
+    );
   }
 
   @Get('productos/barcode/:codigo')
-  porCodigoBarras(@Param('codigo') codigo: string) {
-    return this.service.buscarPorCodigoBarras(codigo);
+  porCodigoBarras(
+    @Param('codigo') codigo: string,
+    @Query('id_almacen') idAlmacen?: string,
+  ) {
+    const alm = idAlmacen ? Number(idAlmacen) : undefined;
+    return this.service.buscarPorCodigoBarras(
+      codigo,
+      Number.isFinite(alm) && (alm as number) > 0 ? alm : undefined,
+    );
+  }
+
+  /** Almacenes + default para el selector de sede/caja del POS. */
+  @Get('contexto-pos')
+  contextoPos() {
+    return this.service.contextoPos();
   }
 
   @Get('metodos-pago')

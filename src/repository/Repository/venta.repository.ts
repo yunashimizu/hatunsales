@@ -60,13 +60,64 @@ export class VentaRepository {
 
   // ── Búsqueda de productos para el mostrador ──────────────────
 
+  private indicesListos = false;
+
+  /** Índices para barcode/SKU/nombre del POS (idempotente). */
+  async asegurarIndicesBusqueda(): Promise<void> {
+    if (this.indicesListos) return;
+    try {
+      await this.dataSource.query(`
+        CREATE INDEX IF NOT EXISTS idx_productos_estado ON productos (estado);
+        CREATE INDEX IF NOT EXISTS idx_productos_codigo_barras
+          ON productos (codigo_barras)
+          WHERE codigo_barras IS NOT NULL AND codigo_barras <> '';
+        CREATE INDEX IF NOT EXISTS idx_productos_sku_lower
+          ON productos (LOWER(sku));
+        CREATE INDEX IF NOT EXISTS idx_productos_nombre_lower
+          ON productos (LOWER(nombre));
+        CREATE INDEX IF NOT EXISTS idx_inventario_id_producto
+          ON inventario (id_producto);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_ventas_clave_idempotencia
+          ON ventas (clave_idempotencia)
+          WHERE clave_idempotencia IS NOT NULL AND clave_idempotencia <> '';
+        CREATE INDEX IF NOT EXISTS idx_inventario_producto_almacen
+          ON inventario (id_producto, id_almacen);
+      `);
+      this.indicesListos = true;
+    } catch (e) {
+      this.log.warn(`No se pudieron crear índices de búsqueda POS: ${e}`);
+    }
+  }
+
+  /** JOIN de stock: un almacén concreto o suma de todos (legacy). */
+  private joinStock(idAlmacen?: number): { sql: string; params: number[] } {
+    if (idAlmacen != null && Number.isFinite(idAlmacen) && idAlmacen > 0) {
+      return {
+        sql: `LEFT JOIN inventario inv
+                ON inv.id_producto = p.id_producto AND inv.id_almacen = $ALM`,
+        params: [idAlmacen],
+      };
+    }
+    return {
+      sql: `LEFT JOIN (
+              SELECT i.id_producto, SUM(i.stock) AS stock
+                FROM inventario i
+               GROUP BY i.id_producto
+            ) inv ON inv.id_producto = p.id_producto`,
+      params: [],
+    };
+  }
+
   /**
-   * Autocompletado del punto de venta. Busca por nombre, SKU o código de
-   * barras y trae el stock sumado de todos los almacenes.
+   * Catálogo completo del mostrador (activos). Una carga para cache en el front.
+   * Misma forma de respuesta que el autocompletado.
    */
-  async buscarProductos(termino: string, limite = 12): Promise<ProductoVentaResponse[]> {
-    const texto = (termino ?? '').trim();
-    if (texto.length < 1) return [];
+  async catalogoProductos(limite = 5000, idAlmacen?: number): Promise<ProductoVentaResponse[]> {
+    await this.asegurarIndicesBusqueda();
+    const tope = Math.min(Math.max(Number(limite) || 5000, 1), 8000);
+    const stock = this.joinStock(idAlmacen);
+    const idxLimite = stock.params.length + 1;
+    const joinSql = stock.sql.replace('$ALM', `$${stock.params.length || 1}`);
 
     const filas = await this.dataSource.query(
       `SELECT p.id_producto,
@@ -79,9 +130,51 @@ export class VentaRepository {
               COALESCE(inv.stock, 0)         AS stock_disponible,
               COALESCE(img.url, '')          AS imagen_url
          FROM productos p
+         ${joinSql}
          LEFT JOIN LATERAL (
-                SELECT SUM(i.stock) AS stock FROM inventario i WHERE i.id_producto = p.id_producto
-              ) inv ON TRUE
+                SELECT pi.url FROM productos_imagenes pi
+                 WHERE pi.id_producto = p.id_producto
+                 ORDER BY pi.is_primary DESC NULLS LAST, pi.orden ASC NULLS LAST
+                 LIMIT 1
+              ) img ON TRUE
+        WHERE COALESCE(p.estado, TRUE) = TRUE
+        ORDER BY p.nombre ASC
+        LIMIT $${idxLimite}`,
+      [...stock.params, tope],
+    );
+
+    return filas.map((f: any) => this.mapProducto(f));
+  }
+
+  /**
+   * Autocompletado del punto de venta. Busca por nombre, SKU o código de
+   * barras. Con idAlmacen: stock de ese almacén; sin él: suma de todos.
+   */
+  async buscarProductos(
+    termino: string,
+    limite = 12,
+    idAlmacen?: number,
+  ): Promise<ProductoVentaResponse[]> {
+    await this.asegurarIndicesBusqueda();
+    const texto = (termino ?? '').trim();
+    if (texto.length < 1) return [];
+
+    const stock = this.joinStock(idAlmacen);
+    const offset = stock.params.length;
+    const joinSql = stock.sql.replace('$ALM', `$${offset || 1}`);
+
+    const filas = await this.dataSource.query(
+      `SELECT p.id_producto,
+              p.nombre,
+              COALESCE(p.sku, '')            AS sku,
+              COALESCE(p.codigo_barras, '')  AS codigo_barras,
+              COALESCE(p.unidad_medida, '')  AS unidad_medida,
+              COALESCE(p.precio_venta, 0)    AS precio_venta,
+              COALESCE(p.descuento, 0)       AS descuento,
+              COALESCE(inv.stock, 0)         AS stock_disponible,
+              COALESCE(img.url, '')          AS imagen_url
+         FROM productos p
+         ${joinSql}
          LEFT JOIN LATERAL (
                 SELECT pi.url FROM productos_imagenes pi
                  WHERE pi.id_producto = p.id_producto
@@ -90,15 +183,22 @@ export class VentaRepository {
               ) img ON TRUE
         WHERE COALESCE(p.estado, TRUE) = TRUE
           AND (
-                LOWER(p.nombre) LIKE $1
-             OR LOWER(COALESCE(p.sku, '')) LIKE $1
-             OR COALESCE(p.codigo_barras, '') LIKE $2
+                LOWER(p.nombre) LIKE $${offset + 1}
+             OR LOWER(COALESCE(p.sku, '')) LIKE $${offset + 1}
+             OR COALESCE(p.codigo_barras, '') LIKE $${offset + 2}
           )
-        ORDER BY (COALESCE(p.codigo_barras, '') = $3) DESC,
-                 (LOWER(COALESCE(p.sku, '')) = $4) DESC,
+        ORDER BY (COALESCE(p.codigo_barras, '') = $${offset + 3}) DESC,
+                 (LOWER(COALESCE(p.sku, '')) = $${offset + 4}) DESC,
                  p.nombre ASC
-        LIMIT $5`,
-      [`%${texto.toLowerCase()}%`, `%${texto}%`, texto, texto.toLowerCase(), limite],
+        LIMIT $${offset + 5}`,
+      [
+        ...stock.params,
+        `%${texto.toLowerCase()}%`,
+        `%${texto}%`,
+        texto,
+        texto.toLowerCase(),
+        limite,
+      ],
     );
 
     return filas.map((f: any) => this.mapProducto(f));
@@ -108,9 +208,17 @@ export class VentaRepository {
    * Match exacto para el lector USB (HID): primero codigo_barras, luego SKU.
    * No usa LIKE para no agregar un producto equivocado.
    */
-  async buscarPorCodigoBarras(codigo: string): Promise<ProductoVentaResponse | null> {
+  async buscarPorCodigoBarras(
+    codigo: string,
+    idAlmacen?: number,
+  ): Promise<ProductoVentaResponse | null> {
+    await this.asegurarIndicesBusqueda();
     const valor = codigo.trim();
     if (!valor) return null;
+
+    const stock = this.joinStock(idAlmacen);
+    const offset = stock.params.length;
+    const joinSql = stock.sql.replace('$ALM', `$${offset || 1}`);
 
     const filas = await this.dataSource.query(
       `SELECT p.id_producto,
@@ -123,9 +231,7 @@ export class VentaRepository {
               COALESCE(inv.stock, 0)         AS stock_disponible,
               COALESCE(img.url, '')          AS imagen_url
          FROM productos p
-         LEFT JOIN LATERAL (
-                SELECT SUM(i.stock) AS stock FROM inventario i WHERE i.id_producto = p.id_producto
-              ) inv ON TRUE
+         ${joinSql}
          LEFT JOIN LATERAL (
                 SELECT pi.url FROM productos_imagenes pi
                  WHERE pi.id_producto = p.id_producto
@@ -134,12 +240,12 @@ export class VentaRepository {
               ) img ON TRUE
         WHERE COALESCE(p.estado, TRUE) = TRUE
           AND (
-                COALESCE(p.codigo_barras, '') = $1
-             OR LOWER(COALESCE(p.sku, '')) = LOWER($1)
+                COALESCE(p.codigo_barras, '') = $${offset + 1}
+             OR LOWER(COALESCE(p.sku, '')) = LOWER($${offset + 1})
           )
-        ORDER BY (COALESCE(p.codigo_barras, '') = $1) DESC
+        ORDER BY (COALESCE(p.codigo_barras, '') = $${offset + 1}) DESC
         LIMIT 1`,
-      [valor],
+      [...stock.params, valor],
     );
 
     return filas[0] ? this.mapProducto(filas[0]) : null;
@@ -202,6 +308,8 @@ export class VentaRepository {
    * la cabecera, el detalle y los pagos.
    *
    * Si el stock de cualquier línea no alcanza, no se escribe nada.
+   * Clave de idempotencia duplicada → se devuelve la venta ya existente
+   * (la transacción se revierte para no descontar stock de más).
    */
   async registrar(
     datos: DatosVenta,
@@ -209,100 +317,134 @@ export class VentaRepository {
     pagos: { id_metodo?: number; monto: number; referencia?: string; monto_recibido?: number; vuelto?: number }[],
     opciones: { descontarStock: boolean; idAlmacenPreferido?: number },
   ): Promise<number> {
-    return this.dataSource.transaction(async (manager) => {
-      if (opciones.descontarStock) {
-        await this.descontarStock(manager, lineas, opciones.idAlmacenPreferido);
-      }
+    try {
+      return await this.dataSource.transaction(async (manager) => {
+        if (datos.clave_idempotencia) {
+          const previas = await manager.query(
+            'SELECT id_venta FROM ventas WHERE clave_idempotencia = $1 LIMIT 1',
+            [datos.clave_idempotencia],
+          );
+          if (previas[0]?.id_venta) return Number(previas[0].id_venta);
+        }
 
-      const idCaja = datos.id_caja ?? (await this.cajaAbierta(manager));
+        if (opciones.descontarStock) {
+          await this.descontarStock(manager, lineas, opciones.idAlmacenPreferido);
+        }
 
-      const insertadas = await manager.query(
-        `INSERT INTO ventas (id_cliente, id_caja, fecha, subtotal, igv, total, origen, clave_idempotencia)
-         VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7)
-         RETURNING id_venta`,
-        [
-          datos.id_cliente ?? null,
-          idCaja,
-          datos.subtotal,
-          datos.igv,
-          datos.total,
-          datos.origen,
-          datos.clave_idempotencia ?? null,
-        ],
-      );
+        const idCaja = datos.id_caja ?? (await this.cajaAbierta(manager));
 
-      const idVenta = Number(insertadas[0]?.id_venta);
-
-      for (const linea of lineas) {
-        await manager.query(
-          'INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio) VALUES ($1, $2, $3, $4)',
-          [idVenta, linea.id_producto, linea.cantidad, linea.precio_unitario],
-        );
-      }
-
-      for (const pago of pagos) {
-        if (!pago.monto) continue;
-        await manager.query(
-          `INSERT INTO venta_pago
-             (id_venta, id_metodo, monto, referencia, monto_recibido, vuelto,
-              id_cuenta_bancaria, voucher_pos, validacion, referencia_externa)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        const insertadas = await manager.query(
+          `INSERT INTO ventas (id_cliente, id_caja, fecha, subtotal, igv, total, origen, clave_idempotencia)
+           VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7)
+           RETURNING id_venta`,
           [
-            idVenta,
-            pago.id_metodo ?? null,
-            pago.monto,
-            (pago as any).referencia ?? null,
-            (pago as any).monto_recibido ?? null,
-            (pago as any).vuelto ?? null,
-            (pago as any).id_cuenta_bancaria ?? null,
-            (pago as any).voucher_pos ?? null,
-            (pago as any).validacion ?? null,
-            (pago as any).referencia_externa ?? null,
+            datos.id_cliente ?? null,
+            idCaja,
+            datos.subtotal,
+            datos.igv,
+            datos.total,
+            datos.origen,
+            datos.clave_idempotencia ?? null,
           ],
         );
-      }
 
-      if (datos.credito && Number(datos.credito.monto) > 0) {
-        const dias = Math.max(1, Number(datos.credito.dias) || 15);
-        const vencimiento = new Date();
-        vencimiento.setDate(vencimiento.getDate() + dias);
-        await manager.query(
-          `INSERT INTO cuentas_por_cobrar
-             (id_venta, id_cliente, id_empresa, monto_total, saldo, fecha_emision, fecha_vencimiento, estado)
-           VALUES ($1, $2, $3, $4, $4, NOW(), $5::date, 'pendiente')`,
-          [
-            idVenta,
-            datos.credito.id_cliente ?? null,
-            datos.credito.id_empresa ?? null,
-            Number(datos.credito.monto),
-            vencimiento.toISOString().slice(0, 10),
-          ],
-        );
-      }
+        const idVenta = Number(insertadas[0]?.id_venta);
 
-      this.log.log(`Venta ${idVenta} registrada por ${datos.total}`);
-      return idVenta;
-    });
+        for (const linea of lineas) {
+          await manager.query(
+            'INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio) VALUES ($1, $2, $3, $4)',
+            [idVenta, linea.id_producto, linea.cantidad, linea.precio_unitario],
+          );
+        }
+
+        for (const pago of pagos) {
+          if (!pago.monto) continue;
+          await manager.query(
+            `INSERT INTO venta_pago
+               (id_venta, id_metodo, monto, referencia, monto_recibido, vuelto,
+                id_cuenta_bancaria, voucher_pos, validacion, referencia_externa)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [
+              idVenta,
+              pago.id_metodo ?? null,
+              pago.monto,
+              (pago as any).referencia ?? null,
+              (pago as any).monto_recibido ?? null,
+              (pago as any).vuelto ?? null,
+              (pago as any).id_cuenta_bancaria ?? null,
+              (pago as any).voucher_pos ?? null,
+              (pago as any).validacion ?? null,
+              (pago as any).referencia_externa ?? null,
+            ],
+          );
+        }
+
+        if (datos.credito && Number(datos.credito.monto) > 0) {
+          const dias = Math.max(1, Number(datos.credito.dias) || 15);
+          const vencimiento = new Date();
+          vencimiento.setDate(vencimiento.getDate() + dias);
+          await manager.query(
+            `INSERT INTO cuentas_por_cobrar
+               (id_venta, id_cliente, id_empresa, monto_total, saldo, fecha_emision, fecha_vencimiento, estado)
+             VALUES ($1, $2, $3, $4, $4, NOW(), $5::date, 'pendiente')`,
+            [
+              idVenta,
+              datos.credito.id_cliente ?? null,
+              datos.credito.id_empresa ?? null,
+              Number(datos.credito.monto),
+              vencimiento.toISOString().slice(0, 10),
+            ],
+          );
+        }
+
+        this.log.log(`Venta ${idVenta} registrada por ${datos.total}`);
+        return idVenta;
+      });
+    } catch (error: any) {
+      if (this.esViolacionUnica(error) && datos.clave_idempotencia) {
+        const existente = await this.buscarPorClaveIdempotencia(datos.clave_idempotencia);
+        if (existente) return existente;
+      }
+      throw error;
+    }
+  }
+
+  private esViolacionUnica(error: any): boolean {
+    const codigo = String(error?.code ?? error?.driverError?.code ?? '');
+    return codigo === '23505';
   }
 
   /**
-   * Descuenta del almacén indicado y, si no alcanza, sigue por el que tenga más
-   * existencias. El bloqueo de filas evita que dos cajas vendan la misma unidad.
+   * Con idAlmacenPreferido: descuenta SOLO de ese almacén (sin derrame).
+   * Sin él: comportamiento legacy — preferido si hay, luego el de más stock.
    */
   private async descontarStock(
     manager: EntityManager,
     lineas: LineaVentaPersistida[],
     idAlmacenPreferido?: number,
   ): Promise<void> {
+    const exclusivo =
+      idAlmacenPreferido != null
+      && Number.isFinite(idAlmacenPreferido)
+      && idAlmacenPreferido > 0;
+
     for (const linea of lineas) {
-      const filas = await manager.query(
-        `SELECT id_inventario, id_almacen, stock
-           FROM inventario
-          WHERE id_producto = $1 AND stock > 0
-          ORDER BY (id_almacen = $2) DESC, stock DESC
-            FOR UPDATE`,
-        [linea.id_producto, idAlmacenPreferido ?? -1],
-      );
+      const filas = exclusivo
+        ? await manager.query(
+            `SELECT id_inventario, id_almacen, stock
+               FROM inventario
+              WHERE id_producto = $1 AND id_almacen = $2 AND stock > 0
+                FOR UPDATE`,
+            [linea.id_producto, idAlmacenPreferido],
+          )
+        : await manager.query(
+            `SELECT id_inventario, id_almacen, stock
+               FROM inventario
+              WHERE id_producto = $1 AND stock > 0
+              ORDER BY (id_almacen = $2) DESC, stock DESC
+                FOR UPDATE`,
+            [linea.id_producto, idAlmacenPreferido ?? -1],
+          );
 
       let pendiente = linea.cantidad;
 
@@ -516,6 +658,31 @@ export class VentaRepository {
           WHERE COALESCE(activo, TRUE) = TRUE
           ORDER BY COALESCE(orden, id_metodo), id_metodo`,
       );
+    } catch {
+      return [];
+    }
+  }
+
+  /** Listado compacto de almacenes para el selector del POS. */
+  async listarAlmacenesPos(): Promise<
+    { id_almacen: number; nombre: string; sucursal: string; id_sucursal: number | null }[]
+  > {
+    try {
+      const filas = await this.dataSource.query(
+        `SELECT a.id_almacen,
+                a.nombre,
+                COALESCE(s.nombre, '') AS sucursal,
+                a.id_sucursal
+           FROM almacenes a
+           LEFT JOIN sucursales s ON s.id_sucursal = a.id_sucursal
+          ORDER BY a.nombre ASC`,
+      );
+      return (filas ?? []).map((f: any) => ({
+        id_almacen: Number(f.id_almacen),
+        nombre: f.nombre ?? '',
+        sucursal: f.sucursal ?? '',
+        id_sucursal: f.id_sucursal != null ? Number(f.id_sucursal) : null,
+      }));
     } catch {
       return [];
     }

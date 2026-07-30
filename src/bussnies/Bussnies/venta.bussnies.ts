@@ -39,14 +39,35 @@ export class VentaBussnies {
 
   // ── Apoyo al mostrador ───────────────────────────────────────
 
-  buscarProductos(termino: string, limite?: number) {
-    return this.repo.buscarProductos(termino, limite);
+  buscarProductos(termino: string, limite?: number, idAlmacen?: number) {
+    return this.repo.buscarProductos(termino, limite, idAlmacen);
   }
 
-  async buscarPorCodigoBarras(codigo: string) {
-    const producto = await this.repo.buscarPorCodigoBarras(codigo);
+  /** Catálogo activo para cache del mostrador (misma forma que autocompletado). */
+  catalogoProductos(limite?: number, idAlmacen?: number) {
+    return this.repo.catalogoProductos(limite, idAlmacen);
+  }
+
+  async buscarPorCodigoBarras(codigo: string, idAlmacen?: number) {
+    const producto = await this.repo.buscarPorCodigoBarras(codigo, idAlmacen);
     if (!producto) throw new NotFoundException(`No hay ningún producto con el código ${codigo}`);
     return producto;
+  }
+
+  /**
+   * Almacenes disponibles para el POS + default de configuración.
+   * El cajero elige almacén cuando debe despachar desde otra sede.
+   */
+  async contextoPos(): Promise<{
+    almacenes: { id_almacen: number; nombre: string; sucursal: string; id_sucursal: number | null }[];
+    almacen_default?: number;
+  }> {
+    const filas = await this.repo.listarAlmacenesPos();
+    const def = await this.almacenPorDefecto();
+    return {
+      almacenes: filas,
+      ...(def ? { almacen_default: def } : {}),
+    };
   }
 
   async metodosPago() {
@@ -116,6 +137,11 @@ export class VentaBussnies {
         },
       );
     } catch (error: any) {
+      // Carrera de idempotencia: el índice único ganó en otra petición.
+      if (dto.clave_idempotencia && this.esViolacionUnica(error)) {
+        const existente = await this.repo.buscarPorClaveIdempotencia(dto.clave_idempotencia);
+        if (existente) return this.obtener(existente);
+      }
       throw this.traducirErrorDeStock(error, items);
     }
 
@@ -478,6 +504,11 @@ export class VentaBussnies {
     const valor = await this.config.obtener('tienda_id_almacen');
     const numero = Number(valor);
     return Number.isFinite(numero) && numero > 0 ? numero : undefined;
+  }
+
+  private esViolacionUnica(error: any): boolean {
+    const codigo = String(error?.code ?? error?.driverError?.code ?? '');
+    return codigo === '23505';
   }
 
   private traducirErrorDeStock(error: any, items: { id_producto: number; descripcion: string }[]) {
