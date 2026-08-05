@@ -38,18 +38,15 @@ export class InventarioBussnies implements IInventarioBussniees {
     return this.mapInventario(inventario);
   }
 
-  async update(dto: ActualizarInventarioRequest): Promise<InventarioResponse> {
-    const producto = await this.productoRepo.getById(dto.id_producto);
-    if (!producto) throw new NotFoundException(`Producto ${dto.id_producto} no encontrado`);
-
-    const inventario = await this.repo.guardarOActualizar({
-      producto: { id_producto: dto.id_producto } as any,
-      ...(dto.id_almacen ? { almacen: { id_almacen: dto.id_almacen } as any } : {}),
-      stock: dto.stock ?? 0,
-      stock_minimo: dto.stock_minimo ?? 0,
-    });
-
-    return this.mapInventario(inventario);
+  /**
+   * Atajo legacy: no permite fijar stock a ciegas (sin kardex).
+   * Use POST /inventario/ajuste o PUT .../stock-minimo.
+   */
+  async update(_dto: ActualizarInventarioRequest): Promise<InventarioResponse> {
+    throw new BadRequestException(
+      'Para cambiar existencias use Ajuste o Transferencia (quedan en el kardex). ' +
+        'El stock mínimo se edita desde el panel de Inventario.',
+    );
   }
 
   // ── Panel de inventario ──────────────────────────────────────

@@ -256,7 +256,14 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     }
 
     const serieModificada = dto.documento_que_se_modifica_serie;
-    const serie = normalizarSerie(dto.serie, dto.id_tipo, serieModificada);
+    // Boleta/factura: serie desde configuración (POS solo lectura). Notas: flujo propio.
+    let serieEntrada = dto.serie;
+    if (!esNota(dto.id_tipo)) {
+      const clave = dto.id_tipo === TIPO_FACTURA ? 'serie_factura' : 'serie_boleta';
+      const defecto = dto.id_tipo === TIPO_FACTURA ? 'FFF1' : 'BBB1';
+      serieEntrada = await this.config.obtenerTexto(clave, defecto);
+    }
+    const serie = normalizarSerie(serieEntrada, dto.id_tipo, serieModificada);
 
     this.validar(dto, receptor, resumen, serie);
 

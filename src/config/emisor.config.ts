@@ -21,3 +21,14 @@ export const CLAVES_EMISOR = [
   'emisor_ubicacion',
   'emisor_logo_url',
 ] as const;
+
+/** Series fiscales (Nubefact): el POS las muestra en solo lectura. */
+export const CLAVES_SERIES = {
+  boleta: 'serie_boleta',
+  factura: 'serie_factura',
+} as const;
+
+export const SERIES_POR_DEFECTO = {
+  boleta: 'BBB1',
+  factura: 'FFF1',
+} as const;

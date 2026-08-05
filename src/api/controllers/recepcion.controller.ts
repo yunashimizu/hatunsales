@@ -27,8 +27,10 @@ export class RecepcionController {
 
   @Get()
   @Roles('admin', 'vendedor', 'caja')
-  listar() {
-    return this.service.listarRecepciones();
+  listar(@Query('id_proveedor') idProveedor?: string) {
+    return this.service.listarRecepciones(
+      idProveedor ? Number(idProveedor) : undefined,
+    );
   }
 
   @Get('observaciones')

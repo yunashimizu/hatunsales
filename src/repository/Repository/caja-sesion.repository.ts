@@ -429,6 +429,62 @@ export class CajaSesionRepository {
     });
   }
 
+  /**
+   * Resumen blando del turno: ventas de la caja desde la apertura
+   * (no bloquea; solo informa al cerrar).
+   */
+  async resumenTurno(apertura: AperturaSesion): Promise<{
+    ventas: number;
+    total: number;
+    por_metodo: { metodo: string; total: number; cantidad: number }[];
+  }> {
+    await this.asegurarSchema();
+    const desde = apertura.fecha ? new Date(apertura.fecha) : null;
+    if (!desde || !apertura.id_caja) {
+      return { ventas: 0, total: 0, por_metodo: [] };
+    }
+
+    const totales = await this.dataSource.query(
+      `SELECT COUNT(*)::int AS ventas, COALESCE(SUM(v.total), 0)::float AS total
+         FROM ventas v
+        WHERE v.id_caja = $1
+          AND v.fecha >= $2
+          AND COALESCE(v.estado, 'activa') <> 'anulada'`,
+      [apertura.id_caja, desde],
+    );
+
+    let porMetodo: { metodo: string; total: number; cantidad: number }[] = [];
+    try {
+      const filas = await this.dataSource.query(
+        `SELECT COALESCE(mp.nombre, 'Otro') AS metodo,
+                COALESCE(SUM(vp.monto), 0)::float AS total,
+                COUNT(*)::int AS cantidad
+           FROM venta_pago vp
+           JOIN ventas v ON v.id_venta = vp.id_venta
+           LEFT JOIN metodos_pago mp ON mp.id_metodo = vp.id_metodo
+          WHERE v.id_caja = $1
+            AND v.fecha >= $2
+            AND COALESCE(v.estado, 'activa') <> 'anulada'
+          GROUP BY 1
+          ORDER BY total DESC`,
+        [apertura.id_caja, desde],
+      );
+      porMetodo = (filas || []).map((f: any) => ({
+        metodo: String(f.metodo || 'Otro'),
+        total: Number(f.total || 0),
+        cantidad: Number(f.cantidad || 0),
+      }));
+    } catch {
+      porMetodo = [];
+    }
+
+    return {
+      ventas: Number(totales[0]?.ventas ?? 0),
+      total: Number(totales[0]?.total ?? 0),
+      por_metodo: porMetodo,
+    };
+  }
+
   private mapApertura(f: any): AperturaSesion {
     return {
       id_apertura: Number(f.id_apertura),

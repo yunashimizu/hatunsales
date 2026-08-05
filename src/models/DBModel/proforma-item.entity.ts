@@ -24,4 +24,10 @@ export class ProformaItem {
 
   @Column({ type: 'numeric' })
   subtotal!: number;
+
+  @Column({ type: 'varchar', length: 250, nullable: true })
+  descripcion_snapshot!: string | null;
+
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  sku_snapshot!: string | null;
 }

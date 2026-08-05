@@ -1,9 +1,21 @@
-import { Body, Controller, Get, Param, Put, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  ConflictException,
+  Controller,
+  Delete,
+  Get,
+  NotFoundException,
+  Param,
+  Put,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
 import { Roles } from '../../guards/roles.decorator';
 import { ReceptorBussnies } from '../../bussnies/Bussnies/receptor.bussnies';
 import { ReceptorRepository } from '../../repository/Repository/receptor.repository';
+import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 
 /**
  * Búsqueda del receptor de un comprobante. Un solo endpoint sirve para DNI y
@@ -65,6 +77,38 @@ export class ReceptorController {
   @Put('empresa/:id')
   actualizarEmpresa(@Param('id') id: string, @Body() body: Record<string, any>) {
     return this.repo.actualizarEmpresa(Number(id), this.soloCamposEmpresa(body));
+  }
+
+  /** Solo admin: borrar empresa sin historial de ventas/crédito. */
+  @Delete('empresa/:id')
+  @Roles('admin')
+  async eliminarEmpresa(@Param('id') id: string) {
+    const idEmpresa = Number(id);
+    const existe = await this.repo.buscarEmpresaPorId(idEmpresa);
+    if (!existe) throw new NotFoundException(`Empresa ${idEmpresa} no encontrada`);
+
+    const historial = await this.repo.contarReferenciasEmpresa(idEmpresa);
+    if (historial.total > 0) {
+      throw new ConflictException(
+        cuerpoError(
+          CodigoError.EMPRESA_CON_HISTORIAL,
+          `No se puede eliminar: tiene historial (${historial.detalle}). Conserve el registro.`,
+        ),
+      );
+    }
+
+    try {
+      await this.repo.eliminarEmpresa(idEmpresa);
+    } catch {
+      throw new ConflictException(
+        cuerpoError(
+          CodigoError.EMPRESA_CON_HISTORIAL,
+          'No se puede eliminar: aún está vinculada a otros registros.',
+        ),
+      );
+    }
+
+    return { deleted: true, id_empresa: idEmpresa };
   }
 
   private soloCamposCliente(body: Record<string, any>) {

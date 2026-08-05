@@ -111,4 +111,40 @@ export class ReceptorRepository {
   listarEmpresas(limite = 200): Promise<Empresa[]> {
     return this.empresaRepo.find({ order: { creado_en: 'DESC' }, take: limite });
   }
+
+  async contarReferenciasEmpresa(idEmpresa: number): Promise<{ total: number; detalle: string }> {
+    const partes: string[] = [];
+    let total = 0;
+    const checks: Array<{ etiqueta: string; sql: string }> = [
+      { etiqueta: 'ventas', sql: 'SELECT COUNT(*)::int AS c FROM ventas WHERE id_empresa = $1' },
+      {
+        etiqueta: 'créditos',
+        sql: 'SELECT COUNT(*)::int AS c FROM cuentas_por_cobrar WHERE id_empresa = $1',
+      },
+    ];
+
+    for (const check of checks) {
+      const n = await this.contarSeguro(check.sql, idEmpresa);
+      if (n > 0) {
+        total += n;
+        partes.push(`${check.etiqueta}: ${n}`);
+      }
+    }
+
+    return { total, detalle: partes.join(', ') || 'sin detalle' };
+  }
+
+  async eliminarEmpresa(idEmpresa: number): Promise<number> {
+    const result = await this.empresaRepo.delete(idEmpresa);
+    return result.affected ?? 0;
+  }
+
+  private async contarSeguro(sql: string, id: number): Promise<number> {
+    try {
+      const filas = await this.empresaRepo.manager.query(sql, [id]);
+      return Number(filas?.[0]?.c ?? 0);
+    } catch {
+      return 0;
+    }
+  }
 }

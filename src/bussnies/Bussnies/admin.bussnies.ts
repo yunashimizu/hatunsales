@@ -9,6 +9,7 @@ import { ActualizarEmpleadoRequest } from 'src/models/model/new/actualizar-emple
 import { CambiarRolRequest } from 'src/models/model/new/cambiar-rol.request';
 import { EliminarUsuarioRequest } from 'src/models/model/new/eliminar-usuario.request';
 import { Rol } from 'src/models/DBModel/role.entity';
+import { esRolCliente } from 'src/config/roles.config';
 
 @Injectable()
 export class AdminBussnies {
@@ -27,14 +28,17 @@ export class AdminBussnies {
       order: { id_usuario: 'ASC' },
     });
 
-    return usuarios.map((u) => ({
-      id_usuario: u.id_usuario,
-      nombre: u.nombre,
-      email: u.email,
-      id_rol: u.rol?.id_rol ?? null,
-      rol: u.rol?.nombre ?? 'sin rol',
-      estado: u.estado,
-    }));
+    // Panel Usuarios = solo staff. Clientes (rol 5) se gestionan en Clientes / tienda.
+    return usuarios
+      .filter((u) => !esRolCliente(u.rol?.id_rol, u.rol?.nombre))
+      .map((u) => ({
+        id_usuario: u.id_usuario,
+        nombre: u.nombre,
+        email: u.email,
+        id_rol: u.rol?.id_rol ?? null,
+        rol: u.rol?.nombre ?? 'sin rol',
+        estado: u.estado,
+      }));
   }
 
   async crearEmpleado(dto: CrearEmpleadoRequest): Promise<any> {

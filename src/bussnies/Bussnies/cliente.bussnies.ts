@@ -12,6 +12,7 @@ import { ClienteResponse } from '../../models/model/cliente.response';
 import { IClienteBussniees } from '../Ibussnies/IClienteBussniees';
 import { Cliente } from '../../models/DBModel/cliente.entity';
 import { Empresa } from 'src/models/DBModel/empresa.entity';
+import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 
 @Injectable()
 export class ClienteBussnies implements IClienteBussniees {
@@ -93,7 +94,39 @@ export class ClienteBussnies implements IClienteBussniees {
   async delete(id: number): Promise<number> {
     const existe = await this.repo.getById(id);
     if (!existe) throw new NotFoundException(`Cliente ${id} no encontrado`);
-    return this.repo.delete(id);
+
+    const historial = await this.repo.contarReferenciasCliente(id);
+    if (historial.total > 0) {
+      throw new ConflictException(
+        cuerpoError(
+          CodigoError.CLIENTE_CON_HISTORIAL,
+          `No se puede eliminar: tiene historial (${historial.detalle}). Conserve el registro o revise ventas/crédito.`,
+        ),
+      );
+    }
+
+    const idUsuario = existe.usuario?.id_usuario
+      ? Number(existe.usuario.id_usuario)
+      : null;
+
+    let afectados = 0;
+    try {
+      afectados = await this.repo.delete(id);
+    } catch {
+      throw new ConflictException(
+        cuerpoError(
+          CodigoError.CLIENTE_CON_HISTORIAL,
+          'No se puede eliminar: aún está vinculado a otros registros.',
+        ),
+      );
+    }
+
+    // Cuenta tienda huérfana: desactivar login (no borrar usuario).
+    if (idUsuario && idUsuario !== 1) {
+      await this.repo.desactivarUsuarioSiExiste(idUsuario);
+    }
+
+    return afectados;
   }
 
   // ── CREAR DESDE USUARIO (cuando se registra) ─────────────────

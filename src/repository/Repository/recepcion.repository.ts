@@ -8,6 +8,8 @@ export interface LineaRecepcionInput {
   cantidad_observada: number;
   nota?: string;
   motivo_observacion?: string;
+  /** Si viene, actualiza productos.precio_compra tras confirmar. */
+  precio_compra?: number | null;
 }
 
 @Injectable()
@@ -210,8 +212,14 @@ export class RecepcionRepository {
     });
   }
 
-  async listarRecepciones(limite = 50) {
+  async listarRecepciones(limite = 50, idProveedor?: number) {
     await this.asegurarSchema();
+    const params: any[] = [limite];
+    let filtro = '';
+    if (idProveedor) {
+      params.push(idProveedor);
+      filtro = `WHERE r.id_proveedor = $${params.length}`;
+    }
     return this.dataSource.query(
       `SELECT r.id_recepcion, r.nro_guia, r.nro_documento, r.estado, r.creado_en,
               r.id_almacen, COALESCE(a.nombre,'') AS almacen,
@@ -222,9 +230,10 @@ export class RecepcionRepository {
          FROM recepciones r
          LEFT JOIN proveedores p ON p.id_proveedor = r.id_proveedor
          LEFT JOIN almacenes a ON a.id_almacen = r.id_almacen
+         ${filtro}
         ORDER BY r.creado_en DESC
         LIMIT $1`,
-      [limite],
+      params,
     );
   }
 

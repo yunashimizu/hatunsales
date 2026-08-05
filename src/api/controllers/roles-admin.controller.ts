@@ -18,6 +18,7 @@ import { Repository } from 'typeorm';
 import { Rol } from 'src/models/DBModel/role.entity';
 import { Usuarios } from 'src/models/DBModel/usuarios.entity';
 import { HashUtil } from 'src/util/jwt/hash.util';
+import { esRolCliente } from 'src/config/roles.config';
 
 @Controller('admin/roles')
 @UseGuards(JwtGuard, RolesGuard)
@@ -44,14 +45,16 @@ export class RolesAdminController {
       order: { id_usuario: 'DESC' },
     });
 
-    return usuarios.map((usuario) => ({
-      id_usuario: usuario.id_usuario,
-      nombre: usuario.nombre,
-      email: usuario.email,
-      id_rol: usuario.rol?.id_rol ?? null,
-      rol: usuario.rol?.nombre ?? 'sin rol',
-      estado: usuario.estado,
-    }));
+    return usuarios
+      .filter((usuario) => !esRolCliente(usuario.rol?.id_rol, usuario.rol?.nombre))
+      .map((usuario) => ({
+        id_usuario: usuario.id_usuario,
+        nombre: usuario.nombre,
+        email: usuario.email,
+        id_rol: usuario.rol?.id_rol ?? null,
+        rol: usuario.rol?.nombre ?? 'sin rol',
+        estado: usuario.estado,
+      }));
   }
 
   @Post('usuarios')

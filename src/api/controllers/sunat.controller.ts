@@ -39,7 +39,7 @@ export class SunatController {
 
   @Post('ruc/proveedor')
   @UseGuards(RolesGuard)
-  @Roles('admin')
+  @Roles('admin', 'vendedor')
   guardarProveedorRuc(@Body() body: BuscarRucProveedorRequest) {
     return this.SunatBussnies.guardarProveedorRuc(body);
   }

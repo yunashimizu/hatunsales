@@ -26,6 +26,11 @@ export class CajaSesionController {
     return this.service.disponibles();
   }
 
+  @Get('turno-resumen')
+  resumenTurno(@UsuarioActual() usuario: UsuarioToken) {
+    return this.service.resumenTurno(usuario);
+  }
+
   @Post('abrir')
   abrir(
     @Body() body: { id_caja?: number; monto_inicial?: number | null },

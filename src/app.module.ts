@@ -134,6 +134,7 @@ import { PagoBussnies } from './bussnies/Bussnies/tienda/pago.bussnies';
 import { CulqiPasarela } from './util/pasarela/culqi.pasarela';
 import { PasarelaSimulada } from './util/pasarela/simulada.pasarela';
 import { pasarelaProvider } from './util/pasarela/pasarela.provider';
+import { WhatsappPasarela } from './util/pasarela/whatsapp.pasarela';
 
 import { CatalogoController } from './api/controllers/tienda/catalogo.controller';
 import { CarritoController } from './api/controllers/tienda/carrito.controller';
@@ -142,6 +143,8 @@ import { PedidoController, PedidoAdminController } from './api/controllers/tiend
 import { CuentaTiendaController } from './api/controllers/tienda/cuenta.controller';
 
 import { ConfiguracionRepository } from './repository/Repository/configuracion.repository';
+import { ConfiguracionFiscalBussnies } from './bussnies/Bussnies/configuracion-fiscal.bussnies';
+import { ConfiguracionController } from './api/controllers/configuracion.controller';
 import { ReceptorRepository } from './repository/Repository/receptor.repository';
 import { ReceptorBussnies } from './bussnies/Bussnies/receptor.bussnies';
 import { ReceptorController } from './api/controllers/receptor.controller';
@@ -184,7 +187,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
   PedidoController, PedidoAdminController, CuentaTiendaController,
   ReceptorController, VentaController, ArchivoController, CreditoController, CajaPagosController,
   CajaSesionController,
-  ProveedorController, RecepcionController],
+  ProveedorController, RecepcionController, ConfiguracionController],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
   LogRepository, AuthBussnies, AdminBussnies, RolBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
@@ -195,8 +198,8 @@ import { ArchivoController } from './api/controllers/archivo.controller';
    CatalogoRepository, CarritoRepository, PedidoRepository, CuentaTiendaRepository, CheckoutRepository,
    StockTiendaRepository, VentaTiendaRepository,
    CatalogoBussnies, CarritoBussnies, PedidoBussnies, CuentaTiendaBussnies, CheckoutBussnies, PagoBussnies,
-   CulqiPasarela, PasarelaSimulada, pasarelaProvider,
-   ConfiguracionRepository, ReceptorRepository, ReceptorBussnies, ConsultaDocumentoService,
+   CulqiPasarela, PasarelaSimulada, pasarelaProvider, WhatsappPasarela,
+   ConfiguracionRepository, ConfiguracionFiscalBussnies, ReceptorRepository, ReceptorBussnies, ConsultaDocumentoService,
    VentaRepository, VentaBussnies, CreditoRepository, CreditoBussnies, CajaPagosRepository, CajaPagosBussnies,
    CajaSesionRepository, CajaSesionBussnies,
    RecepcionRepository, RecepcionBussnies,

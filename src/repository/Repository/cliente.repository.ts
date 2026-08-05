@@ -88,6 +88,56 @@ export class ClienteRepository extends CrudRepository<Cliente> implements IClien
     return result.affected ?? 0;
   }
 
+  /** Conteos seguros (tabla ausente → 0) para bloquear hard-delete con historial. */
+  async contarReferenciasCliente(idCliente: number): Promise<{ total: number; detalle: string }> {
+    const partes: string[] = [];
+    let total = 0;
+
+    const checks: Array<{ etiqueta: string; sql: string }> = [
+      { etiqueta: 'ventas', sql: 'SELECT COUNT(*)::int AS c FROM ventas WHERE id_cliente = $1' },
+      {
+        etiqueta: 'créditos',
+        sql: 'SELECT COUNT(*)::int AS c FROM cuentas_por_cobrar WHERE id_cliente = $1',
+      },
+      {
+        etiqueta: 'comprobantes',
+        sql: 'SELECT COUNT(*)::int AS c FROM comprobantes WHERE id_cliente = $1',
+      },
+      { etiqueta: 'pedidos', sql: 'SELECT COUNT(*)::int AS c FROM pedidos WHERE id_cliente = $1' },
+      { etiqueta: 'proformas', sql: 'SELECT COUNT(*)::int AS c FROM proformas WHERE id_cliente = $1' },
+    ];
+
+    for (const check of checks) {
+      const n = await this.contarSeguro(check.sql, idCliente);
+      if (n > 0) {
+        total += n;
+        partes.push(`${check.etiqueta}: ${n}`);
+      }
+    }
+
+    return { total, detalle: partes.join(', ') || 'sin detalle' };
+  }
+
+  async desactivarUsuarioSiExiste(idUsuario: number): Promise<void> {
+    try {
+      await this.clienteRepo.manager.query(
+        `UPDATE usuarios SET estado = false WHERE id_usuario = $1`,
+        [idUsuario],
+      );
+    } catch {
+      /* tabla/columna distinta: no tumbar el delete del cliente */
+    }
+  }
+
+  private async contarSeguro(sql: string, id: number): Promise<number> {
+    try {
+      const filas = await this.clienteRepo.manager.query(sql, [id]);
+      return Number(filas?.[0]?.c ?? 0);
+    } catch {
+      return 0;
+    }
+  }
+
   async buscarEmpresaPorRuc(ruc: string): Promise<Empresa | null> {
   return this.clienteRepo.manager.findOne(Empresa, { where: { ruc } });
   }

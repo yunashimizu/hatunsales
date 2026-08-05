@@ -7,6 +7,7 @@ import { ProductoRepository } from '../../repository/Repository/producto.reposit
 import { ALMACEN_ARCHIVOS } from '../../util/storage/almacen.interface';
 import type { AlmacenArchivos } from '../../util/storage/almacen.interface';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
+import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 
 @Injectable()
 export class RecepcionBussnies {
@@ -64,8 +65,8 @@ export class RecepcionBussnies {
 
   // ── Recepción ────────────────────────────────────────────────
 
-  listarRecepciones() {
-    return this.repo.listarRecepciones();
+  listarRecepciones(idProveedor?: number) {
+    return this.repo.listarRecepciones(50, idProveedor);
   }
 
   async detalle(id: number) {
@@ -85,7 +86,11 @@ export class RecepcionBussnies {
     if (!idProveedor) throw new BadRequestException('Seleccione el proveedor');
     if (!idAlmacen) throw new BadRequestException('Seleccione el almacén de destino');
     if (!nroGuia) throw new BadRequestException('Ingrese el número de guía / remisión');
-    if (!itemsRaw.length) throw new BadRequestException('Agregue al menos un producto');
+    if (!itemsRaw.length) {
+      throw new BadRequestException(
+        cuerpoError(CodigoError.RECEPCION_SIN_ITEMS, 'Agregue al menos un producto'),
+      );
+    }
 
     const items: LineaRecepcionInput[] = [];
     for (const raw of itemsRaw) {
@@ -105,12 +110,21 @@ export class RecepcionBussnies {
       const producto = await this.productos.getById(idProducto);
       if (!producto) throw new NotFoundException(`Producto ${idProducto} no encontrado`);
 
+      const precioCompra =
+        raw.precio_compra !== undefined && raw.precio_compra !== null && raw.precio_compra !== ''
+          ? Number(raw.precio_compra)
+          : null;
+
       items.push({
         id_producto: idProducto,
         cantidad_ok: cantidadOk,
         cantidad_observada: cantidadObs,
         nota: raw.nota,
         motivo_observacion: raw.motivo_observacion || raw.nota,
+        precio_compra:
+          precioCompra != null && Number.isFinite(precioCompra) && precioCompra >= 0
+            ? precioCompra
+            : null,
       });
     }
 
@@ -124,25 +138,53 @@ export class RecepcionBussnies {
       items,
     });
 
-    // Solo lo OK entra al inventario ahora.
+    const stockOk: number[] = [];
+    const stockFallido: { id_producto: number; error: string }[] = [];
+
+    // Solo lo OK entra al inventario ahora (ajustes reportan fallo parcial).
     for (const item of items) {
       if (item.cantidad_ok > 0) {
-        await this.inventario.ajustar({
-          id_producto: item.id_producto,
-          id_almacen: idAlmacen,
-          cantidad: item.cantidad_ok,
-          motivo: 'compra',
-          comentario: `Recepción #${creada.id_recepcion} · Guía ${nroGuia}`,
-        });
+        try {
+          await this.inventario.ajustar({
+            id_producto: item.id_producto,
+            id_almacen: idAlmacen,
+            cantidad: item.cantidad_ok,
+            motivo: 'compra',
+            comentario: `Recepción #${creada.id_recepcion} · Guía ${nroGuia}`,
+          });
+          stockOk.push(item.id_producto);
+        } catch (e: any) {
+          stockFallido.push({
+            id_producto: item.id_producto,
+            error: e?.message || 'Error al ajustar stock',
+          });
+        }
       }
+
+      if (item.precio_compra != null) {
+        try {
+          await this.productos.update(item.id_producto, {
+            precio_compra: item.precio_compra,
+          } as any);
+        } catch {
+          /* no bloquea la recepción */
+        }
+      }
+    }
+
+    let mensaje = creada.observaciones.length
+      ? 'Recepción confirmada. Lo observado espera visto bueno.'
+      : 'Recepción confirmada. Stock actualizado.';
+    if (stockFallido.length) {
+      mensaje += ` Atención: ${stockFallido.length} línea(s) no sumaron stock; revise Inventario.`;
     }
 
     return {
       id_recepcion: creada.id_recepcion,
       observaciones: creada.observaciones,
-      mensaje: creada.observaciones.length
-        ? 'Recepción confirmada. Lo observado espera visto bueno.'
-        : 'Recepción confirmada. Stock actualizado.',
+      stock_ingresado: stockOk,
+      stock_fallido: stockFallido,
+      mensaje,
     };
   }
 

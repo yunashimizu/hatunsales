@@ -355,6 +355,20 @@ export class InventarioRepository extends CrudRepository<Inventario> {
          VALUES ($1, 'transferencia', $2, $3, $4, $5, NOW())`,
         [idProducto, cantidad, mapa.get(idOrigen) ?? null, mapa.get(idDestino) ?? null, descripcion],
       );
+
+      // Kardex (misma TX): no duplicar movimientos_inventario (ya hay fila transferencia)
+      await manager.query(
+        `INSERT INTO kardex (id_producto, tipo_movimiento, cantidad, costo, fecha)
+         SELECT $1, 'salida', $2, COALESCE(p.precio_compra, 0), NOW()
+           FROM productos p WHERE p.id_producto = $1`,
+        [idProducto, cantidad],
+      );
+      await manager.query(
+        `INSERT INTO kardex (id_producto, tipo_movimiento, cantidad, costo, fecha)
+         SELECT $1, 'entrada', $2, COALESCE(p.precio_compra, 0), NOW()
+           FROM productos p WHERE p.id_producto = $1`,
+        [idProducto, cantidad],
+      );
     });
   }
 

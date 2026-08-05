@@ -22,14 +22,31 @@ export class CajaSesionBussnies implements OnModuleInit {
     const modo = await this.repo.modoCaja();
     const idUsuario = Number(usuario?.id_usuario);
     if (!idUsuario) {
-      return { modo, abierta: false, apertura: null };
+      return { modo, abierta: false, apertura: null, resumen: null };
     }
     const apertura = await this.repo.sesionUsuario(idUsuario);
+    const resumen = apertura ? await this.repo.resumenTurno(apertura) : null;
     return {
       modo,
       abierta: !!apertura,
       apertura,
+      resumen,
     };
+  }
+
+  async resumenTurno(usuario: UsuarioToken) {
+    const idUsuario = Number(usuario?.id_usuario);
+    if (!idUsuario) {
+      throw new ForbiddenException('Sesión inválida');
+    }
+    const apertura = await this.repo.sesionUsuario(idUsuario);
+    if (!apertura) {
+      throw new NotFoundException(
+        cuerpoError(CodigoError.CAJA_NO_ABIERTA, 'No hay caja abierta para resumir'),
+      );
+    }
+    const resumen = await this.repo.resumenTurno(apertura);
+    return { apertura, resumen };
   }
 
   async disponibles() {
@@ -113,12 +130,14 @@ export class CajaSesionBussnies implements OnModuleInit {
     }
 
     try {
-      return await this.repo.cerrar({
+      const resumen = await this.repo.resumenTurno(apertura);
+      const cerrado = await this.repo.cerrar({
         idApertura,
         idUsuario,
         montoConteo: body?.monto_conteo,
         observacion: body?.observacion,
       });
+      return { ...cerrado, resumen };
     } catch (e: any) {
       this.mapError(e);
     }

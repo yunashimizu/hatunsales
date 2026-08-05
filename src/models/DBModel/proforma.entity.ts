@@ -9,19 +9,46 @@ export class Proforma {
   @PrimaryGeneratedColumn()
   id_proforma!: number;
 
-  @ManyToOne(() => Empresa, { nullable: false })
+  @ManyToOne(() => Empresa, { nullable: true })
   @JoinColumn({ name: 'id_empresa' })
-  empresa!: Empresa;
+  empresa!: Empresa | null;
 
-  @ManyToOne(() => Cliente, { nullable: false })
+  @ManyToOne(() => Cliente, { nullable: true })
   @JoinColumn({ name: 'id_cliente' })
-  cliente!: Cliente;
+  cliente!: Cliente | null;
 
   @Column({ nullable: true })
   serie!: string;
 
-  @Column({ type: 'integer' })
-  numero!: number;
+  @Column({ type: 'integer', nullable: true })
+  numero!: number | null;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  codigo!: string | null;
+
+  @Column({ type: 'varchar', length: 20, default: 'borrador' })
+  estado!: string;
+
+  @Column({ type: 'text', nullable: true })
+  observaciones!: string | null;
+
+  @Column({ type: 'date', nullable: true })
+  valida_hasta!: string | null;
+
+  @Column({ type: 'integer', nullable: true })
+  id_almacen!: number | null;
+
+  @Column({ type: 'varchar', length: 250, nullable: true })
+  cliente_nombre_snapshot!: string | null;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  telefono_envio!: string | null;
+
+  @Column({ type: 'integer', nullable: true })
+  id_venta!: number | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  enviada_wa_en!: Date | null;
 
   @Column({ type: 'numeric', default: 0 })
   total_gravada!: number;
