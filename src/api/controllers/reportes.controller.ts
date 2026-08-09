@@ -1,9 +1,17 @@
-import { Controller, Get, Query, UseGuards, Res } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpException,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import type { Response } from 'express';
 import { ReportesBussnies } from '../../bussnies/Bussnies/reportes.bussnies';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
 import { Roles } from '../../guards/roles.decorator';
+import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 
 @Controller('reportes')
 export class ReportesController {
@@ -39,40 +47,58 @@ export class ReportesController {
   @Get('ventas/excel')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin', 'vendedor', 'caja')
-  ventasExcel(
+  async ventasExcel(
     @Res() res: Response,
     @Query('periodo') periodo = 'diario',
     @Query('fecha_inicio') fecha_inicio?: string,
     @Query('fecha_fin') fecha_fin?: string,
   ) {
-    const buffers = this.service.exportVentasExcel(periodo, {
-      fecha_inicio,
-      fecha_fin,
-    });
-    return buffers.then((b) => {
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename=ventas_${periodo}.xlsx`);
-      res.send(b);
-    });
+    try {
+      const { buffer, filename } = await this.service.exportVentasExcel(periodo, {
+        fecha_inicio,
+        fecha_fin,
+      });
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(buffer);
+    } catch (e) {
+      return this.responderErrorExport(res, e, 'No se pudo exportar el Excel');
+    }
   }
 
   @Get('ventas/pdf')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin', 'vendedor', 'caja')
-  ventasPdf(
+  async ventasPdf(
     @Res() res: Response,
     @Query('periodo') periodo = 'diario',
     @Query('fecha_inicio') fecha_inicio?: string,
     @Query('fecha_fin') fecha_fin?: string,
   ) {
-    const buffers = this.service.exportVentasPdf(periodo, {
-      fecha_inicio,
-      fecha_fin,
-    });
-    return buffers.then((b) => {
+    try {
+      const { buffer, filename } = await this.service.exportVentasPdf(periodo, {
+        fecha_inicio,
+        fecha_fin,
+      });
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=ventas_${periodo}.pdf`);
-      res.send(b);
-    });
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(buffer);
+    } catch (e) {
+      return this.responderErrorExport(res, e, 'No se pudo exportar el PDF');
+    }
+  }
+
+  private responderErrorExport(res: Response, e: unknown, fallback: string) {
+    if (e instanceof HttpException) {
+      const status = e.getStatus();
+      const body = e.getResponse();
+      return res.status(status).json(typeof body === 'string' ? { message: body } : body);
+    }
+    return res.status(400).json(
+      cuerpoError(CodigoError.REPORTE_EXPORT_FALLIDA, fallback),
+    );
   }
 }

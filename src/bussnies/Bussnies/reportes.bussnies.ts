@@ -8,6 +8,19 @@ import {
   VentasSeriePunto,
   VentasTopCliente,
 } from '../../models/model/ventas-report.response';
+import { CodigoError, cuerpoError } from '../../util/errores-operativos';
+import { emisorConfig } from '../../config/emisor.config';
+import {
+  CabeceraReporte,
+  FilaDetalleReporte,
+  REPORTE_COLUMNAS_DETALLE,
+  capitalizarEstado,
+  etiquetaPeriodo,
+  formatearFechaEs,
+  formatearFechaHoraEs,
+  formatearMonedaEs,
+  nombreArchivoReporte,
+} from '../../util/reporte-export';
 
 type ReportesFilters = {
   fecha_inicio?: string;
@@ -27,6 +40,16 @@ const PLANES: Record<string, string> = {
   anual: 'Año calendario desde enero: visión de tendencia y estacionalidad.',
 };
 
+const EXCEL = {
+  headerBg: '1F4E79',
+  headerFg: 'FFFFFF',
+  sectionBg: 'D6E3F0',
+  kpiLabelBg: 'F2F2F2',
+  altRow: 'F7F9FC',
+  border: 'B0B0B0',
+  titleFg: '1F4E79',
+};
+
 @Injectable()
 export class ReportesBussnies implements IReportesBussniees {
   constructor(private readonly repo: ReportesRepository) {}
@@ -37,7 +60,12 @@ export class ReportesBussnies implements IReportesBussniees {
   ): Promise<VentasReportResponse> {
     const periodoNormalizado = (periodo || 'diario').toLowerCase().trim();
     if (!filters.fecha_inicio && !filters.fecha_fin && !PERIODOS_VALIDOS.has(periodoNormalizado)) {
-      throw new BadRequestException('Período inválido. Use: diario, quincenal, mensual o anual');
+      throw new BadRequestException(
+        cuerpoError(
+          CodigoError.REPORTE_PERIODO_INVALIDO,
+          'Período inválido. Use: diario, quincenal, mensual o anual',
+        ),
+      );
     }
 
     const { fechaInicio, fechaFin } = this.resolverRango(periodoNormalizado, filters);
@@ -56,10 +84,11 @@ export class ReportesBussnies implements IReportesBussniees {
         fecha: item.fecha_de_emision || (item.creado_en ? new Date(item.creado_en).toISOString() : ''),
         serie,
         numero,
-        numero_formateado: serie && numero ? `${serie}-${String(numero).padStart(8, '0')}` : serie || String(numero || '—'),
+        numero_formateado:
+          serie && numero ? `${serie}-${String(numero).padStart(8, '0')}` : serie || String(numero || '—'),
         cliente: item.cliente_denominacion || '—',
         documento_cliente: item.cliente_numero_doc || '',
-        estado: item.anulado ? 'anulado' : (item.estado || 'emitido'),
+        estado: item.anulado ? 'anulado' : item.estado || 'emitido',
         anulado: Boolean(item.anulado),
         cantidad_comprobantes: 1,
         total_vendido: Number(item.total ?? 0),
@@ -87,98 +116,456 @@ export class ReportesBussnies implements IReportesBussniees {
     return {
       ...report,
       tipo: 'reporte_por_categoria',
-      mensaje: 'Para un reporte por categoría real, se recomienda usar una tabla de detalle de ventas por ítem o categoría en el modelo de comprobantes.',
+      mensaje:
+        'Para un reporte por categoría real, se recomienda usar una tabla de detalle de ventas por ítem o categoría en el modelo de comprobantes.',
     };
   }
 
-  async exportVentasExcel(periodo: string, filters: any): Promise<Buffer> {
-    const report = await this.reporteVentas(periodo, filters);
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const ExcelJS = require('exceljs');
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet('Ventas');
-    const stats = report.estadisticas;
+  async exportVentasExcel(periodo: string, filters: any): Promise<{ buffer: Buffer; filename: string }> {
+    try {
+      const report = await this.reporteVentas(periodo, filters);
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const ExcelJS = require('exceljs');
+      const wb = new ExcelJS.Workbook();
+      wb.creator = emisorConfig.razon_social;
+      wb.created = new Date();
 
-    ws.addRow(['Periodo', report.periodo]);
-    ws.addRow(['Plan', stats.plan]);
-    ws.addRow(['Fecha Inicio', report.fecha_inicio]);
-    ws.addRow(['Fecha Fin', report.fecha_fin]);
-    ws.addRow(['Total vendido', report.total_vendido]);
-    ws.addRow(['Comprobantes', report.cantidad_comprobantes]);
-    ws.addRow(['Ticket promedio', report.ticket_promedio]);
-    ws.addRow(['Venta máxima', stats.venta_maxima]);
-    ws.addRow(['Venta mínima', stats.venta_minima]);
-    ws.addRow(['Emitidos', stats.emitidos]);
-    ws.addRow(['Con error', stats.con_error]);
-    ws.addRow([]);
-    ws.addRow(['Comprobante', 'Fecha', 'Cliente', 'Documento', 'Estado', 'Total']);
+      const ws = wb.addWorksheet('Ventas', {
+        views: [{ state: 'frozen', ySplit: 12 }],
+        properties: { defaultRowHeight: 18 },
+      });
 
-    report.detalle.forEach((d) => {
-      ws.addRow([
-        d.numero_formateado || `${d.serie ?? ''}-${d.numero ?? ''}`,
-        d.fecha,
-        d.cliente || '—',
-        d.documento_cliente || '',
-        d.estado || '',
-        d.total_vendido,
-      ]);
-    });
+      const cabecera = this.armarCabecera(report);
+      const filas = this.filasDetalle(report);
+      const stats = report.estadisticas;
+      const thin = {
+        style: 'thin',
+        color: { argb: `FF${EXCEL.border}` },
+      };
 
-    if (stats.serie.length) {
-      ws.addRow([]);
-      ws.addRow(['Serie temporal']);
-      ws.addRow(['Etiqueta', 'Cantidad', 'Total']);
-      stats.serie.forEach((p) => ws.addRow([p.etiqueta, p.cantidad, p.total]));
+      ws.mergeCells('A1:F1');
+      const title = ws.getCell('A1');
+      title.value = cabecera.empresa;
+      title.font = { bold: true, size: 16, color: { argb: `FF${EXCEL.titleFg}` } };
+      title.alignment = { vertical: 'middle', horizontal: 'left' };
+
+      ws.mergeCells('A2:F2');
+      ws.getCell('A2').value = `RUC ${cabecera.ruc}`;
+      ws.getCell('A2').font = { size: 10, color: { argb: 'FF555555' } };
+
+      ws.mergeCells('A3:F3');
+      ws.getCell('A3').value = cabecera.titulo;
+      ws.getCell('A3').font = { bold: true, size: 13, color: { argb: `FF${EXCEL.titleFg}` } };
+
+      ws.mergeCells('A4:F4');
+      ws.getCell('A4').value =
+        `Periodo: ${etiquetaPeriodo(report.periodo)}  |  ${cabecera.fechaInicio} — ${cabecera.fechaFin}`;
+      ws.getCell('A4').font = { size: 10 };
+
+      ws.mergeCells('A5:F5');
+      ws.getCell('A5').value = `Generado: ${cabecera.generadoEl}`;
+      ws.getCell('A5').font = { size: 9, italic: true, color: { argb: 'FF666666' } };
+
+      if (cabecera.nota) {
+        ws.mergeCells('A6:F6');
+        ws.getCell('A6').value = cabecera.nota;
+        ws.getCell('A6').font = { size: 9, color: { argb: 'FF666666' } };
+      }
+
+      const kpiStart = 8;
+      const kpis: Array<[string, string | number]> = [
+        ['Total vendido', report.total_vendido],
+        ['Comprobantes', report.cantidad_comprobantes],
+        ['Ticket promedio', report.ticket_promedio],
+        ['Venta máxima', stats.venta_maxima],
+        ['Venta mínima', stats.venta_minima],
+        ['Emitidos', stats.emitidos],
+        ['Anulados', stats.anulados],
+        ['Con error', stats.con_error],
+        ['Días con venta', stats.dias_con_venta],
+      ];
+
+      ws.getCell(`A${kpiStart}`).value = 'Resumen';
+      ws.getCell(`A${kpiStart}`).font = { bold: true, size: 11 };
+      ws.mergeCells(`A${kpiStart}:B${kpiStart}`);
+      ws.getCell(`A${kpiStart}`).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: `FF${EXCEL.sectionBg}` },
+      };
+
+      const kpiMoneda = new Set(['Total vendido', 'Ticket promedio', 'Venta máxima', 'Venta mínima']);
+      kpis.forEach(([label, value], i) => {
+        const row = kpiStart + 1 + i;
+        const cLabel = ws.getCell(`A${row}`);
+        const cVal = ws.getCell(`B${row}`);
+        cLabel.value = label;
+        cLabel.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: `FF${EXCEL.kpiLabelBg}` },
+        };
+        cLabel.border = { top: thin, left: thin, bottom: thin, right: thin };
+        cVal.border = { top: thin, left: thin, bottom: thin, right: thin };
+        cVal.value = value;
+        if (kpiMoneda.has(label) && typeof value === 'number') {
+          cVal.numFmt = '"S/"#,##0.00';
+        }
+        cVal.alignment = { horizontal: 'right' };
+      });
+
+      let rowIdx = kpiStart + 1 + kpis.length + 1;
+      ws.mergeCells(`A${rowIdx}:F${rowIdx}`);
+      ws.getCell(`A${rowIdx}`).value = 'Detalle de comprobantes';
+      ws.getCell(`A${rowIdx}`).font = { bold: true, size: 11 };
+      ws.getCell(`A${rowIdx}`).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: `FF${EXCEL.sectionBg}` },
+      };
+
+      rowIdx += 1;
+      const headerRow = ws.getRow(rowIdx);
+      REPORTE_COLUMNAS_DETALLE.forEach((col, i) => {
+        const cell = headerRow.getCell(i + 1);
+        cell.value = col.label;
+        cell.font = { bold: true, color: { argb: `FF${EXCEL.headerFg}` } };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: `FF${EXCEL.headerBg}` },
+        };
+        cell.alignment = { vertical: 'middle', horizontal: i === 5 ? 'right' : 'left' };
+        cell.border = { top: thin, left: thin, bottom: thin, right: thin };
+      });
+      headerRow.height = 20;
+      const freezeAt = rowIdx;
+      ws.views = [{ state: 'frozen', ySplit: freezeAt }];
+
+      if (!filas.length) {
+        rowIdx += 1;
+        ws.mergeCells(`A${rowIdx}:F${rowIdx}`);
+        ws.getCell(`A${rowIdx}`).value = 'Sin movimientos en el periodo seleccionado.';
+        ws.getCell(`A${rowIdx}`).font = { italic: true, color: { argb: 'FF666666' } };
+      } else {
+        filas.forEach((f, idx) => {
+          rowIdx += 1;
+          const row = ws.getRow(rowIdx);
+          const values = [f.comprobante, f.fecha, f.cliente, f.documento, f.estado, f.total];
+          values.forEach((v, i) => {
+            const cell = row.getCell(i + 1);
+            cell.value = v;
+            cell.border = { top: thin, left: thin, bottom: thin, right: thin };
+            if (idx % 2 === 1) {
+              cell.fill = {
+                type: 'pattern',
+                pattern: 'solid',
+                fgColor: { argb: `FF${EXCEL.altRow}` },
+              };
+            }
+            if (i === 5) {
+              cell.numFmt = '"S/"#,##0.00';
+              cell.alignment = { horizontal: 'right' };
+            }
+          });
+        });
+      }
+
+      if (stats.serie?.length) {
+        rowIdx += 2;
+        ws.mergeCells(`A${rowIdx}:C${rowIdx}`);
+        ws.getCell(`A${rowIdx}`).value = 'Serie temporal';
+        ws.getCell(`A${rowIdx}`).font = { bold: true, size: 11 };
+        ws.getCell(`A${rowIdx}`).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: `FF${EXCEL.sectionBg}` },
+        };
+        rowIdx += 1;
+        ['Etiqueta', 'Cantidad', 'Total'].forEach((label, i) => {
+          const cell = ws.getRow(rowIdx).getCell(i + 1);
+          cell.value = label;
+          cell.font = { bold: true, color: { argb: `FF${EXCEL.headerFg}` } };
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: `FF${EXCEL.headerBg}` },
+          };
+          cell.border = { top: thin, left: thin, bottom: thin, right: thin };
+        });
+        stats.serie.forEach((p) => {
+          rowIdx += 1;
+          const row = ws.getRow(rowIdx);
+          row.getCell(1).value = p.etiqueta;
+          row.getCell(2).value = p.cantidad;
+          row.getCell(3).value = p.total;
+          row.getCell(3).numFmt = '"S/"#,##0.00';
+          for (let i = 1; i <= 3; i++) {
+            row.getCell(i).border = { top: thin, left: thin, bottom: thin, right: thin };
+          }
+        });
+      }
+
+      if (stats.top_clientes?.length) {
+        rowIdx += 2;
+        ws.mergeCells(`A${rowIdx}:D${rowIdx}`);
+        ws.getCell(`A${rowIdx}`).value = 'Top clientes';
+        ws.getCell(`A${rowIdx}`).font = { bold: true, size: 11 };
+        ws.getCell(`A${rowIdx}`).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: `FF${EXCEL.sectionBg}` },
+        };
+        rowIdx += 1;
+        ['Cliente', 'Documento', 'Cantidad', 'Total'].forEach((label, i) => {
+          const cell = ws.getRow(rowIdx).getCell(i + 1);
+          cell.value = label;
+          cell.font = { bold: true, color: { argb: `FF${EXCEL.headerFg}` } };
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: `FF${EXCEL.headerBg}` },
+          };
+          cell.border = { top: thin, left: thin, bottom: thin, right: thin };
+        });
+        stats.top_clientes.forEach((c) => {
+          rowIdx += 1;
+          const row = ws.getRow(rowIdx);
+          row.getCell(1).value = c.cliente;
+          row.getCell(2).value = c.documento || '';
+          row.getCell(3).value = c.cantidad;
+          row.getCell(4).value = c.total;
+          row.getCell(4).numFmt = '"S/"#,##0.00';
+          for (let i = 1; i <= 4; i++) {
+            row.getCell(i).border = { top: thin, left: thin, bottom: thin, right: thin };
+          }
+        });
+      }
+
+      REPORTE_COLUMNAS_DETALLE.forEach((col, i) => {
+        ws.getColumn(i + 1).width = col.excelWidth;
+      });
+
+      const buf = await wb.xlsx.writeBuffer();
+      return {
+        buffer: Buffer.from(buf),
+        filename: nombreArchivoReporte('ventas', report.periodo, 'xlsx'),
+      };
+    } catch (e) {
+      if (e instanceof BadRequestException) throw e;
+      throw new BadRequestException(
+        cuerpoError(
+          CodigoError.REPORTE_EXPORT_FALLIDA,
+          'No se pudo generar el Excel del reporte de ventas',
+        ),
+      );
     }
-
-    if (stats.top_clientes.length) {
-      ws.addRow([]);
-      ws.addRow(['Top clientes']);
-      ws.addRow(['Cliente', 'Documento', 'Cantidad', 'Total']);
-      stats.top_clientes.forEach((c) => ws.addRow([c.cliente, c.documento || '', c.cantidad, c.total]));
-    }
-
-    const buf = await wb.xlsx.writeBuffer();
-    return Buffer.from(buf);
   }
 
-  async exportVentasPdf(periodo: string, filters: any): Promise<Buffer> {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const PDFDocument = require('pdfkit');
-    const report = await this.reporteVentas(periodo, filters);
-    const doc = new PDFDocument({ size: 'A4', margin: 40 });
-    const chunks: Uint8Array[] = [];
-    doc.on('data', (chunk: Uint8Array) => chunks.push(chunk));
+  async exportVentasPdf(periodo: string, filters: any): Promise<{ buffer: Buffer; filename: string }> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const PDFDocument = require('pdfkit');
+      const report = await this.reporteVentas(periodo, filters);
+      const cabecera = this.armarCabecera(report);
+      const filas = this.filasDetalle(report);
+      const stats = report.estadisticas;
 
-    doc.fontSize(16).text(`Reporte de ventas — ${report.periodo}`, { align: 'center' });
-    doc.moveDown();
-    doc.fontSize(10).text(report.estadisticas.plan);
-    doc.moveDown(0.5);
-    doc.text(`Desde: ${report.fecha_inicio}`);
-    doc.text(`Hasta: ${report.fecha_fin}`);
-    doc.text(`Total vendido: ${report.total_vendido}`);
-    doc.text(`Comprobantes: ${report.cantidad_comprobantes}`);
-    doc.text(`Ticket promedio: ${report.ticket_promedio}`);
-    doc.text(`Máx / Mín: ${report.estadisticas.venta_maxima} / ${report.estadisticas.venta_minima}`);
-    doc.moveDown();
+      const doc = new PDFDocument({
+        size: 'A4',
+        margin: 40,
+        bufferPages: true,
+        info: {
+          Title: cabecera.titulo,
+          Author: cabecera.empresa,
+        },
+      });
+      const chunks: Uint8Array[] = [];
+      doc.on('data', (chunk: Uint8Array) => chunks.push(chunk));
 
-    doc.fontSize(10).text('Comprobante', 40, doc.y, { continued: true, width: 110 });
-    doc.text('Fecha', { continued: true, width: 90 });
-    doc.text('Cliente', { continued: true, width: 160 });
-    doc.text('Total', { align: 'right' });
-    doc.moveDown(0.4);
+      const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+      const left = doc.page.margins.left;
+      const bottomLimit = doc.page.height - 50;
 
-    report.detalle.forEach((d) => {
-      if (doc.y > 750) doc.addPage();
-      doc.fontSize(9).text(String(d.numero_formateado || '—'), 40, doc.y, { continued: true, width: 110 });
-      doc.text(String(d.fecha || '').slice(0, 10), { continued: true, width: 90 });
-      doc.text(String(d.cliente || '—').slice(0, 28), { continued: true, width: 160 });
-      doc.text(String(Number(d.total_vendido).toFixed(2)), { align: 'right' });
-    });
+      doc.fillColor('#1F4E79').font('Helvetica-Bold').fontSize(16).text(cabecera.empresa, left, 40, {
+        width: pageWidth,
+      });
+      doc.fillColor('#555555').font('Helvetica').fontSize(9).text(`RUC ${cabecera.ruc}`, { width: pageWidth });
+      doc.moveDown(0.4);
+      doc.fillColor('#1F4E79').font('Helvetica-Bold').fontSize(13).text(cabecera.titulo, { width: pageWidth });
+      doc.fillColor('#333333').font('Helvetica').fontSize(9);
+      doc.text(
+        `Periodo: ${etiquetaPeriodo(report.periodo)}   |   ${cabecera.fechaInicio} — ${cabecera.fechaFin}`,
+      );
+      doc.fillColor('#666666').fontSize(8).text(`Generado: ${cabecera.generadoEl}`);
+      if (cabecera.nota) {
+        doc.text(cabecera.nota);
+      }
+      doc.moveDown(0.6);
 
-    doc.end();
-    await new Promise((res) => doc.on('end', res));
-    return Buffer.concat(chunks.map((c) => Buffer.from(c)));
+      doc.fillColor('#333333').font('Helvetica-Bold').fontSize(10).text('Resumen');
+      doc.moveDown(0.2);
+      doc.font('Helvetica').fontSize(9);
+      const kpiLines = [
+        `Total vendido: ${formatearMonedaEs(report.total_vendido)}`,
+        `Comprobantes: ${report.cantidad_comprobantes}   |   Ticket promedio: ${formatearMonedaEs(report.ticket_promedio)}`,
+        `Máx / Mín: ${formatearMonedaEs(stats.venta_maxima)} / ${formatearMonedaEs(stats.venta_minima)}`,
+        `Emitidos: ${stats.emitidos}   |   Anulados: ${stats.anulados}   |   Con error: ${stats.con_error}`,
+      ];
+      kpiLines.forEach((line) => doc.text(line));
+      doc.moveDown(0.7);
+
+      const colWidths = REPORTE_COLUMNAS_DETALLE.map((c) => c.pdfWidth);
+      const rowH = 18;
+
+      const dibujarHeaderTabla = () => {
+        const y = doc.y;
+        doc.save();
+        doc.rect(left, y, pageWidth, rowH).fill('#1F4E79');
+        doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(8);
+        let x = left;
+        REPORTE_COLUMNAS_DETALLE.forEach((col, i) => {
+          const align = i === 5 ? 'right' : 'left';
+          doc.text(col.label, x + 3, y + 5, { width: colWidths[i] - 6, align });
+          x += colWidths[i];
+        });
+        doc.restore();
+        doc.y = y + rowH;
+      };
+
+      const asegurarEspacio = (alto: number) => {
+        if (doc.y + alto > bottomLimit) {
+          doc.addPage();
+          dibujarHeaderTabla();
+        }
+      };
+
+      doc.fillColor('#333333').font('Helvetica-Bold').fontSize(10).text('Detalle de comprobantes');
+      doc.moveDown(0.3);
+      dibujarHeaderTabla();
+
+      if (!filas.length) {
+        asegurarEspacio(24);
+        doc.fillColor('#666666').font('Helvetica-Oblique').fontSize(9)
+          .text('Sin movimientos en el periodo seleccionado.', left + 4, doc.y + 6);
+        doc.moveDown(1);
+      } else {
+        filas.forEach((f, idx) => {
+          asegurarEspacio(rowH);
+          const y = doc.y;
+          if (idx % 2 === 1) {
+            doc.save();
+            doc.rect(left, y, pageWidth, rowH).fill('#F7F9FC');
+            doc.restore();
+          }
+          doc.save();
+          doc.strokeColor('#B0B0B0').lineWidth(0.4);
+          doc.rect(left, y, pageWidth, rowH).stroke();
+          doc.restore();
+
+          const cells = [
+            f.comprobante,
+            f.fecha,
+            f.cliente,
+            f.documento,
+            f.estado,
+            formatearMonedaEs(f.total),
+          ];
+          doc.fillColor('#222222').font('Helvetica').fontSize(8);
+          let x = left;
+          cells.forEach((text, i) => {
+            const align = i === 5 ? 'right' : 'left';
+            const maxLen = i === 2 ? 28 : 40;
+            const t = String(text || '—');
+            doc.text(t.length > maxLen ? `${t.slice(0, maxLen - 1)}…` : t, x + 3, y + 5, {
+              width: colWidths[i] - 6,
+              align,
+              lineBreak: false,
+            });
+            x += colWidths[i];
+          });
+          doc.y = y + rowH;
+        });
+      }
+
+      if (stats.top_clientes?.length) {
+        doc.moveDown(0.8);
+        asegurarEspacio(40);
+        doc.fillColor('#333333').font('Helvetica-Bold').fontSize(10).text('Top clientes');
+        doc.moveDown(0.2);
+        doc.font('Helvetica').fontSize(8).fillColor('#222222');
+        stats.top_clientes.forEach((c, i) => {
+          asegurarEspacio(14);
+          doc.text(
+            `${i + 1}. ${c.cliente}${c.documento ? ` (${c.documento})` : ''} — ${c.cantidad} doc. — ${formatearMonedaEs(c.total)}`,
+          );
+        });
+      }
+
+      const range = doc.bufferedPageRange();
+      for (let i = 0; i < range.count; i++) {
+        doc.switchToPage(range.start + i);
+        const pieY = doc.page.height - 32;
+        doc.font('Helvetica').fontSize(8).fillColor('#666666');
+        doc.text(
+          `${cabecera.empresa} · Reporte de ventas`,
+          left,
+          pieY,
+          { width: pageWidth / 2, align: 'left', lineBreak: false },
+        );
+        doc.text(
+          `Página ${i + 1} de ${range.count}`,
+          left + pageWidth / 2,
+          pieY,
+          { width: pageWidth / 2, align: 'right', lineBreak: false },
+        );
+      }
+
+      doc.end();
+      await new Promise<void>((resolve, reject) => {
+        doc.on('end', () => resolve());
+        doc.on('error', reject);
+      });
+
+      return {
+        buffer: Buffer.concat(chunks.map((c) => Buffer.from(c))),
+        filename: nombreArchivoReporte('ventas', report.periodo, 'pdf'),
+      };
+    } catch (e) {
+      if (e instanceof BadRequestException) throw e;
+      throw new BadRequestException(
+        cuerpoError(
+          CodigoError.REPORTE_EXPORT_FALLIDA,
+          'No se pudo generar el PDF del reporte de ventas',
+        ),
+      );
+    }
+  }
+
+  private armarCabecera(report: VentasReportResponse): CabeceraReporte {
+    return {
+      empresa: emisorConfig.razon_social || 'HATUNSALES S.A.C.',
+      ruc: emisorConfig.ruc || '—',
+      titulo: 'Reporte de ventas',
+      periodo: report.periodo,
+      fechaInicio: formatearFechaEs(report.fecha_inicio),
+      fechaFin: formatearFechaEs(report.fecha_fin),
+      generadoEl: formatearFechaHoraEs(new Date()),
+      nota: 'Incluye comprobantes no anulados del periodo.',
+    };
+  }
+
+  private filasDetalle(report: VentasReportResponse): FilaDetalleReporte[] {
+    return (report.detalle || []).map((d) => ({
+      comprobante:
+        d.numero_formateado ||
+        (d.serie || d.numero != null ? `${d.serie ?? ''}-${d.numero ?? ''}` : '—'),
+      fecha: formatearFechaEs(d.fecha),
+      cliente: d.cliente || '—',
+      documento: d.documento_cliente || '—',
+      estado: capitalizarEstado(d.estado),
+      total: Number(d.total_vendido ?? 0),
+    }));
   }
 
   private construirEstadisticas(periodo: string, detalle: VentasReportDetalle[]): VentasEstadisticas {
@@ -285,7 +672,9 @@ export class ReportesBussnies implements IReportesBussniees {
       fechaInicio = new Date(filters.fecha_inicio);
       fechaFin = new Date(filters.fecha_fin);
       if (Number.isNaN(fechaInicio.getTime()) || Number.isNaN(fechaFin.getTime())) {
-        throw new BadRequestException('Formato de fecha inválido');
+        throw new BadRequestException(
+          cuerpoError(CodigoError.REPORTE_FECHA_INVALIDA, 'Formato de fecha inválido'),
+        );
       }
       fechaInicio.setHours(0, 0, 0, 0);
       fechaFin.setHours(23, 59, 59, 999);
@@ -321,7 +710,12 @@ export class ReportesBussnies implements IReportesBussniees {
         fechaInicio.setHours(0, 0, 0, 0);
         break;
       default:
-        throw new BadRequestException('Período inválido');
+        throw new BadRequestException(
+          cuerpoError(
+            CodigoError.REPORTE_PERIODO_INVALIDO,
+            'Período inválido. Use: diario, quincenal, mensual o anual',
+          ),
+        );
     }
 
     fechaFin.setHours(23, 59, 59, 999);
