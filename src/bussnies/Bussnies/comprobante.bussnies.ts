@@ -9,7 +9,7 @@ import axios from 'axios';
 import { ComprobanteRepository, FiltroComprobantes } from '../../repository/Repository/comprobante.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { ReceptorBussnies, TOPE_BOLETA_SIN_DOCUMENTO } from './receptor.bussnies';
-import { nubefactConfig } from '../../config/nubefact.config';
+import { nubefactConfig, nubefactConfigurado } from '../../config/nubefact.config';
 import { emisorConfig } from '../../config/emisor.config';
 import {
   GenerarComprobanteRequest,
@@ -140,6 +140,12 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
   // ── Emitir ───────────────────────────────────────────────────
 
   async generar(dto: GenerarComprobanteRequest): Promise<ComprobanteResponse> {
+    if (!nubefactConfigurado()) {
+      throw new ServiceUnavailableException(
+        'NUBEFACT no está configurado. Defina NUBEFACT_URL y NUBEFACT_TOKEN en el servidor.',
+      );
+    }
+
     const preparado = await this.preparar(dto, { guardarReceptor: true });
 
     // El correlativo se toma dentro de una transacción con bloqueo, así dos

@@ -1,9 +1,9 @@
 import { TypeOrmModuleOptions } from '@nestjs/typeorm';
 import { Usuario } from '../models/DBModel/user.entity';
-import { Usuarios } from '../models/DBModel/usuarios.entity';           // ← agregar
-import { VwUsuarioPermisos } from '../models/DBModel/vw-usuario-permisos.entity'; // ← agregar
-import { Rol } from '../models/DBModel/role.entity';                   // ← agregar
-import { Permiso } from '../models/DBModel/permiso.entity';            // ← agregar
+import { Usuarios } from '../models/DBModel/usuarios.entity';
+import { VwUsuarioPermisos } from '../models/DBModel/vw-usuario-permisos.entity';
+import { Rol } from '../models/DBModel/role.entity';
+import { Permiso } from '../models/DBModel/permiso.entity';
 import { Log } from '../models/DBModel/log.entity';
 import { Cliente } from 'src/models/DBModel/cliente.entity';
 import { Documento } from 'src/models/DBModel/documento.entity';
@@ -41,24 +41,53 @@ import { PedidoPago } from '../models/DBModel/tienda/pedido-pago.entity';
 import { Favorito } from '../models/DBModel/tienda/favorito.entity';
 import { Resena } from '../models/DBModel/tienda/resena.entity';
 
-export const postgresConfig: TypeOrmModuleOptions = {
-  name: 'pgConnection',
-  type: 'postgres',
-  host: 'sakura.proxy.rlwy.net',
-  port: 23642,
-  username: 'postgres',
-  password: 'bhIIAPOxvaOpaKxjVgyJgyNEAeRKuotI',
-  database: 'railway',
-  entities: [Usuario, Usuarios, VwUsuarioPermisos, Rol, Permiso, Cliente, Documento, Empresa, Proveedor,
-    Producto, Inventario, GuiaRemision, GuiaRemisionItem, Proforma, ProformaItem,
-    Sucursal, StockSucursal, Categoria, Marca, ProductoImagen, Seccion, Almacen,
-    Comprobante, ComprobanteItem, TipoComprobante, Moneda,
-    // Módulo tienda
-    Banner, ProductoAtributo, DireccionEnvio, MetodoEnvio, MetodoPago, Cupon,
-    Carrito, CarritoItem, Pedido, PedidoItem, PedidoEstado, PedidoPago, Favorito, Resena,
-  ],
-  synchronize: false,
+const postgresEntities = [
+  Usuario, Usuarios, VwUsuarioPermisos, Rol, Permiso, Cliente, Documento, Empresa, Proveedor,
+  Producto, Inventario, GuiaRemision, GuiaRemisionItem, Proforma, ProformaItem,
+  Sucursal, StockSucursal, Categoria, Marca, ProductoImagen, Seccion, Almacen,
+  Comprobante, ComprobanteItem, TipoComprobante, Moneda,
+  Banner, ProductoAtributo, DireccionEnvio, MetodoEnvio, MetodoPago, Cupon,
+  Carrito, CarritoItem, Pedido, PedidoItem, PedidoEstado, PedidoPago, Favorito, Resena,
+];
+
+function postgresDesdeEnv(): TypeOrmModuleOptions {
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+
+  if (databaseUrl) {
+    return {
+    name: 'pgConnection',
+    type: 'postgres',
+    url: databaseUrl,
+    entities: postgresEntities,
+    synchronize: false,
+    ssl: {
+      rejectUnauthorized: false,
+    },
 };
+  }
+
+  return {
+    name: 'pgConnection',
+    type: 'postgres',
+    host: process.env.PGHOST ?? 'localhost',
+    port: Number(process.env.PGPORT ?? 5432),
+    username: process.env.PGUSER ?? 'postgres',
+    password: process.env.PGPASSWORD ?? '',
+    database: process.env.PGDATABASE ?? 'railway',
+    entities: postgresEntities,
+    synchronize: false,
+  };
+}
+
+/** True si hay URL completa o host + password para conectar. */
+export function postgresConfigurado(): boolean {
+  if (process.env.DATABASE_URL?.trim()) return true;
+  const host = process.env.PGHOST?.trim();
+  const password = process.env.PGPASSWORD?.trim();
+  return Boolean(host && password);
+}
+
+export const postgresConfig: TypeOrmModuleOptions = postgresDesdeEnv();
 
 export const sqliteConfig: TypeOrmModuleOptions = {
   name: 'sqliteConnection',

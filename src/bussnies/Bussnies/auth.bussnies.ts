@@ -113,12 +113,12 @@ export class AuthBussnies {
 
   async login(dto: LoginRequest, res: any): Promise<any> {
     const normalizedEmail = dto.email.trim().toLowerCase();
-    const usuarios = await this.usuarioRepo.find({
-      where: { estado: true },
-      relations: ['rol'],
-    });
-
-    const usuario = usuarios.find((item) => item.email?.toLowerCase() === normalizedEmail);
+    const usuario = await this.usuarioRepo
+      .createQueryBuilder('u')
+      .leftJoinAndSelect('u.rol', 'rol')
+      .where('LOWER(u.email) = :email', { email: normalizedEmail })
+      .andWhere('u.estado = true')
+      .getOne();
 
     if (!usuario) throw new UnauthorizedException('Credenciales incorrectas');
 

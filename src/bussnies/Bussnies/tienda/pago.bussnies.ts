@@ -65,6 +65,7 @@ export class PagoBussnies {
 
     if (yaRegistrado) {
       this.log.log(`Reintento de pago del pedido ${idPedido}; no se vuelve a cobrar`);
+      await this.confirmarSiPagoAprobado(idPedido, yaRegistrado.estado);
       return this.pedidos.obtener(idPedido);
     }
 
@@ -149,7 +150,10 @@ export class PagoBussnies {
     // no volvemos a tocar el pedido.
     if (evento.referencia) {
       const existente = await this.repo.buscarPagoPorReferenciaExterna(this.pasarela.nombre, evento.referencia);
-      if (existente) return { recibido: true };
+      if (existente) {
+        await this.confirmarSiPagoAprobado(idPedido, existente.estado);
+        return { recibido: true };
+      }
     }
 
     const pedido = await this.repo.obtenerPorId(idPedido);
@@ -198,6 +202,20 @@ export class PagoBussnies {
     }
 
     return this.pedidos.obtener(idPedido);
+  }
+
+  /**
+   * Si el cobro ya quedó registrado pero el pedido sigue pendiente
+   * (fallo entre registrarPago y confirmar), reintenta cerrar el flujo.
+   */
+  private async confirmarSiPagoAprobado(idPedido: number, estadoPago?: string): Promise<void> {
+    if (estadoPago !== 'aprobado') return;
+
+    const pedido = await this.repo.obtenerPorId(idPedido);
+    if (!pedido || pedido.estado !== 'pendiente') return;
+
+    this.log.warn(`Completando confirmación pendiente del pedido ${idPedido}`);
+    await this.confirmar(idPedido);
   }
 
   /** Marca el pedido como pagado y, si corresponde, genera la venta. */

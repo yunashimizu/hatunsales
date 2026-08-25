@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { pasarelaConfig } from '../../config/pasarela.config';
+import { esProduccion } from '../../config/runtime.config';
 import {
   EventoWebhook,
   PasarelaPago,
@@ -102,7 +103,7 @@ export class CulqiPasarela implements PasarelaPago {
     const firma = String(cabeceras['x-culqi-signature'] ?? cabeceras['X-Culqi-Signature'] ?? '');
 
     // Sin secreto: en producción se rechaza; en desarrollo se acepta (bitácora).
-    const enProduccion = (process.env.NODE_ENV ?? '').toLowerCase() === 'production';
+    const enProduccion = esProduccion();
     const valido = secreto ? this.firmaValida(cuerpo, firma, secreto) : !enProduccion;
     const objeto = cuerpo?.data ?? cuerpo?.object ?? cuerpo ?? {};
     const tipo = String(cuerpo?.type ?? cuerpo?.event ?? 'desconocido');
