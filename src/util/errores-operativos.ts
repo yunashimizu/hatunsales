@@ -28,6 +28,13 @@ export const CodigoError = {
   COTIZACION_VENCIDA: 'COTIZACION_VENCIDA',
   COTIZACION_YA_CONVERTIDA: 'COTIZACION_YA_CONVERTIDA',
   COTIZACION_ESTADO_INVALIDO: 'COTIZACION_ESTADO_INVALIDO',
+  /** Falla inesperada (BD u otra) al operar cotizaciones; el detalle queda en el log. */
+  COTIZACION_ERROR_INTERNO: 'COTIZACION_ERROR_INTERNO',
+  /** No se pudo generar el PDF o el Excel de la proforma. */
+  COTIZACION_DOCUMENTO_ERROR: 'COTIZACION_DOCUMENTO_ERROR',
+  COTIZACION_CANTIDAD_INVALIDA: 'COTIZACION_CANTIDAD_INVALIDA',
+  COTIZACION_PRODUCTO_SIN_PRECIO: 'COTIZACION_PRODUCTO_SIN_PRECIO',
+  COTIZACION_PRODUCTO_NO_ENCONTRADO: 'COTIZACION_PRODUCTO_NO_ENCONTRADO',
   SERIE_INVALIDA: 'SERIE_INVALIDA',
   SERIE_NO_CONFIGURADA: 'SERIE_NO_CONFIGURADA',
   INVENTARIO_STOCK_NEGATIVO: 'INVENTARIO_STOCK_NEGATIVO',
@@ -40,7 +47,7 @@ export const CodigoError = {
 
 export type CodigoErrorTipo = (typeof CodigoError)[keyof typeof CodigoError];
 
-/** Cuerpo JSON que Nest serializa en 400/403/404. */
+/** Cuerpo JSON que Nest serializa en 400/403/404/409/500. */
 export function cuerpoError(codigo: CodigoErrorTipo, message: string) {
   return { message, codigo };
 }

@@ -52,39 +52,75 @@ function grupoALetras(n: number): string {
   return centenasALetras(n);
 }
 
-function enteroALetras(entero: number): string {
-  if (entero === 0) return 'CERO';
+/**
+ * Delante de MIL y MILLONES el "UNO" final se apocopa: VEINTIUN MIL,
+ * TREINTA Y UN MILLONES, DOSCIENTOS UN MIL (nunca "VEINTIUNO MIL").
+ */
+function apocopar(texto: string): string {
+  return texto.endsWith('UNO') ? texto.slice(0, -1) : texto;
+}
 
-  const millones = Math.floor(entero / 1_000_000);
-  const miles = Math.floor((entero % 1_000_000) / 1000);
-  const resto = entero % 1000;
+/** 0 … 999 999, con apócope opcional del último "UNO". */
+function hastaMillonALetras(n: number, conApocope: boolean): string {
+  const miles = Math.floor(n / 1000);
+  const resto = n % 1000;
+  const partes: string[] = [];
+
+  if (miles === 1) partes.push('MIL');
+  else if (miles > 1) partes.push(`${apocopar(grupoALetras(miles))} MIL`);
+
+  if (resto > 0) {
+    const textoResto = grupoALetras(resto);
+    partes.push(conApocope ? apocopar(textoResto) : textoResto);
+  }
+  return partes.join(' ');
+}
+
+/** Parte entera en letras (hasta 999 999 999 999). */
+export function enteroALetras(entero: number): string {
+  const n = Math.floor(Math.abs(Number(entero) || 0));
+  if (n === 0) return 'CERO';
+
+  const millones = Math.floor(n / 1_000_000);
+  const resto = n % 1_000_000;
 
   const partes: string[] = [];
 
-  if (millones > 0) {
-    partes.push(millones === 1 ? 'UN MILLON' : `${grupoALetras(millones)} MILLONES`);
-  }
-  if (miles > 0) {
-    partes.push(miles === 1 ? 'MIL' : `${grupoALetras(miles)} MIL`);
+  if (millones === 1) {
+    partes.push('UN MILLON');
+  } else if (millones > 1) {
+    partes.push(`${hastaMillonALetras(millones, true)} MILLONES`);
   }
   if (resto > 0) {
-    partes.push(grupoALetras(resto));
+    partes.push(hastaMillonALetras(resto, false));
   }
 
   return partes.join(' ').replace(/\s+/g, ' ').trim();
 }
 
+/** Separa un importe en entero y céntimos sin errores de coma flotante. */
+function partesImporte(monto: number): { entero: number; centimos: number } {
+  const totalCentimos = Math.round(Math.abs(Number(monto) || 0) * 100);
+  return {
+    entero: Math.floor(totalCentimos / 100),
+    centimos: totalCentimos % 100,
+  };
+}
+
 export function numeroALetras(monto: number, idMoneda = 1): string {
-  const valor = Math.abs(Number(monto) || 0);
-  const entero = Math.floor(valor);
-  const centimos = Math.round((valor - entero) * 100);
-
-  // Redondear los céntimos puede empujar el entero, por ejemplo 9.999 -> 10.00
-  const enteroFinal = centimos === 100 ? entero + 1 : entero;
-  const centimosFinal = centimos === 100 ? 0 : centimos;
-
+  const { entero, centimos } = partesImporte(monto);
   const moneda = NOMBRE_MONEDA[idMoneda] ?? NOMBRE_MONEDA[1];
-  const centimosTexto = String(centimosFinal).padStart(2, '0');
+  const centimosTexto = String(centimos).padStart(2, '0');
 
-  return `${enteroALetras(enteroFinal)} CON ${centimosTexto}/100 ${moneda}`;
+  return `${enteroALetras(entero)} CON ${centimosTexto}/100 ${moneda}`;
+}
+
+/**
+ * Formato de proformas y cotizaciones: "CIENTO CUARENTA Y CUATRO Y 00/100 SOLES".
+ * (El comprobante electrónico sigue usando numeroALetras con "CON").
+ */
+export function montoEnLetras(monto: number, idMoneda = 1): string {
+  const { entero, centimos } = partesImporte(monto);
+  const moneda = NOMBRE_MONEDA[idMoneda] ?? NOMBRE_MONEDA[1];
+  return `${enteroALetras(entero)} Y ${String(centimos).padStart(2, '0')}/100 ${moneda}`;
 }
