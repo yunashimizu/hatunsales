@@ -16,6 +16,11 @@ CREATE INDEX IF NOT EXISTS idx_proformas_id_venta
 CREATE INDEX IF NOT EXISTS idx_proformas_valida_hasta
   ON proformas (valida_hasta);
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ventas_clave_idempotencia
+  ON ventas (clave_idempotencia)
+  WHERE clave_idempotencia IS NOT NULL
+    AND clave_idempotencia <> '';
+
 COMMIT;
 
 -- Auditoría previa a cualquier traslado desde stock_sucursal.

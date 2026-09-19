@@ -100,8 +100,9 @@ export class VentaBussnies {
     // C4: solo si caja_modo=estricto (default blando = no bloquea). Tienda no aplica.
     await this.assertCajaModoSiEstricto(usuario);
 
-    if (dto.clave_idempotencia) {
-      const existente = await this.repo.buscarPorClaveIdempotencia(dto.clave_idempotencia);
+    const claveIdempotencia = dto.clave_idempotencia?.trim() || undefined;
+    if (claveIdempotencia) {
+      const existente = await this.repo.buscarPorClaveIdempotencia(claveIdempotencia);
       if (existente) return this.obtener(existente);
     }
 
@@ -126,8 +127,9 @@ export class VentaBussnies {
     const idAlmacen = dto.id_almacen ?? (await this.almacenPorDefecto());
 
     let idVenta: number;
+    let ventaExistente = false;
     try {
-      idVenta = await this.repo.registrar(
+      const resultado = await this.repo.registrar(
         {
           id_cliente: receptor.id_cliente,
           id_empresa: receptor.id_empresa,
@@ -138,7 +140,7 @@ export class VentaBussnies {
           descuento: resumen.total_descuento,
           total: resumen.total,
            origen: 'mostrador',
-           clave_idempotencia: dto.clave_idempotencia,
+           clave_idempotencia: claveIdempotencia,
            observaciones: dto.observaciones,
            id_proforma: dto.id_proforma,
            credito,
@@ -150,16 +152,22 @@ export class VentaBussnies {
           idAlmacenPreferido: idAlmacen,
         },
       );
+      idVenta = resultado.id_venta;
+      ventaExistente = resultado.existente;
     } catch (error: any) {
       // Carrera de idempotencia: el índice único ganó en otra petición.
-      if (dto.clave_idempotencia && this.esViolacionUnica(error)) {
-        const existente = await this.repo.buscarPorClaveIdempotencia(dto.clave_idempotencia);
+      if (claveIdempotencia && this.esViolacionUnica(error)) {
+        const existente = await this.repo.buscarPorClaveIdempotencia(claveIdempotencia);
         if (existente) return this.obtener(existente);
       }
       throw this.traducirErrorDeStock(error, items);
     }
 
     const venta = await this.obtener(idVenta);
+
+    // Un reintento idempotente devuelve la venta existente sin volver a llamar
+    // al proveedor de comprobantes ni repetir efectos externos.
+    if (ventaExistente) return venta;
 
     if (dto.emitir_comprobante === false) return venta;
 

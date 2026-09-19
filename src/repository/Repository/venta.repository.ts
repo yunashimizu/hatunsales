@@ -35,6 +35,11 @@ export interface DatosVenta {
   };
 }
 
+export interface ResultadoRegistroVenta {
+  id_venta: number;
+  existente: boolean;
+}
+
 export interface FiltroVentas {
   texto?: string;
   desde?: string;
@@ -318,15 +323,21 @@ export class VentaRepository {
     lineas: LineaVentaPersistida[],
     pagos: { id_metodo?: number; monto: number; referencia?: string; monto_recibido?: number; vuelto?: number }[],
     opciones: { descontarStock: boolean; idAlmacenPreferido?: number },
-  ): Promise<number> {
+  ): Promise<ResultadoRegistroVenta> {
+    await this.asegurarIndicesBusqueda();
     try {
       return await this.dataSource.transaction(async (manager) => {
         if (datos.clave_idempotencia) {
+          // Serializa reintentos concurrentes aunque el índice único todavía no
+          // exista en una base antigua o no haya podido crearse por datos previos.
+          await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [datos.clave_idempotencia]);
           const previas = await manager.query(
             'SELECT id_venta FROM ventas WHERE clave_idempotencia = $1 LIMIT 1',
             [datos.clave_idempotencia],
           );
-          if (previas[0]?.id_venta) return Number(previas[0].id_venta);
+          if (previas[0]?.id_venta) {
+            return { id_venta: Number(previas[0].id_venta), existente: true };
+          }
         }
 
         if (datos.id_proforma) {
@@ -442,12 +453,12 @@ export class VentaRepository {
         }
 
         this.log.log(`Venta ${idVenta} registrada por ${datos.total}`);
-        return idVenta;
+        return { id_venta: idVenta, existente: false };
       });
     } catch (error: any) {
       if (this.esViolacionUnica(error) && datos.clave_idempotencia) {
         const existente = await this.buscarPorClaveIdempotencia(datos.clave_idempotencia);
-        if (existente) return existente;
+        if (existente) return { id_venta: existente, existente: true };
       }
       throw error;
     }
