@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { VentaRepository, FiltroVentas, LineaVentaPersistida } from '../../repository/Repository/venta.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { CreditoRepository } from '../../repository/Repository/credito.repository';
@@ -137,10 +137,11 @@ export class VentaBussnies {
           igv: resumen.total_igv,
           descuento: resumen.total_descuento,
           total: resumen.total,
-          origen: 'mostrador',
-          clave_idempotencia: dto.clave_idempotencia,
-          observaciones: dto.observaciones,
-          credito,
+           origen: 'mostrador',
+           clave_idempotencia: dto.clave_idempotencia,
+           observaciones: dto.observaciones,
+           id_proforma: dto.id_proforma,
+           credito,
         },
         lineas,
         pagos,
@@ -656,6 +657,31 @@ export class VentaBussnies {
 
   private traducirErrorDeStock(error: any, items: { id_producto: number; descripcion: string }[]) {
     const mensaje = String(error?.message ?? '');
+
+    if (mensaje === 'COTIZACION_NO_ENCONTRADA') {
+      return new NotFoundException(cuerpoError(CodigoError.COTIZACION_NO_ENCONTRADA, 'La cotización ya no existe'));
+    }
+    if (mensaje.startsWith('COTIZACION_YA_CONVERTIDA:')) {
+      const idVenta = mensaje.split(':')[1] || '';
+      return new ConflictException(
+        cuerpoError(CodigoError.COTIZACION_YA_CONVERTIDA, idVenta ? `La cotización ya tiene venta #${idVenta}` : 'La cotización ya fue convertida'),
+      );
+    }
+    if (mensaje === 'COTIZACION_ANULADA') {
+      return new BadRequestException(cuerpoError(CodigoError.COTIZACION_ESTADO_INVALIDO, 'La cotización está anulada'));
+    }
+    if (mensaje === 'COTIZACION_NO_APROBADA') {
+      return new BadRequestException(cuerpoError(CodigoError.COTIZACION_ESTADO_INVALIDO, 'Apruebe la cotización antes de cobrarla'));
+    }
+    if (mensaje === 'COTIZACION_ITEMS_CAMBIARON') {
+      return new BadRequestException(cuerpoError(CodigoError.COTIZACION_ESTADO_INVALIDO, 'Los productos o cantidades no coinciden con la cotización aprobada'));
+    }
+    if (mensaje === 'COTIZACION_REQUIERE_STOCK') {
+      return new BadRequestException(cuerpoError(CodigoError.COTIZACION_ESTADO_INVALIDO, 'Una venta desde cotización debe descontar stock'));
+    }
+    if (mensaje === 'COTIZACION_CONVERSION_CONFLICTO') {
+      return new ConflictException(cuerpoError(CodigoError.COTIZACION_ESTADO_INVALIDO, 'No se pudo confirmar la conversión de la cotización'));
+    }
 
     if (mensaje.startsWith('STOCK_INSUFICIENTE:')) {
       const [, idProducto, faltante] = mensaje.split(':');

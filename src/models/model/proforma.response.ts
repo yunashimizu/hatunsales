@@ -23,6 +23,7 @@ export class ProformaResponse {
   total_gravada!: number;
   total_igv!: number;
   total!: number;
+  porcentaje_igv!: number;
   id_venta?: number | null;
   enviada_wa_en?: Date | string | null;
   items!: ProformaItemResponse[];

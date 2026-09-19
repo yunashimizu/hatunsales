@@ -14,6 +14,12 @@ import { IProformaBussniees } from '../Ibussnies/IProformaBussniees';
 import { ProductoRepository } from '../../repository/Repository/producto.repository';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { WhatsappPasarela } from '../../util/pasarela/whatsapp.pasarela';
+import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
+import {
+  calcularComprobante,
+  PORCENTAJE_IGV_POR_DEFECTO,
+  redondear,
+} from '../../util/fiscal/calculo-fiscal';
 
 @Injectable()
 export class ProformaBussnies implements IProformaBussniees {
@@ -22,6 +28,7 @@ export class ProformaBussnies implements IProformaBussniees {
     private readonly repo: ProformaRepository,
     private readonly productoRepo: ProductoRepository,
     private readonly whatsapp: WhatsappPasarela,
+    private readonly config: ConfiguracionRepository,
   ) {}
 
   async getAll(): Promise<ProformaResponse[]> {
@@ -59,40 +66,44 @@ export class ProformaBussnies implements IProformaBussniees {
       );
     }
 
-    let total = 0;
-    const itemsMapped: any[] = [];
+    const itemsBase: any[] = [];
 
     for (const item of dto.items) {
       const producto = await this.productoRepo.getById(item.id_producto);
       if (!producto) throw new NotFoundException(`Producto ${item.id_producto} no encontrado`);
 
       const cantidad = Number(item.cantidad);
-      const precio = Number(item.precio_unitario);
-      if (!(cantidad > 0) || !(precio >= 0)) {
-        throw new BadRequestException('Cantidad y precio deben ser válidos');
+      const precioVenta = Number((producto as any).precio_venta ?? 0);
+      const descuento = Number((producto as any).descuento ?? 0);
+      const precio = redondear(Math.max(0, precioVenta - descuento));
+      if (!(cantidad > 0) || !(precio > 0)) {
+        throw new BadRequestException(`El producto "${(producto as any).nombre || item.id_producto}" no tiene un precio válido`);
       }
-      const subtotal = Math.round((cantidad * precio + Number.EPSILON) * 100) / 100;
-      total += subtotal;
 
-      itemsMapped.push({
+      itemsBase.push({
         producto: { id_producto: item.id_producto } as any,
         cantidad,
         precio_unitario: precio,
-        subtotal,
         descripcion_snapshot: (item.descripcion || (producto as any).nombre || '').slice(0, 250),
         sku_snapshot: (item.sku || (producto as any).sku || '').slice(0, 80),
       });
     }
 
-    total = Math.round((total + Number.EPSILON) * 100) / 100;
-    const totalGravada =
-      dto.total_gravada != null
-        ? Number(dto.total_gravada)
-        : Math.round((total / 1.18 + Number.EPSILON) * 100) / 100;
-    const totalIgv =
-      dto.total_igv != null
-        ? Number(dto.total_igv)
-        : Math.round((total - totalGravada + Number.EPSILON) * 100) / 100;
+    const porcentajeIgv = await this.config.obtenerNumero(
+      'tienda_igv_porcentaje',
+      PORCENTAJE_IGV_POR_DEFECTO,
+    );
+    const resumen = calcularComprobante(
+      itemsBase.map((item) => ({
+        cantidad: item.cantidad,
+        precio_unitario: item.precio_unitario,
+      })),
+      porcentajeIgv,
+    );
+    const itemsMapped = itemsBase.map((item, indice) => ({
+      ...item,
+      subtotal: resumen.lineas[indice].total,
+    }));
 
     const dias = Number(dto.dias_vigencia) > 0 ? Number(dto.dias_vigencia) : 7;
     const valida = new Date();
@@ -114,9 +125,10 @@ export class ProformaBussnies implements IProformaBussniees {
       id_almacen: dto.id_almacen ? Number(dto.id_almacen) : null,
       cliente_nombre_snapshot: nombre || null,
       telefono_envio: (dto.telefono_envio ?? '').replace(/\D/g, '') || null,
-      total_gravada: totalGravada,
-      total_igv: totalIgv,
-      total: dto.total != null ? Number(dto.total) : total,
+      total_gravada: resumen.total_gravada,
+      total_igv: resumen.total_igv,
+      total: resumen.total,
+      porcentaje_igv: resumen.porcentaje_igv,
       items: itemsMapped,
     });
 
@@ -129,6 +141,22 @@ export class ProformaBussnies implements IProformaBussniees {
       throw new NotFoundException(
         cuerpoError(CodigoError.COTIZACION_NO_ENCONTRADA, `Cotización ${id} no encontrada`),
       );
+    }
+
+    if (actual.estado === 'anulada' && dto.estado && dto.estado !== 'anulada') {
+      throw new ConflictException(
+        cuerpoError(CodigoError.COTIZACION_ESTADO_INVALIDO, 'La cotización ya está anulada'),
+      );
+    }
+
+    if (actual.estado === 'convertida' && dto.estado && dto.estado !== 'convertida') {
+      throw new ConflictException(
+        cuerpoError(CodigoError.COTIZACION_YA_CONVERTIDA, `Ya tiene venta #${actual.id_venta}`),
+      );
+    }
+
+    if (dto.estado === 'convertida' && (!dto.id_venta || Number(dto.id_venta) <= 0)) {
+      throw new BadRequestException('Una cotización convertida debe indicar la venta asociada');
     }
 
     if (dto.estado === 'convertida' && actual.estado === 'convertida' && actual.id_venta) {
@@ -283,6 +311,7 @@ export class ProformaBussnies implements IProformaBussniees {
       total_gravada: Number(p.total_gravada ?? 0),
       total_igv: Number(p.total_igv ?? 0),
       total: Number(p.total ?? 0),
+      porcentaje_igv: Number(p.porcentaje_igv ?? 18),
       id_venta: p.id_venta ?? null,
       enviada_wa_en: p.enviada_wa_en ?? null,
       items:

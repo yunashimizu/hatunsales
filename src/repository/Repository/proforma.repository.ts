@@ -30,6 +30,7 @@ export class ProformaRepository extends CrudRepository<Proforma> {
       `ALTER TABLE proformas ADD COLUMN IF NOT EXISTS telefono_envio VARCHAR(32)`,
       `ALTER TABLE proformas ADD COLUMN IF NOT EXISTS id_venta INTEGER`,
       `ALTER TABLE proformas ADD COLUMN IF NOT EXISTS enviada_wa_en TIMESTAMPTZ`,
+      `ALTER TABLE proformas ADD COLUMN IF NOT EXISTS porcentaje_igv NUMERIC DEFAULT 18`,
       `ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS descripcion_snapshot VARCHAR(250)`,
       `ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS sku_snapshot VARCHAR(80)`,
       `CREATE UNIQUE INDEX IF NOT EXISTS uq_proformas_codigo ON proformas (codigo) WHERE codigo IS NOT NULL`,

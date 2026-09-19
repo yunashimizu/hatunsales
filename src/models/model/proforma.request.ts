@@ -74,7 +74,7 @@ export class CrearProformaRequest {
 
 export class MarcarProformaRequest {
   @IsOptional()
-  @IsIn(['borrador', 'enviada', 'convertida', 'anulada'])
+  @IsIn(['borrador', 'enviada', 'aprobada', 'convertida', 'anulada'])
   estado?: string;
 
   @IsOptional()

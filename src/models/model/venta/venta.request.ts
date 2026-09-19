@@ -137,6 +137,11 @@ export class CrearVentaRequest {
   @IsOptional()
   id_caja?: number;
 
+  /** Cotización aprobada que originó esta venta. */
+  @IsInt()
+  @IsOptional()
+  id_proforma?: number;
+
   @IsBoolean()
   @IsOptional()
   descontar_stock?: boolean;

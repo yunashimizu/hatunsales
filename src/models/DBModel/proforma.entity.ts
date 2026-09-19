@@ -59,6 +59,9 @@ export class Proforma {
   @Column({ type: 'numeric', default: 0 })
   total!: number;
 
+  @Column({ type: 'numeric', default: 18 })
+  porcentaje_igv!: number;
+
   @OneToMany(() => ProformaItem, (item) => item.proforma, { cascade: true })
   items!: ProformaItem[];
 

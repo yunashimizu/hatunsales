@@ -26,6 +26,7 @@ export interface DatosVenta {
   origen: string;
   clave_idempotencia?: string;
   observaciones?: string;
+  id_proforma?: number;
   credito?: {
     monto: number;
     dias: number;
@@ -328,6 +329,13 @@ export class VentaRepository {
           if (previas[0]?.id_venta) return Number(previas[0].id_venta);
         }
 
+        if (datos.id_proforma) {
+          await this.validarCotizacionParaVenta(manager, datos.id_proforma, lineas);
+          if (!opciones.descontarStock) {
+            throw new Error('COTIZACION_REQUIERE_STOCK');
+          }
+        }
+
         let salidasStock: { id_producto: number; id_almacen: number; cantidad: number }[] = [];
         if (opciones.descontarStock) {
           salidasStock = await this.descontarStock(manager, lineas, opciones.idAlmacenPreferido);
@@ -418,6 +426,21 @@ export class VentaRepository {
           );
         }
 
+        if (datos.id_proforma) {
+          const convertida = await manager.query(
+            `UPDATE proformas
+                SET estado = 'convertida', id_venta = $1
+              WHERE id_proforma = $2
+                AND estado = 'aprobada'
+                AND id_venta IS NULL
+              RETURNING id_proforma`,
+            [idVenta, datos.id_proforma],
+          );
+          if (!convertida[0]) {
+            throw new Error('COTIZACION_CONVERSION_CONFLICTO');
+          }
+        }
+
         this.log.log(`Venta ${idVenta} registrada por ${datos.total}`);
         return idVenta;
       });
@@ -433,6 +456,71 @@ export class VentaRepository {
   private esViolacionUnica(error: any): boolean {
     const codigo = String(error?.code ?? error?.driverError?.code ?? '');
     return codigo === '23505';
+  }
+
+  /** Bloquea y valida la cotización antes de tocar stock o crear la venta. */
+  private async validarCotizacionParaVenta(
+    manager: EntityManager,
+    idProforma: number,
+    lineas: LineaVentaPersistida[],
+  ): Promise<void> {
+    const cotizaciones = await manager.query(
+      `SELECT id_proforma, estado, id_venta
+         FROM proformas
+        WHERE id_proforma = $1
+        FOR UPDATE`,
+      [idProforma],
+    );
+    const cotizacion = cotizaciones[0];
+    if (!cotizacion) throw new Error('COTIZACION_NO_ENCONTRADA');
+    if (String(cotizacion.estado) === 'convertida' || cotizacion.id_venta) {
+      throw new Error(`COTIZACION_YA_CONVERTIDA:${cotizacion.id_venta ?? ''}`);
+    }
+    if (String(cotizacion.estado) === 'anulada') throw new Error('COTIZACION_ANULADA');
+    if (String(cotizacion.estado) !== 'aprobada') throw new Error('COTIZACION_NO_APROBADA');
+
+    const items = await manager.query(
+      `SELECT id_producto, cantidad, precio_unitario
+         FROM proformas_items
+        WHERE id_proforma = $1
+        ORDER BY id_item`,
+      [idProforma],
+    );
+    const cotizacionMap = this.agruparLineasCotizacion(items);
+    const ventaMap = this.agruparLineasCotizacion(lineas);
+
+    if (cotizacionMap.size !== ventaMap.size) {
+      throw new Error('COTIZACION_ITEMS_CAMBIARON');
+    }
+    for (const [idProducto, esperado] of cotizacionMap) {
+      const vendido = ventaMap.get(idProducto);
+      if (!vendido || Number.isNaN(vendido.precio) || Number.isNaN(esperado.precio)
+        || Math.abs(vendido.cantidad - esperado.cantidad) > 0.0001
+        || Math.abs(vendido.precio - esperado.precio) > 0.005) {
+        throw new Error('COTIZACION_ITEMS_CAMBIARON');
+      }
+    }
+  }
+
+  private agruparLineasCotizacion(
+    lineas: Array<{ id_producto: number; cantidad: number; precio_unitario: number }>,
+  ): Map<number, { cantidad: number; precio: number }> {
+    const agrupadas = new Map<number, { cantidad: number; precio: number }>();
+    for (const linea of lineas) {
+      const idProducto = Number(linea.id_producto);
+      const actual = agrupadas.get(idProducto);
+      const cantidad = Number(linea.cantidad);
+      const precio = Number(linea.precio_unitario);
+      if (!actual) {
+        agrupadas.set(idProducto, { cantidad, precio });
+      } else {
+        actual.cantidad += cantidad;
+        if (Math.abs(actual.precio - precio) > 0.005) {
+          actual.precio = Number.NaN;
+        }
+      }
+    }
+    return agrupadas;
   }
 
   /**
