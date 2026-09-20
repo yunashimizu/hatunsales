@@ -7,8 +7,14 @@ export class ProformaItemRequest {
   @IsInt()
   id_producto!: number;
 
+  /**
+   * La regla real (entero >= 1, porque la columna es INTEGER) la aplica
+   * ProformaBussnies, que responde COTIZACION_CANTIDAD_INVALIDA con el nombre
+   * del producto. Aquí solo se exige que sea un número: poner un @Min haría
+   * que el ValidationPipe global contestara antes, con un mensaje en inglés y
+   * sin `codigo`, que es justo lo que el front no sabe traducir.
+   */
   @IsNumber()
-  @Min(0.001)
   cantidad!: number;
 
   @IsNumber()

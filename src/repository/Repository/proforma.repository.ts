@@ -31,6 +31,17 @@ export interface NuevaProforma {
   items: NuevoItemProforma[];
 }
 
+/** Cuenta bancaria activa, tal como se imprime en la proforma. */
+export interface CuentaBancariaProforma {
+  banco: string;
+  tipo_cuenta: string | null;
+  numero_cuenta: string | null;
+  cci: string | null;
+  titular: string | null;
+  moneda: string | null;
+  es_yape: boolean;
+}
+
 /** Serie fija de las proformas: COT-000001, COT-000002… */
 export const SERIE_PROFORMA = 'COT';
 
@@ -350,13 +361,29 @@ export class ProformaRepository extends CrudRepository<Proforma> implements OnMo
     await this.proformaRepo.manager.query(SQL_SECUENCIA_NUMERO);
   }
 
+  /**
+   * Últimas 200 cotizaciones con cliente, empresa e ítems.
+   *
+   * OJO: aquí NO se puede ordenar por `items.id_item`. Con `take`, TypeORM
+   * resuelve la página con un `SELECT DISTINCT` que incluye las columnas del
+   * ORDER BY; al meter una columna de los ítems, el DISTINCT pasa a ser por
+   * (proforma, ítem) y el LIMIT recorta FILAS DEL JOIN, no cotizaciones. Con
+   * 83 proformas y 419 ítems el listado devolvía solo 40 (comprobado contra
+   * Postgres): las cotizaciones más antiguas desaparecían de la pantalla.
+   * Los ítems se ordenan aquí mismo, en memoria, que para 200 filas no cuesta
+   * nada. `getById` sí puede ordenarlos en SQL porque no lleva `take`.
+   */
   async getAll(): Promise<Proforma[]> {
     await this.asegurarSchema();
-    return this.proformaRepo.find({
+    const lista = await this.proformaRepo.find({
       relations: ['cliente', 'empresa', 'items', 'items.producto'],
-      order: { id_proforma: 'DESC', items: { id_item: 'ASC' } },
+      order: { id_proforma: 'DESC' },
       take: 200,
     });
+    for (const proforma of lista) {
+      proforma.items?.sort((a, b) => Number(a.id_item) - Number(b.id_item));
+    }
+    return lista;
   }
 
   async getById(id: number): Promise<Proforma | null> {
@@ -386,6 +413,37 @@ export class ProformaRepository extends CrudRepository<Proforma> implements OnMo
       this.log.warn(`No se pudo leer el nombre de los almacenes: ${error?.message ?? error}`);
     }
     return mapa;
+  }
+
+  /**
+   * Cuentas bancarias activas para el pie de la proforma. Es informativo: si la
+   * tabla no existe o falla la consulta se devuelve una lista vacía y el
+   * documento sale igual, nunca lanza.
+   */
+  async cuentasParaDocumento(limite = 6): Promise<CuentaBancariaProforma[]> {
+    try {
+      const filas = await this.proformaRepo.manager.query(
+        `SELECT banco, tipo_cuenta, numero_cuenta, cci, titular, moneda,
+                COALESCE(es_yape, FALSE) AS es_yape
+           FROM cuentas_bancarias
+          WHERE COALESCE(activo, TRUE) = TRUE
+          ORDER BY COALESCE(orden, id_cuenta), id_cuenta
+          LIMIT $1`,
+        [limite],
+      );
+      return (filas ?? []).map((f: any) => ({
+        banco: String(f.banco ?? '').trim(),
+        tipo_cuenta: f.tipo_cuenta ? String(f.tipo_cuenta).trim() : null,
+        numero_cuenta: f.numero_cuenta ? String(f.numero_cuenta).trim() : null,
+        cci: f.cci ? String(f.cci).trim() : null,
+        titular: f.titular ? String(f.titular).trim() : null,
+        moneda: f.moneda ? String(f.moneda).trim() : null,
+        es_yape: Boolean(f.es_yape),
+      }));
+    } catch (error: any) {
+      this.log.warn(`No se pudieron leer las cuentas bancarias: ${error?.message ?? error}`);
+      return [];
+    }
   }
 
   /**

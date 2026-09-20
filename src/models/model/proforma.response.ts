@@ -14,8 +14,12 @@ export class ProformaResponse {
   id_empresa?: number | null;
   id_cliente?: number | null;
   cliente_nombre?: string | null;
+  /** DNI del cliente o RUC de la empresa, si se puede resolver. */
+  cliente_documento?: string | null;
+  cliente_direccion?: string | null;
   telefono_envio?: string | null;
   id_almacen?: number | null;
+  almacen_nombre?: string | null;
   observaciones?: string | null;
   valida_hasta?: string | null;
   serie?: string | null;
