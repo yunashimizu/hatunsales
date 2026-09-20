@@ -263,9 +263,15 @@ class DibujoProforma {
     let altoLogo = 0;
     if (this.d.emisor?.logo) {
       try {
-        doc.image(this.d.emisor.logo, this.izquierda, top, { fit: [74, 74], valign: 'center' });
-        xTexto = this.izquierda + 86;
-        altoLogo = 74;
+        const anchoLogo = 108;
+        const altoLogoMaximo = 76;
+        const logoY = top + (cajaAlto - altoLogoMaximo) / 2;
+        doc.image(this.d.emisor.logo, this.izquierda, logoY, {
+          fit: [anchoLogo, altoLogoMaximo],
+          valign: 'center',
+        });
+        xTexto = this.izquierda + anchoLogo + 16;
+        altoLogo = altoLogoMaximo;
       } catch {
         // Logo ilegible: el documento sigue sin logo.
       }
@@ -522,7 +528,7 @@ class DibujoProforma {
     const altoSon = lineasSon.length * this.interlineado(8.5) + 12;
 
     // Totales y monto en letras siempre juntos en la misma página.
-    const altoBloque = altoFila * 2 + altoTotal + 8 + altoSon;
+    const altoBloque = altoFila * 3 + altoTotal + 8 + altoSon;
     this.asegurar(altoBloque);
     const top = this.y;
 
@@ -535,10 +541,11 @@ class DibujoProforma {
 
     doc.save();
     doc.lineWidth(0.8).strokeColor(COLOR.linea)
-      .rect(xTot, top, anchoTot, altoFila * 2 + altoTotal).stroke();
+      .rect(xTot, top, anchoTot, altoFila * 3 + altoTotal).stroke();
     doc.restore();
 
     const filas: Array<[string, number]> = [
+      ['Subtotal', this.d.total_gravada],
       ['Op. gravada', this.d.total_gravada],
       [`IGV (${pct})`, this.d.total_igv],
     ];
@@ -555,7 +562,7 @@ class DibujoProforma {
       this.linea(formatearSoles(valor), xTot, y + 5, anchoTot - 10, 'right');
     });
 
-    const yTotal = top + altoFila * 2;
+    const yTotal = top + altoFila * 3;
     doc.save();
     doc.rect(xTot, yTotal, anchoTot, altoTotal).fill(COLOR.marca);
     doc.restore();

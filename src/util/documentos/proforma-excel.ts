@@ -71,6 +71,13 @@ function textoPie(texto: string): string {
   return texto.replace(/&/g, '&&');
 }
 
+function extensionImagen(datos?: Buffer | null): 'png' | 'jpeg' {
+  if (datos && datos.length > 3 && datos[0] === 0xff && datos[1] === 0xd8 && datos[2] === 0xff) {
+    return 'jpeg';
+  }
+  return 'png';
+}
+
 function formatearTelefono(valor?: string | null): string {
   const d = String(valor ?? '').replace(/\D/g, '');
   if (d.length === 11 && d.startsWith('51')) return `+51 ${d.slice(2, 5)} ${d.slice(5, 8)} ${d.slice(8)}`;
@@ -111,17 +118,32 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   const combinar = (desde: string, hasta: string, r: number) => ws.mergeCells(`${desde}${r}:${hasta}${r}`);
 
   // ── Cabecera de la empresa ─────────────────────────────────────
-  let r = siguiente(26);
-  combinar('A', 'H', r);
+  let r = siguiente(54);
+  combinar('C', 'H', r);
   Object.assign(ws.getCell(`A${r}`), {
+    value: '',
+  });
+  combinar('A', 'B', r);
+  Object.assign(ws.getCell(`C${r}`), {
     value: razonSocial,
     font: { name: FUENTE, bold: true, size: 16, color: { argb: ARGB.marca } },
     alignment: { vertical: 'middle', horizontal: 'left' },
   });
+  if (d.emisor?.logo) {
+    try {
+      const imagenId = wb.addImage({
+        base64: d.emisor.logo.toString('base64'),
+        extension: extensionImagen(d.emisor.logo),
+      });
+      ws.addImage(imagenId, { tl: { col: 0.15, row: 0.1 }, ext: { width: 105, height: 54 } });
+    } catch {
+      // El documento sigue siendo válido si ExcelJS no acepta la imagen.
+    }
+  }
 
   r = siguiente(16);
-  combinar('A', 'H', r);
-  Object.assign(ws.getCell(`A${r}`), {
+  combinar('C', 'H', r);
+  Object.assign(ws.getCell(`C${r}`), {
     value: ruc ? `RUC ${ruc}` : '',
     font: { name: FUENTE, bold: true, size: 10, color: { argb: ARGB.gris } },
   });
@@ -131,8 +153,8 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     .join(' — ');
   if (direccion) {
     r = siguiente(16);
-    combinar('A', 'H', r);
-    Object.assign(ws.getCell(`A${r}`), {
+    combinar('C', 'H', r);
+    Object.assign(ws.getCell(`C${r}`), {
       value: direccion,
       font: { name: FUENTE, size: 9, color: { argb: ARGB.gris } },
       alignment: { wrapText: true, vertical: 'top' },
@@ -176,7 +198,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
 
   r = siguiente(18);
   combinar('A', 'C', r);
-  combinar('D', 'H', r);
+    combinar('D', 'H', r);
   for (const [celda, titulo] of [['A', 'DATOS DEL CLIENTE'], ['D', 'DATOS DE LA PROFORMA']]) {
     Object.assign(ws.getCell(`${celda}${r}`), {
       value: titulo,
@@ -284,6 +306,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   const total = numeroSeguro(d.total);
   const totalCuadra = items.length > 0 && Math.abs(sumaImportes - total) < 0.005;
   const filasTotales: Array<[string, ExcelJS.CellValue, boolean]> = [
+    ['Subtotal', numeroSeguro(d.total_gravada), false],
     ['Op. gravada', numeroSeguro(d.total_gravada), false],
     [`IGV (${formatearPorcentaje(d.porcentaje_igv)})`, numeroSeguro(d.total_igv), false],
     [
