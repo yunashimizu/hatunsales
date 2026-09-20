@@ -58,6 +58,27 @@ const TOLERANCIA_TOTALES = 0.05;
 /** Ítems que se listan en el mensaje de WhatsApp antes de resumir. */
 const ITEMS_EN_TEXTO_WA = 8;
 
+const CUENTAS_DOCUMENTO_POR_DEFECTO: CuentaBancariaProforma[] = [
+  {
+    banco: 'BCP',
+    tipo_cuenta: 'corriente',
+    numero_cuenta: '19479681930096',
+    cci: '002194171968193009695',
+    titular: null,
+    moneda: 'PEN',
+    es_yape: false,
+  },
+  {
+    banco: 'BBVA',
+    tipo_cuenta: 'corriente',
+    numero_cuenta: '0011-0933-0200689626',
+    cci: '011-933-000200689626-96',
+    titular: null,
+    moneda: 'PEN',
+    es_yape: false,
+  },
+];
+
 @Injectable()
 export class ProformaBussnies implements IProformaBussniees {
 
@@ -366,7 +387,9 @@ export class ProformaBussnies implements IProformaBussniees {
       total: totales.total,
       porcentaje_igv: totales.porcentaje_igv,
       observaciones: p.observaciones ?? null,
-      cuentas: cuentas.map((c) => this.cuentaDocumento(c)),
+      cuentas: (cuentas.length ? cuentas : CUENTAS_DOCUMENTO_POR_DEFECTO).map((c) =>
+        this.cuentaDocumento(c),
+      ),
       generado_en: new Date(),
     };
   }
@@ -388,7 +411,11 @@ export class ProformaBussnies implements IProformaBussniees {
 
     const logoUrl = dato('emisor_logo_url', emisorConfig.logo_url);
     // obtenerLogoEmisor nunca lanza: si falla devuelve null y el PDF sale sin logo.
-    const logo = await obtenerLogoEmisor(logoUrl);
+    const logoLeido = await obtenerLogoEmisor(logoUrl);
+    const logo =
+      logoLeido || (logoUrl !== emisorConfig.logo_url
+        ? await obtenerLogoEmisor(emisorConfig.logo_url)
+        : null);
 
     return {
       ruc: dato('emisor_ruc', emisorConfig.ruc),

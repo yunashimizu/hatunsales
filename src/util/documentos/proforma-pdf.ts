@@ -35,6 +35,7 @@ const ALTO_PIE = 36;
 
 const COLOR = {
   marca: '#0F4C5C',
+  cuentas: '#174A9B',
   marcaSuave: '#E7F0F2',
   texto: '#1F2933',
   gris: '#52606D',
@@ -587,7 +588,7 @@ class DibujoProforma {
 
     const top = this.y;
     this.doc.save();
-    this.doc.lineWidth(1).fillColor(COLOR.marca).strokeColor(COLOR.marca)
+    this.doc.lineWidth(1).fillColor(COLOR.cuentas).strokeColor(COLOR.cuentas)
       .roundedRect(this.izquierda, top, this.ancho, alto, 5).fillAndStroke();
     this.doc.restore();
     this.estilo('Helvetica-Bold', 9, COLOR.blanco);

@@ -24,6 +24,7 @@ import {
 
 const ARGB = {
   marca: 'FF0F4C5C',
+  cuentas: 'FF174A9B',
   marcaSuave: 'FFE7F0F2',
   texto: 'FF1F2933',
   gris: 'FF52606D',
@@ -372,7 +373,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
       .map((cuenta) => `• ${describirCuenta(cuenta)}`)
       .join('\n')}`;
     celdaCuentas.font = { name: FUENTE, size: 9, color: { argb: ARGB.blanco } };
-    celdaCuentas.fill = relleno(ARGB.marca);
+    celdaCuentas.fill = relleno(ARGB.cuentas);
     celdaCuentas.alignment = { vertical: 'middle', wrapText: true, indent: 1 };
     celdaCuentas.border = bordeCompleto;
   }

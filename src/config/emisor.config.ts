@@ -10,7 +10,7 @@ export const emisorConfig = {
   razon_social: process.env.EMISOR_RAZON_SOCIAL ?? 'HATUNSALES S.A.C.',
   direccion: process.env.EMISOR_DIRECCION ?? 'LT. 8 MZ. N1 URB. NUEVO LURIN',
   ubicacion: process.env.EMISOR_UBICACION ?? 'LURIN - LIMA - LIMA',
-  logo_url: process.env.EMISOR_LOGO_URL ?? '',
+  logo_url: process.env.EMISOR_LOGO_URL || '/uploads/hatunsales.png',
 };
 
 /** Claves equivalentes en la tabla `configuraciones`. */
