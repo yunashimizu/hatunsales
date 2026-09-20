@@ -152,6 +152,9 @@ export class ProformaBussnies implements IProformaBussniees {
         descripcion_snapshot:
           (item.descripcion || (producto as any).nombre || '').toString().slice(0, 250) || null,
         sku_snapshot: (item.sku || (producto as any).sku || '').toString().slice(0, 80) || null,
+        unidad_medida_snapshot:
+          String((producto as any).unidad_medida || 'NIU').trim().slice(0, 20) || 'NIU',
+        descuento_snapshot: Number.isFinite(descuento) ? redondear(Math.max(0, descuento)) : 0,
       });
     }
 
@@ -346,12 +349,16 @@ export class ProformaBussnies implements IProformaBussniees {
         const cantidad = Number(item.cantidad ?? 0);
         const precio = Number(item.precio_unitario ?? 0);
         const importe = Number(item.subtotal ?? 0);
+        const producto = (item as any).producto;
         return {
           sku: item.sku_snapshot || item.producto?.sku || null,
+          unidad_medida:
+            item.unidad_medida_snapshot || producto?.unidad_medida || 'NIU',
           descripcion: item.descripcion_snapshot || item.producto?.nombre || 'Producto',
           cantidad,
           precio_unitario: precio,
           importe: Number.isFinite(importe) && importe > 0 ? importe : redondear(cantidad * precio),
+          descuento: Number(item.descuento_snapshot ?? producto?.descuento ?? 0),
         };
       }),
       total_gravada: totales.total_gravada,

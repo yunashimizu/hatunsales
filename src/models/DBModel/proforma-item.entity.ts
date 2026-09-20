@@ -30,4 +30,10 @@ export class ProformaItem {
 
   @Column({ type: 'varchar', length: 80, nullable: true })
   sku_snapshot!: string | null;
+
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  unidad_medida_snapshot!: string | null;
+
+  @Column({ type: 'numeric', default: 0 })
+  descuento_snapshot!: number;
 }

@@ -12,6 +12,8 @@ export interface NuevoItemProforma {
   subtotal: number;
   descripcion_snapshot: string | null;
   sku_snapshot: string | null;
+  unidad_medida_snapshot: string | null;
+  descuento_snapshot: number;
 }
 
 /** Cabecera de una proforma nueva. El número y el código los asigna el repositorio. */
@@ -201,6 +203,8 @@ const PASOS_COLUMNAS = [
   `ALTER TABLE proformas ADD COLUMN IF NOT EXISTS porcentaje_igv NUMERIC DEFAULT 18`,
   `ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS descripcion_snapshot VARCHAR(250)`,
   `ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS sku_snapshot VARCHAR(80)`,
+  `ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS unidad_medida_snapshot VARCHAR(20)`,
+  `ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS descuento_snapshot NUMERIC(12,2) DEFAULT 0`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_proformas_codigo ON proformas (codigo) WHERE codigo IS NOT NULL`,
   `CREATE INDEX IF NOT EXISTS idx_proformas_estado ON proformas (estado)`,
 ];
@@ -569,12 +573,15 @@ export class ProformaRepository extends CrudRepository<Proforma> implements OnMo
           item.subtotal,
           item.descripcion_snapshot,
           item.sku_snapshot,
+          item.unidad_medida_snapshot,
+          item.descuento_snapshot,
         );
-        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`;
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9})`;
       });
       await manager.query(
         `INSERT INTO proformas_items
-           (id_proforma, id_producto, cantidad, precio_unitario, subtotal, descripcion_snapshot, sku_snapshot)
+           (id_proforma, id_producto, cantidad, precio_unitario, subtotal, descripcion_snapshot, sku_snapshot,
+            unidad_medida_snapshot, descuento_snapshot)
          VALUES ${filas.join(', ')}`,
         parametros,
       );

@@ -26,12 +26,14 @@ export interface ClienteDocumento {
 
 export interface ItemDocumento {
   sku?: string | null;
+  unidad_medida?: string | null;
   descripcion: string;
   cantidad: number;
   /** Precio unitario con IGV. */
   precio_unitario: number;
   /** Importe de la línea con IGV. */
   importe: number;
+  descuento?: number;
 }
 
 export interface CuentaBancariaDocumento {

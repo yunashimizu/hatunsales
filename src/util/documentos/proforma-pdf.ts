@@ -136,14 +136,16 @@ class DibujoProforma {
 
     const fijas: Columna[] = [
       { titulo: 'N°', ancho: 24, alinear: 'center' },
-      { titulo: 'Código', ancho: 66, alinear: 'left' },
-      { titulo: 'Descripción', ancho: 0, alinear: 'left' },
+      { titulo: 'Código', ancho: 58, alinear: 'left' },
+      { titulo: 'Unidad', ancho: 42, alinear: 'center' },
+      { titulo: 'P. Unit.', ancho: 62, alinear: 'right' },
       { titulo: 'Cant.', ancho: 42, alinear: 'right' },
-      { titulo: 'P. Unit.', ancho: 70, alinear: 'right' },
-      { titulo: 'Importe', ancho: 76, alinear: 'right' },
+      { titulo: 'Dto.', ancho: 48, alinear: 'right' },
+      { titulo: 'Descripción', ancho: 0, alinear: 'left' },
+      { titulo: 'Importe', ancho: 72, alinear: 'right' },
     ];
     const ocupado = fijas.reduce((suma, c) => suma + c.ancho, 0);
-    fijas[2].ancho = this.ancho - ocupado;
+    fijas[6].ancho = this.ancho - ocupado;
     this.columnas = fijas;
   }
 
@@ -152,6 +154,7 @@ class DibujoProforma {
     this.datosGenerales();
     this.tabla();
     this.totales();
+    this.cuentasBancarias();
     this.observaciones();
     this.condiciones();
     this.pies();
@@ -448,7 +451,7 @@ class DibujoProforma {
 
     items.forEach((item, indice) => {
       this.estilo('Helvetica', tam, COLOR.texto);
-      const lineasDesc = this.envolver(item.descripcion || 'Producto', this.columnas[2].ancho - padX * 2);
+      const lineasDesc = this.envolver(item.descripcion || 'Producto', this.columnas[6].ancho - padX * 2);
       const lineasSku = this.envolver(item.sku || '—', this.columnas[1].ancho - padX * 2);
       const lineas = Math.max(1, lineasDesc.length, lineasSku.length);
       const alto = Math.max(20, lineas * altoLinea + padY * 2 - 2);
@@ -472,15 +475,17 @@ class DibujoProforma {
       const valores: string[][] = [
         [String(indice + 1)],
         lineasSku.length ? lineasSku : ['—'],
-        lineasDesc,
-        [formatearCantidad(item.cantidad)],
+        [textoPdf(item.unidad_medida) || 'NIU'],
         [formatearSoles(item.precio_unitario)],
+        [formatearCantidad(item.cantidad)],
+        [formatearSoles(item.descuento)],
+        lineasDesc,
         [formatearSoles(item.importe)],
       ];
 
       let x = this.izquierda;
       this.columnas.forEach((col, i) => {
-        if (i === 5) this.estilo('Helvetica-Bold', tam, COLOR.texto);
+        if (i === 7) this.estilo('Helvetica-Bold', tam, COLOR.texto);
         else if (i === 1) this.estilo('Helvetica', 8, COLOR.gris);
         else this.estilo('Helvetica', tam, COLOR.texto);
         valores[i].forEach((texto, n) => {
@@ -570,6 +575,35 @@ class DibujoProforma {
     this.y = ySon + altoSon + 16;
   }
 
+  private cuentasBancarias(): void {
+    const cuentas = cuentasUtiles(this.d.cuentas);
+    if (!cuentas.length) return;
+
+    const tam = 8.3;
+    const altoLinea = this.interlineado(tam);
+    const lineas = cuentas.flatMap((cuenta) => this.envolver(describirCuenta(cuenta), this.ancho - 24));
+    const alto = 25 + Math.max(1, lineas.length) * altoLinea + 10;
+    this.asegurar(alto);
+
+    const top = this.y;
+    this.doc.save();
+    this.doc.lineWidth(1).fillColor(COLOR.marca).strokeColor(COLOR.marca)
+      .roundedRect(this.izquierda, top, this.ancho, alto, 5).fillAndStroke();
+    this.doc.restore();
+    this.estilo('Helvetica-Bold', 9, COLOR.blanco);
+    this.linea('CUENTAS PARA DEPÓSITO O TRANSFERENCIA', this.izquierda + 12, top + 8);
+    this.estilo('Helvetica', tam, COLOR.blanco);
+    let y = top + 25;
+    cuentas.forEach((cuenta) => {
+      const texto = this.envolver(describirCuenta(cuenta), this.ancho - 24);
+      texto.forEach((linea) => {
+        this.linea(linea, this.izquierda + 12, y);
+        y += altoLinea;
+      });
+    });
+    this.y = top + alto + 12;
+  }
+
   // ── Observaciones y condiciones ─────────────────────────────────
 
   private tituloSeccion(titulo: string): void {
@@ -617,10 +651,6 @@ class DibujoProforma {
     this.estilo('Helvetica', tam, COLOR.texto);
 
     const vinetas = condicionesComerciales(this.d).map((c) => this.envolver(c, this.ancho - sangria));
-    const cuentas = cuentasUtiles(this.d.cuentas).map((c) =>
-      this.envolver(describirCuenta(c), this.ancho - sangria * 2),
-    );
-
     this.asegurar(19 + alto * Math.min(3, vinetas.flat().length));
     this.tituloSeccion('Condiciones comerciales');
 
@@ -634,13 +664,6 @@ class DibujoProforma {
 
     vinetas.forEach((l) => vineta(l, this.izquierda));
 
-    if (cuentas.length) {
-      if (!this.cabe(alto * 2 + 4)) this.nuevaPagina();
-      this.y += 3;
-      this.parrafo(['Cuentas para depósito o transferencia:'], this.izquierda, tam, COLOR.texto, 'Helvetica-Bold');
-      this.y += 1;
-      cuentas.forEach((l) => vineta(l, this.izquierda + sangria));
-    }
   }
 
   // ── Pie y marca de agua (en todas las páginas) ─────────────────

@@ -38,8 +38,8 @@ const FORMATO_SOLES = '"S/ "#,##0.00';
 const FORMATO_ENTERO = '#,##0';
 const FUENTE = 'Calibri';
 
-/** Ancho en caracteres de cada columna: N°, Código, Descripción, Cant., P. Unit., Importe. */
-const ANCHOS = [6, 16, 52, 9, 15, 17];
+/** Ancho en caracteres: N°, Código, Unidad, P. Unit., Cant., Dto., Descripción, Importe. */
+const ANCHOS = [6, 14, 11, 15, 9, 14, 42, 17];
 
 const bordeFino: Partial<ExcelJS.Border> = { style: 'thin', color: { argb: ARGB.linea } };
 const bordeCompleto: Partial<ExcelJS.Borders> = {
@@ -111,7 +111,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
 
   // ── Cabecera de la empresa ─────────────────────────────────────
   let r = siguiente(26);
-  combinar('A', 'F', r);
+  combinar('A', 'H', r);
   Object.assign(ws.getCell(`A${r}`), {
     value: razonSocial,
     font: { name: FUENTE, bold: true, size: 16, color: { argb: ARGB.marca } },
@@ -119,7 +119,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   });
 
   r = siguiente(16);
-  combinar('A', 'F', r);
+  combinar('A', 'H', r);
   Object.assign(ws.getCell(`A${r}`), {
     value: ruc ? `RUC ${ruc}` : '',
     font: { name: FUENTE, bold: true, size: 10, color: { argb: ARGB.gris } },
@@ -130,7 +130,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     .join(' — ');
   if (direccion) {
     r = siguiente(16);
-    combinar('A', 'F', r);
+    combinar('A', 'H', r);
     Object.assign(ws.getCell(`A${r}`), {
       value: direccion,
       font: { name: FUENTE, size: 9, color: { argb: ARGB.gris } },
@@ -142,7 +142,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   // ── Título ─────────────────────────────────────────────────────
   r = siguiente(30);
   combinar('A', 'D', r);
-  combinar('E', 'F', r);
+  combinar('E', 'H', r);
   Object.assign(ws.getCell(`A${r}`), {
     value: 'PROFORMA',
     font: { name: FUENTE, bold: true, size: 18, color: { argb: ARGB.blanco } },
@@ -175,7 +175,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
 
   r = siguiente(18);
   combinar('A', 'C', r);
-  combinar('D', 'F', r);
+  combinar('D', 'H', r);
   for (const [celda, titulo] of [['A', 'DATOS DEL CLIENTE'], ['D', 'DATOS DE LA PROFORMA']]) {
     Object.assign(ws.getCell(`${celda}${r}`), {
       value: titulo,
@@ -215,13 +215,13 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
 
   // ── Tabla de ítems ─────────────────────────────────────────────
   const filaCabecera = siguiente(22);
-  const titulos = ['N°', 'Código', 'Descripción', 'Cant.', 'P. Unit.', 'Importe'];
+  const titulos = ['N°', 'Código', 'Unidad', 'P. Unit.', 'Cant.', 'Dto.', 'Descripción', 'Importe'];
   titulos.forEach((titulo, i) => {
     Object.assign(ws.getRow(filaCabecera).getCell(i + 1), {
       value: titulo,
       font: { name: FUENTE, bold: true, size: 10, color: { argb: ARGB.blanco } },
       fill: relleno(ARGB.marca),
-      alignment: { vertical: 'middle', horizontal: i === 2 || i === 1 ? 'left' : 'center', indent: i === 2 || i === 1 ? 1 : 0 },
+      alignment: { vertical: 'middle', horizontal: i === 6 || i === 1 ? 'left' : 'center', indent: i === 6 || i === 1 ? 1 : 0 },
       border: bordeCompleto,
     });
   });
@@ -236,16 +236,18 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     const importe = numeroSeguro(item.importe);
     sumaImportes += importe;
 
-    r = siguiente(altoPorTexto([{ texto: descripcion, ancho: ANCHOS[2] }, { texto: sku, ancho: ANCHOS[1] }]));
+    r = siguiente(altoPorTexto([{ texto: descripcion, ancho: ANCHOS[6] }, { texto: sku, ancho: ANCHOS[1] }]));
     const fondo = indice % 2 === 1 ? relleno(ARGB.cebra) : undefined;
     // El importe queda como fórmula solo si coincide con cantidad × precio.
     const cuadra = Math.abs(cantidad * precio - importe) < 0.005;
     const valores: ExcelJS.CellValue[] = [
       indice + 1,
       sku || '—',
-      descripcion,
-      cantidad,
+      textoPlano(item.unidad_medida) || 'NIU',
       precio,
+      cantidad,
+      numeroSeguro(item.descuento),
+      descripcion,
       cuadra ? { formula: `D${r}*E${r}`, result: importe } : importe,
     ];
     valores.forEach((valor, i) => {
@@ -256,18 +258,18 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
       if (fondo) celda.fill = fondo;
       celda.alignment = {
         vertical: 'top',
-        horizontal: i === 0 ? 'center' : i >= 3 ? 'right' : 'left',
-        wrapText: i === 1 || i === 2,
+        horizontal: i === 0 ? 'center' : i === 3 || i === 4 || i === 5 || i === 7 ? 'right' : 'left',
+        wrapText: i === 1 || i === 6,
       };
-      if (i === 3) celda.numFmt = Number.isInteger(cantidad) ? FORMATO_ENTERO : '#,##0.00';
-      if (i >= 4) celda.numFmt = FORMATO_SOLES;
+      if (i === 4) celda.numFmt = Number.isInteger(cantidad) ? FORMATO_ENTERO : '#,##0.00';
+      if (i === 3 || i === 5 || i === 7) celda.numFmt = FORMATO_SOLES;
     });
   });
   const ultimaFilaItem = fila;
 
   if (!items.length) {
     r = siguiente(18);
-    combinar('A', 'F', r);
+    combinar('A', 'H', r);
     Object.assign(ws.getCell(`A${r}`), {
       value: 'La proforma no tiene productos.',
       font: { name: FUENTE, italic: true, size: 10, color: { argb: ARGB.grisClaro } },
@@ -286,7 +288,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     [
       'TOTAL',
       totalCuadra
-        ? { formula: `SUM(F${primeraFilaItem}:F${ultimaFilaItem})`, result: total }
+        ? { formula: `SUM(H${primeraFilaItem}:H${ultimaFilaItem})`, result: total }
         : total,
       true,
     ],
@@ -294,9 +296,8 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   const filaResumen = fila + 1;
   filasTotales.forEach(([etiqueta, valor, esTotal]) => {
     r = siguiente(esTotal ? 24 : 18);
-    combinar('D', 'E', r);
-    const celdaEtiqueta = ws.getCell(`D${r}`);
-    const celdaValor = ws.getCell(`F${r}`);
+    const celdaEtiqueta = ws.getCell(`G${r}`);
+    const celdaValor = ws.getCell(`H${r}`);
     celdaEtiqueta.value = etiqueta;
     celdaValor.value = valor;
     celdaValor.numFmt = FORMATO_SOLES;
@@ -324,7 +325,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   siguiente(6);
   const son = `SON: ${montoEnLetras(total)}`;
   r = siguiente(altoPorTexto([{ texto: son, ancho: 110 }], 20));
-  combinar('A', 'F', r);
+  combinar('A', 'H', r);
   Object.assign(ws.getCell(`A${r}`), {
     value: son,
     font: { name: FUENTE, bold: true, size: 10, color: { argb: ARGB.texto } },
@@ -336,7 +337,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   const titulo = (texto: string) => {
     siguiente(8);
     const t = siguiente(18);
-    combinar('A', 'F', t);
+    combinar('A', 'H', t);
     Object.assign(ws.getCell(`A${t}`), {
       value: texto.toUpperCase(),
       font: { name: FUENTE, bold: true, size: 10, color: { argb: ARGB.marca } },
@@ -345,7 +346,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   };
   const parrafo = (texto: string, opciones: Partial<ExcelJS.Font> = {}, sangria = 0) => {
     const p = siguiente(altoPorTexto([{ texto, ancho: 108 }], 16));
-    combinar('A', 'F', p);
+    combinar('A', 'H', p);
     Object.assign(ws.getCell(`A${p}`), {
       value: texto,
       font: { name: FUENTE, size: 10, color: { argb: ARGB.texto }, ...opciones },
@@ -360,14 +361,24 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     observaciones.forEach((linea) => parrafo(linea));
   }
 
-  // ── Condiciones comerciales y cuentas ─────────────────────────
-  titulo('Condiciones comerciales');
-  condicionesComerciales(d).forEach((c) => parrafo(`•  ${c}`));
+  // ── Cuentas bancarias y condiciones comerciales ───────────────
   const cuentas = cuentasUtiles(d.cuentas);
   if (cuentas.length) {
-    parrafo('Cuentas para depósito o transferencia:', { bold: true });
-    cuentas.forEach((c) => parrafo(`•  ${describirCuenta(c)}`, {}, 2));
+    siguiente(8);
+    const filaCuentas = siguiente(22 + cuentas.length * 16);
+    combinar('A', 'H', filaCuentas);
+    const celdaCuentas = ws.getCell(`A${filaCuentas}`);
+    celdaCuentas.value = `CUENTAS PARA DEPÓSITO O TRANSFERENCIA\n${cuentas
+      .map((cuenta) => `• ${describirCuenta(cuenta)}`)
+      .join('\n')}`;
+    celdaCuentas.font = { name: FUENTE, size: 9, color: { argb: ARGB.blanco } };
+    celdaCuentas.fill = relleno(ARGB.marca);
+    celdaCuentas.alignment = { vertical: 'middle', wrapText: true, indent: 1 };
+    celdaCuentas.border = bordeCompleto;
   }
+
+  titulo('Condiciones comerciales');
+  condicionesComerciales(d).forEach((c) => parrafo(`•  ${c}`));
 
   siguiente(10);
   parrafo(LEYENDA_SIN_VALOR_TRIBUTARIO, { italic: true, size: 9, color: { argb: ARGB.gris } });
@@ -395,7 +406,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     fitToHeight: 0,
     horizontalCentered: true,
     margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.6, header: 0.25, footer: 0.3 },
-    printArea: `A1:F${fila}`,
+    printArea: `A1:H${fila}`,
     printTitlesRow: `${filaCabecera}:${filaCabecera}`,
   };
   ws.headerFooter = {

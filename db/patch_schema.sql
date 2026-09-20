@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS proformas_items (
   subtotal NUMERIC(12,2) DEFAULT 0
 );
 
+ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS unidad_medida_snapshot VARCHAR(20);
+ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS descuento_snapshot NUMERIC(12,2) DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS guias_remision_items (
   id_item SERIAL PRIMARY KEY,
   id_guia INTEGER NOT NULL,

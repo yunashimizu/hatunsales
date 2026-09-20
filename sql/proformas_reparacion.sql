@@ -53,6 +53,8 @@ ALTER TABLE proformas ADD COLUMN IF NOT EXISTS porcentaje_igv          NUMERIC D
 
 ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS descripcion_snapshot VARCHAR(250);
 ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS sku_snapshot         VARCHAR(80);
+ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS unidad_medida_snapshot VARCHAR(20);
+ALTER TABLE proformas_items ADD COLUMN IF NOT EXISTS descuento_snapshot    NUMERIC(12,2) DEFAULT 0;
 
 -- Índice ÚNICO PARCIAL: varias filas heredadas pueden tener codigo NULL, pero
 -- dos proformas nunca pueden compartir el mismo código.
