@@ -12,13 +12,25 @@ export class GuiaRemisionItem {
   @JoinColumn({ name: 'id_guia' })
   guia!: GuiaRemision;
 
-  @ManyToOne(() => Producto, { nullable: false })
+  @ManyToOne(() => Producto, { nullable: true })
   @JoinColumn({ name: 'id_producto' })
   producto!: Producto;
 
-  @Column({ type: 'integer' })
+  @Column({ type: 'numeric' })
   cantidad!: number;
 
   @Column({ nullable: true })
   unidad_medida!: string;
+
+  @Column({ nullable: true })
+  id_venta_detalle!: number;
+
+  @Column({ nullable: true })
+  codigo!: string;
+
+  @Column({ nullable: true, type: 'text' })
+  descripcion!: string;
+
+  @Column({ nullable: true, type: 'integer' })
+  orden!: number;
 }
