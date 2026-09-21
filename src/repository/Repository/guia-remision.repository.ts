@@ -153,7 +153,7 @@ export class GuiaRemisionRepository {
       ? await this.dataSource.query(`
           SELECT a.id_almacen,
                  COALESCE(NULLIF(TRIM(s.direccion), ''), '') AS direccion,
-                 COALESCE(s.ubigeo, '') AS ubigeo,
+               '' AS ubigeo,
                  COALESCE(a.nombre, s.nombre, 'Almacén') AS nombre
             FROM almacenes a
             LEFT JOIN sucursales s ON s.id_sucursal = a.id_sucursal

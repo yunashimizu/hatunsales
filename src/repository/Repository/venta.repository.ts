@@ -12,6 +12,11 @@ export interface LineaVentaPersistida {
   subtotal: number;
   igv: number;
   total: number;
+  precio_lista_unitario: number;
+  descuento_unitario_aplicado: number;
+  descuento_total_linea: number;
+  precio_unitario_final: number;
+  id_regla_mayorista: number | null;
 }
 
 export interface DatosVenta {
@@ -134,6 +139,13 @@ export class VentaRepository {
               COALESCE(p.unidad_medida, '')  AS unidad_medida,
               COALESCE(p.precio_venta, 0)    AS precio_venta,
               COALESCE(p.descuento, 0)       AS descuento,
+              COALESCE((SELECT json_agg(json_build_object(
+                'id_regla', r.id_regla,
+                'cantidad_minima', r.cantidad_minima,
+                'descuento_unitario', r.descuento_unitario
+              ) ORDER BY r.cantidad_minima)
+                FROM producto_descuento_mayorista r
+               WHERE r.id_producto = p.id_producto AND r.activo = TRUE), '[]'::json) AS reglas_mayoristas,
               COALESCE(inv.stock, 0)         AS stock_disponible,
               COALESCE(img.url, '')          AS imagen_url
          FROM productos p
@@ -178,6 +190,13 @@ export class VentaRepository {
               COALESCE(p.unidad_medida, '')  AS unidad_medida,
               COALESCE(p.precio_venta, 0)    AS precio_venta,
               COALESCE(p.descuento, 0)       AS descuento,
+              COALESCE((SELECT json_agg(json_build_object(
+                'id_regla', r.id_regla,
+                'cantidad_minima', r.cantidad_minima,
+                'descuento_unitario', r.descuento_unitario
+              ) ORDER BY r.cantidad_minima)
+                FROM producto_descuento_mayorista r
+               WHERE r.id_producto = p.id_producto AND r.activo = TRUE), '[]'::json) AS reglas_mayoristas,
               COALESCE(inv.stock, 0)         AS stock_disponible,
               COALESCE(img.url, '')          AS imagen_url
          FROM productos p
@@ -235,6 +254,13 @@ export class VentaRepository {
               COALESCE(p.unidad_medida, '')  AS unidad_medida,
               COALESCE(p.precio_venta, 0)    AS precio_venta,
               COALESCE(p.descuento, 0)       AS descuento,
+              COALESCE((SELECT json_agg(json_build_object(
+                'id_regla', r.id_regla,
+                'cantidad_minima', r.cantidad_minima,
+                'descuento_unitario', r.descuento_unitario
+              ) ORDER BY r.cantidad_minima)
+                FROM producto_descuento_mayorista r
+               WHERE r.id_producto = p.id_producto AND r.activo = TRUE), '[]'::json) AS reglas_mayoristas,
               COALESCE(inv.stock, 0)         AS stock_disponible,
               COALESCE(img.url, '')          AS imagen_url
          FROM productos p
@@ -270,6 +296,13 @@ export class VentaRepository {
               COALESCE(p.unidad_medida, '')  AS unidad_medida,
               COALESCE(p.precio_venta, 0)    AS precio_venta,
               COALESCE(p.descuento, 0)       AS descuento,
+              COALESCE((SELECT json_agg(json_build_object(
+                'id_regla', r.id_regla,
+                'cantidad_minima', r.cantidad_minima,
+                'descuento_unitario', r.descuento_unitario
+              ) ORDER BY r.cantidad_minima)
+                FROM producto_descuento_mayorista r
+               WHERE r.id_producto = p.id_producto AND r.activo = TRUE), '[]'::json) AS reglas_mayoristas,
               COALESCE(inv.stock, 0)         AS stock_disponible,
               ''                             AS imagen_url
          FROM productos p
@@ -295,6 +328,11 @@ export class VentaRepository {
       precio_venta: precio,
       descuento,
       precio_final: Math.round((precio - descuento + Number.EPSILON) * 100) / 100,
+      reglas_mayoristas: Array.isArray(f.reglas_mayoristas) ? f.reglas_mayoristas.map((r: any) => ({
+        id_regla: Number(r.id_regla),
+        cantidad_minima: Number(r.cantidad_minima),
+        descuento_unitario: Number(r.descuento_unitario),
+      })) : [],
       stock_disponible: Number(f.stock_disponible ?? 0),
       imagen_url: f.imagen_url ?? '',
     };
@@ -362,8 +400,8 @@ export class VentaRepository {
         await this.asegurarColumnaIdEmpresa(manager);
 
         const insertadas = await manager.query(
-          `INSERT INTO ventas (id_cliente, id_empresa, id_caja, fecha, subtotal, igv, total, origen, clave_idempotencia)
-           VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8)
+          `INSERT INTO ventas (id_cliente, id_empresa, id_caja, fecha, subtotal, igv, total, total_descuento, origen, clave_idempotencia)
+           VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9)
            RETURNING id_venta`,
           [
             datos.id_cliente ?? null,
@@ -372,6 +410,7 @@ export class VentaRepository {
             datos.subtotal,
             datos.igv,
             datos.total,
+            datos.descuento,
             datos.origen,
             datos.clave_idempotencia ?? null,
           ],
@@ -390,8 +429,25 @@ export class VentaRepository {
 
         for (const linea of lineas) {
           await manager.query(
-            'INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio) VALUES ($1, $2, $3, $4)',
-            [idVenta, linea.id_producto, linea.cantidad, linea.precio_unitario],
+            `INSERT INTO detalle_venta
+               (id_venta, id_producto, cantidad, precio, precio_lista_unitario,
+                descuento_unitario_aplicado, descuento_total_linea, precio_unitario_final,
+                subtotal, igv, total, id_regla_mayorista)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+            [
+              idVenta,
+              linea.id_producto,
+              linea.cantidad,
+              linea.precio_unitario,
+              linea.precio_lista_unitario,
+              linea.descuento_unitario_aplicado,
+              linea.descuento_total_linea,
+              linea.precio_unitario_final,
+              linea.subtotal,
+              linea.igv,
+              linea.total,
+              linea.id_regla_mayorista,
+            ],
           );
         }
 

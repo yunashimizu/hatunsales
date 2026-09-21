@@ -81,7 +81,11 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
     if (contexto.venta.estado === 'anulada') {
       throw new BadRequestException('No se puede crear una guía para una venta anulada');
     }
-    if (!contexto.items.length) throw new BadRequestException('La venta no tiene productos');
+    if (!contexto.items.length) {
+      throw new BadRequestException(
+        'La venta no tiene salida de almacén registrada; no se puede preparar una guía remitente',
+      );
+    }
     if (!['1', '6'].includes(contexto.destinatario.tipo_documento)
       || !contexto.destinatario.numero_documento.trim()
       || !contexto.destinatario.denominacion.trim()) {

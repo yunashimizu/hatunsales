@@ -20,6 +20,7 @@ import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { pasarelaConfig } from '../../config/pasarela.config';
 import { CajaSesionBussnies } from './caja-sesion.bussnies';
 import { normalizarRol } from '../../config/roles.config';
+import { resolverPrecioVenta } from '../../util/precios/precio-venta';
 
 /**
  * Punto de venta de mostrador.
@@ -121,6 +122,11 @@ export class VentaBussnies {
         subtotal: linea.subtotal,
         igv: linea.igv,
         total: linea.total,
+        precio_lista_unitario: items[indice].precio_lista_unitario,
+        descuento_unitario_aplicado: items[indice].descuento_unitario_aplicado,
+        descuento_total_linea: items[indice].descuento_total_linea,
+        precio_unitario_final: items[indice].precio_unitario_final,
+        id_regla_mayorista: items[indice].id_regla_mayorista,
       };
     });
 
@@ -307,9 +313,14 @@ export class VentaBussnies {
 
     const items = dto.items.map((item: ItemVentaRequest) => {
       const producto = productos.get(Number(item.id_producto))!;
-      const precio = item.precio_unitario ?? producto.precio_final;
+      const precio = resolverPrecioVenta({
+        precio_lista: producto.precio_venta,
+        descuento_producto: producto.descuento,
+        cantidad: Number(item.cantidad),
+        reglas_mayoristas: producto.reglas_mayoristas,
+      });
 
-      if (precio <= 0) {
+      if (precio.precio_lista_unitario <= 0) {
         throw new BadRequestException(`El producto "${producto.nombre}" no tiene precio de venta configurado`);
       }
 
@@ -319,8 +330,13 @@ export class VentaBussnies {
         codigo: producto.sku || producto.codigo_barras || String(producto.id_producto),
         unidad_de_medida: producto.unidad_medida || 'NIU',
         cantidad: Number(item.cantidad),
-        precio_unitario: precio,
-        descuento: item.descuento ?? 0,
+        precio_unitario: precio.precio_lista_unitario,
+        descuento: precio.descuento_total_linea,
+        precio_lista_unitario: precio.precio_lista_unitario,
+        descuento_unitario_aplicado: precio.descuento_unitario_aplicado,
+        descuento_total_linea: precio.descuento_total_linea,
+        precio_unitario_final: precio.precio_unitario_final,
+        id_regla_mayorista: precio.id_regla_mayorista,
         tipo_de_igv: item.tipo_de_igv,
         stock_disponible: producto.stock_disponible,
       };

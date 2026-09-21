@@ -8,8 +8,9 @@ export interface ProductoVentaResponse {
   unidad_medida: string;
   precio_venta: number;
   descuento: number;
-  /** Precio final con IGV ya aplicado el descuento del producto. */
+  /** Precio final con IGV después de aplicar la regla vigente. */
   precio_final: number;
+  reglas_mayoristas?: { id_regla: number; cantidad_minima: number; descuento_unitario: number }[];
   stock_disponible: number;
   imagen_url: string;
 }
