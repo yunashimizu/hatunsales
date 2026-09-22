@@ -145,6 +145,9 @@ import { CuentaTiendaController } from './api/controllers/tienda/cuenta.controll
 import { ConfiguracionRepository } from './repository/Repository/configuracion.repository';
 import { ConfiguracionFiscalBussnies } from './bussnies/Bussnies/configuracion-fiscal.bussnies';
 import { ConfiguracionController } from './api/controllers/configuracion.controller';
+import { FiscalProviderService } from './sunat/fiscal/fiscal-provider.service';
+import { FiscalEnvioRepository } from './sunat/repository/fiscal-envio.repository';
+import { FacturaBetaAdminController } from './sunat/factura/factura-beta-admin.controller';
 import { ReceptorRepository } from './repository/Repository/receptor.repository';
 import { ReceptorBussnies } from './bussnies/Bussnies/receptor.bussnies';
 import { ReceptorController } from './api/controllers/receptor.controller';
@@ -187,7 +190,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
   PedidoController, PedidoAdminController, CuentaTiendaController,
   ReceptorController, VentaController, ArchivoController, CreditoController, CajaPagosController,
   CajaSesionController,
-  ProveedorController, RecepcionController, ConfiguracionController],
+  ProveedorController, RecepcionController, ConfiguracionController, FacturaBetaAdminController],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
   LogRepository, AuthBussnies, AdminBussnies, RolBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
@@ -199,7 +202,8 @@ import { ArchivoController } from './api/controllers/archivo.controller';
    StockTiendaRepository, VentaTiendaRepository,
    CatalogoBussnies, CarritoBussnies, PedidoBussnies, CuentaTiendaBussnies, CheckoutBussnies, PagoBussnies,
    CulqiPasarela, PasarelaSimulada, pasarelaProvider, WhatsappPasarela,
-   ConfiguracionRepository, ConfiguracionFiscalBussnies, ReceptorRepository, ReceptorBussnies, ConsultaDocumentoService,
+   ConfiguracionRepository, ConfiguracionFiscalBussnies, FiscalProviderService, FiscalEnvioRepository,
+   ReceptorRepository, ReceptorBussnies, ConsultaDocumentoService,
    VentaRepository, VentaBussnies, CreditoRepository, CreditoBussnies, CajaPagosRepository, CajaPagosBussnies,
    CajaSesionRepository, CajaSesionBussnies,
    RecepcionRepository, RecepcionBussnies,

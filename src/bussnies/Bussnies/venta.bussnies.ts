@@ -313,9 +313,11 @@ export class VentaBussnies {
 
     const items = dto.items.map((item: ItemVentaRequest) => {
       const producto = productos.get(Number(item.id_producto))!;
+      const precioLista = Number(item.precio_unitario ?? producto.precio_venta ?? 0);
+      const descuentoUnitario = Number(item.descuento ?? producto.descuento ?? 0);
       const precio = resolverPrecioVenta({
-        precio_lista: producto.precio_venta,
-        descuento_producto: producto.descuento,
+        precio_lista: precioLista,
+        descuento_producto: descuentoUnitario,
         cantidad: Number(item.cantidad),
         reglas_mayoristas: producto.reglas_mayoristas,
       });

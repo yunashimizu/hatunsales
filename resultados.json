@@ -1,0 +1,114 @@
+{
+  "factura": {
+    "ok": false,
+    "estado": "ERROR_TRANSPORTE",
+    "mensaje": "Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404567 error: INFO: 3205 (nodo: \"/\" valor: \"\")'",
+    "codigo": "soap-env:Client.3205",
+    "payload": {
+      "provider": "sunat-direct",
+      "environment": "beta",
+      "documentType": "01",
+      "series": "F001",
+      "number": 1,
+      "envioId": null,
+      "fileName": "20123456789-01-F001-00000001.zip",
+      "sendBill": {
+        "ok": false,
+        "status": "ERROR_TRANSPORTE",
+        "raw": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<soap-env:Envelope xmlns:soap-env=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\"><soap-env:Header/><soap-env:Body><soap-env:Fault xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><faultcode>soap-env:Client.3205</faultcode><faultstring>Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404567 error: INFO: 3205 (nodo: \"/\" valor: \"\")'</faultstring></soap-env:Fault></soap-env:Body></soap-env:Envelope>",
+        "cdrXml": null,
+        "fault": {
+          "faultCode": "soap-env:Client.3205",
+          "faultString": "Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404567 error: INFO: 3205 (nodo: \"/\" valor: \"\")'"
+        },
+        "message": "SUNAT rechazó la solicitud (soap-env:Client.3205): Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404567 error: INFO: 3205 (nodo: \"/\" valor: \"\")'"
+      },
+      "cdr": {
+        "codigo": "soap-env:Client.3205",
+        "descripcion": "Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404567 error: INFO: 3205 (nodo: \"/\" valor: \"\")'",
+        "observaciones": [
+          "Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404567 error: INFO: 3205 (nodo: \"/\" valor: \"\")'"
+        ],
+        "estado": "ERROR_TRANSPORTE",
+        "rawXml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<soap-env:Envelope xmlns:soap-env=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\"><soap-env:Header/><soap-env:Body><soap-env:Fault xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><faultcode>soap-env:Client.3205</faultcode><faultstring>Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404567 error: INFO: 3205 (nodo: \"/\" valor: \"\")'</faultstring></soap-env:Fault></soap-env:Body></soap-env:Envelope>"
+      }
+    }
+  },
+  "boleta": {
+    "ok": false,
+    "estado": "ERROR_TRANSPORTE",
+    "mensaje": "Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404674 error: INFO: 3205 (nodo: \"/\" valor: \"\")'",
+    "codigo": "soap-env:Client.3205",
+    "payload": {
+      "provider": "sunat-direct",
+      "environment": "beta",
+      "documentType": "03",
+      "series": "B001",
+      "number": 1,
+      "envioId": null,
+      "fileName": "20123456789-03-B001-00000001.zip",
+      "sendBill": {
+        "ok": false,
+        "status": "ERROR_TRANSPORTE",
+        "raw": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<soap-env:Envelope xmlns:soap-env=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\"><soap-env:Header/><soap-env:Body><soap-env:Fault xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><faultcode>soap-env:Client.3205</faultcode><faultstring>Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404674 error: INFO: 3205 (nodo: \"/\" valor: \"\")'</faultstring></soap-env:Fault></soap-env:Body></soap-env:Envelope>",
+        "cdrXml": null,
+        "fault": {
+          "faultCode": "soap-env:Client.3205",
+          "faultString": "Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404674 error: INFO: 3205 (nodo: \"/\" valor: \"\")'"
+        },
+        "message": "SUNAT rechazó la solicitud (soap-env:Client.3205): Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404674 error: INFO: 3205 (nodo: \"/\" valor: \"\")'"
+      },
+      "cdr": {
+        "codigo": "soap-env:Client.3205",
+        "descripcion": "Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404674 error: INFO: 3205 (nodo: \"/\" valor: \"\")'",
+        "observaciones": [
+          "Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404674 error: INFO: 3205 (nodo: \"/\" valor: \"\")'"
+        ],
+        "estado": "ERROR_TRANSPORTE",
+        "rawXml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<soap-env:Envelope xmlns:soap-env=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\"><soap-env:Header/><soap-env:Body><soap-env:Fault xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><faultcode>soap-env:Client.3205</faultcode><faultstring>Debe consignar el tipo de operaci&#243;n - Detalle: xxx.xxx.xxx value='ticket: 1790097404674 error: INFO: 3205 (nodo: \"/\" valor: \"\")'</faultstring></soap-env:Fault></soap-env:Body></soap-env:Envelope>"
+      }
+    }
+  },
+  "notaCredito": {
+    "ok": false,
+    "estado": "ERROR_TRANSPORTE",
+    "mensaje": "Error HTTP 401: Unauthorized",
+    "codigo": "ERROR",
+    "payload": {
+      "provider": "sunat-direct",
+      "environment": "beta",
+      "documentType": "07",
+      "series": "FC01",
+      "number": 1,
+      "envioId": null,
+      "fileName": "20123456789-07-FC01-00000001.zip",
+      "sendBill": {
+        "ok": false,
+        "status": "ERROR_TRANSPORTE",
+        "raw": "<html>\r\n<head><title>401 Authorization Required</title></head>\r\n<body>\r\n<center><h1>401 Authorization Required</h1></center>\r\n<hr><center>nginx/1.17.3</center>\r\n</body>\r\n</html>\r\n",
+        "cdrXml": null,
+        "fault": null,
+        "message": "Error HTTP 401: Unauthorized"
+      },
+      "cdr": {
+        "codigo": "ERROR",
+        "descripcion": "Error HTTP 401: Unauthorized",
+        "observaciones": [
+          "Error HTTP 401: Unauthorized"
+        ],
+        "estado": "ERROR_TRANSPORTE",
+        "rawXml": "<html>\r\n<head><title>401 Authorization Required</title></head>\r\n<body>\r\n<center><h1>401 Authorization Required</h1></center>\r\n<hr><center>nginx/1.17.3</center>\r\n</body>\r\n</html>\r\n"
+      }
+    }
+  },
+  "guia": {
+    "success": false,
+    "estado": "ERROR_TRANSPORTE",
+    "codigoSunat": "soap-env:Client",
+    "mensajeSunat": "0306",
+    "observaciones": [
+      "0306"
+    ],
+    "hash": "17994c8165e794b643825acce2b5b3a5d65ec0fc83eb31cdb8e5de6a83dbdd38"
+  }
+}
