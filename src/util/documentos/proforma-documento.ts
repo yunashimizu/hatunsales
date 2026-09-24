@@ -4,13 +4,44 @@
  * de datos ni la red, así se pueden probar con datos de ejemplo.
  */
 
+import { redondear } from '../fiscal/calculo-fiscal';
+
 export const ZONA_HORARIA_PERU = 'America/Lima';
+
+/**
+ * Colores de marca (tomados del logo: grafito y naranja). PDF y Excel usan la
+ * misma paleta para que los dos documentos se vean como de la misma empresa.
+ * El naranja se usa solo como acento (líneas, detalles): sobre fondo blanco no
+ * tiene contraste suficiente para texto.
+ */
+export const PALETA = {
+  grafito: '#23272B',
+  naranja: '#F28C1B',
+  naranjaSuave: '#FDF1E3',
+  texto: '#1F2933',
+  gris: '#4B5563',
+  grisClaro: '#8A94A0',
+  linea: '#D9DDE2',
+  fondo: '#F5F6F8',
+  cebra: '#F8F9FA',
+  blanco: '#FFFFFF',
+  peligro: '#B42318',
+  aviso: '#B54708',
+} as const;
+
+/** "#23272B" -> "FF23272B" (formato ARGB que usa exceljs). */
+export function argb(hex: string): string {
+  return `FF${hex.replace('#', '').toUpperCase()}`;
+}
 
 export interface EmisorDocumento {
   ruc: string;
   razon_social: string;
   direccion?: string | null;
   ubicacion?: string | null;
+  telefono?: string | null;
+  email?: string | null;
+  web?: string | null;
   /** Imagen PNG o JPEG ya descargada. Si falta, el documento sale sin logo. */
   logo?: Buffer | null;
 }
@@ -63,6 +94,8 @@ export interface DatosProformaDocumento {
   porcentaje_igv: number;
   observaciones?: string | null;
   cuentas?: CuentaBancariaDocumento[];
+  /** Condiciones propias del negocio (configuración), una por línea. */
+  condiciones_extra?: string[];
   /** Momento de generación; por defecto, ahora. */
   generado_en?: Date;
 }
@@ -178,6 +211,55 @@ export function estadoParaDocumento(estado: string, validaHasta?: string | null,
   return estaVencida(estado, validaHasta, ahora) ? `${etiqueta} (vencida)` : etiqueta;
 }
 
+/**
+ * Aviso de estado para el CLIENTE. Los estados internos (borrador, enviada,
+ * aprobada, convertida) no se imprimen: al cliente no le dicen nada. Solo se
+ * avisa cuando el documento ya no es utilizable.
+ */
+export function avisoEstadoCliente(
+  estado: string,
+  validaHasta?: string | null,
+  ahora = new Date(),
+): { texto: string; tono: 'peligro' | 'aviso' } | null {
+  if (String(estado ?? '').trim().toLowerCase() === 'anulada') {
+    return { texto: 'ANULADA', tono: 'peligro' };
+  }
+  if (estaVencida(estado, validaHasta, ahora)) return { texto: 'VENCIDA', tono: 'aviso' };
+  return null;
+}
+
+/** True si algún ítem tiene descuento (entonces la tabla muestra precio de lista y descuento). */
+export function hayDescuentos(items?: ItemDocumento[] | null): boolean {
+  return (items ?? []).some((i) => numeroSeguro(i?.descuento) >= 0.005);
+}
+
+/**
+ * Precio de lista unitario. `precio_unitario` ya es el precio NETO (con el
+ * descuento restado), así que la lista es neto + descuento.
+ */
+export function precioLista(item: ItemDocumento): number {
+  return redondear(numeroSeguro(item.precio_unitario) + numeroSeguro(item.descuento));
+}
+
+/** "987654321" -> "987 654 321"; "51987654321" -> "+51 987 654 321". */
+export function formatearTelefono(valor?: string | null): string {
+  const d = String(valor ?? '').replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('51')) return `+51 ${d.slice(2, 5)} ${d.slice(5, 8)} ${d.slice(8)}`;
+  if (d.length === 9) return `${d.slice(0, 3)} ${d.slice(3, 6)} ${d.slice(6)}`;
+  return textoPlano(valor);
+}
+
+/** Medios de contacto del emisor que realmente están configurados. */
+export function contactoEmisor(emisor?: EmisorDocumento | null): string[] {
+  const telefono = formatearTelefono(emisor?.telefono);
+  const web = textoPlano(emisor?.web).replace(/^https?:\/\//i, '').replace(/\/$/, '');
+  return [
+    telefono ? `Tel. ${telefono}` : '',
+    textoPlano(emisor?.email),
+    web,
+  ].filter(Boolean);
+}
+
 /** "DNI" para 8 dígitos, "RUC" para 11, "DNI/RUC" si no se puede saber. */
 export function etiquetaDocumento(documento?: string | null): string {
   const d = String(documento ?? '').replace(/\D/g, '');
@@ -238,6 +320,34 @@ export function describirCuenta(cuenta: CuentaBancariaDocumento): string {
   return partes.filter(Boolean).join(' · ');
 }
 
+/** Una cuenta lista para mostrarla como fila de tabla (banco / cuenta / CCI). */
+export interface FilaCuenta {
+  banco: string;
+  /** Tipo de cuenta, moneda y titular en una línea secundaria. */
+  detalle: string;
+  numero: string;
+  cci: string;
+}
+
+export function describirCuentaTabla(cuenta: CuentaBancariaDocumento): FilaCuenta {
+  const tipo = textoPlano(cuenta.tipo);
+  const moneda = textoPlano(cuenta.moneda).toUpperCase();
+  const titular = textoPlano(cuenta.titular);
+  const detalle = [
+    !cuenta.es_yape && tipo ? `Cta. ${tipo.toLowerCase()}` : '',
+    !cuenta.es_yape && moneda && moneda !== 'PEN' ? moneda : '',
+    titular ? `Titular: ${titular}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return {
+    banco: textoPlano(cuenta.banco) || (cuenta.es_yape ? 'Yape' : 'Cuenta'),
+    detalle,
+    numero: textoPlano(cuenta.numero),
+    cci: cuenta.es_yape ? '' : textoPlano(cuenta.cci),
+  };
+}
+
 /** Cuentas que realmente tienen un número que el cliente pueda usar. */
 export function cuentasUtiles(cuentas?: CuentaBancariaDocumento[] | null): CuentaBancariaDocumento[] {
   return (cuentas ?? []).filter(
@@ -248,12 +358,14 @@ export function cuentasUtiles(cuentas?: CuentaBancariaDocumento[] | null): Cuent
 /** Condiciones comerciales comunes al PDF y al Excel. */
 export function condicionesComerciales(datos: DatosProformaDocumento): string[] {
   const valida = formatearFecha(datos.valida_hasta ?? null);
+  const extras = (datos.condiciones_extra ?? []).map((c) => textoPlano(c)).filter(Boolean);
   return [
     valida
-      ? `Proforma válida hasta el ${valida}. Pasada esa fecha, los precios pueden variar.`
+      ? `Oferta válida hasta el ${valida}. Vencida esa fecha, los precios y la disponibilidad pueden variar.`
       : 'Precios sujetos a variación sin previo aviso.',
-    'Los precios están expresados en Soles (PEN) e incluyen IGV.',
+    'Precios expresados en Soles (PEN) e incluyen IGV.',
     'Sujeto a disponibilidad de stock al momento de confirmar la compra.',
+    ...extras,
   ];
 }
 

@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import {
   CLAVES_EMISOR,
+  CLAVE_CONDICIONES_PROFORMA,
   CLAVES_SERIES,
   SERIES_POR_DEFECTO,
   emisorConfig,
@@ -63,6 +64,7 @@ export class ConfiguracionFiscalBussnies {
       ...CLAVES_EMISOR,
       CLAVES_SERIES.boleta,
       CLAVES_SERIES.factura,
+      CLAVE_CONDICIONES_PROFORMA,
       'caja_modo',
     ];
     const valores = await this.config.obtenerVarias([...claves]);
@@ -75,6 +77,12 @@ export class ConfiguracionFiscalBussnies {
         direccion: valores.emisor_direccion ?? emisorConfig.direccion,
         ubicacion: valores.emisor_ubicacion ?? emisorConfig.ubicacion,
         logo_url: valores.emisor_logo_url ?? emisorConfig.logo_url,
+        telefono: valores.emisor_telefono ?? emisorConfig.telefono,
+        email: valores.emisor_email ?? emisorConfig.email,
+        web: valores.emisor_web ?? emisorConfig.web,
+      },
+      proforma: {
+        condiciones: valores[CLAVE_CONDICIONES_PROFORMA] ?? '',
       },
       series: {
         serie_boleta: series.serie_boleta,
@@ -95,7 +103,11 @@ export class ConfiguracionFiscalBussnies {
       direccion?: string;
       ubicacion?: string;
       logo_url?: string;
+      telefono?: string;
+      email?: string;
+      web?: string;
     };
+    proforma?: { condiciones?: string };
     series?: { serie_boleta?: string; serie_factura?: string };
   }) {
     if (body.emisor) {
@@ -113,6 +125,22 @@ export class ConfiguracionFiscalBussnies {
       if (e.logo_url != null) {
         await this.config.guardar('emisor_logo_url', String(e.logo_url).trim());
       }
+      if (e.telefono != null) {
+        await this.config.guardar('emisor_telefono', String(e.telefono).trim());
+      }
+      if (e.email != null) {
+        await this.config.guardar('emisor_email', String(e.email).trim());
+      }
+      if (e.web != null) {
+        await this.config.guardar('emisor_web', String(e.web).trim());
+      }
+    }
+
+    if (body.proforma?.condiciones != null) {
+      await this.config.guardar(
+        CLAVE_CONDICIONES_PROFORMA,
+        String(body.proforma.condiciones).replace(/\r\n?/g, '\n').trim().slice(0, 1500),
+      );
     }
 
     if (body.series?.serie_boleta != null) {

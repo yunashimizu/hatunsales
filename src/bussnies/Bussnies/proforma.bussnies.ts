@@ -29,7 +29,7 @@ import {
   PORCENTAJE_IGV_POR_DEFECTO,
   redondear,
 } from '../../util/fiscal/calculo-fiscal';
-import { CLAVES_EMISOR, emisorConfig } from '../../config/emisor.config';
+import { CLAVES_EMISOR, CLAVE_CONDICIONES_PROFORMA, emisorConfig } from '../../config/emisor.config';
 import {
   ClienteDocumento,
   CuentaBancariaDocumento,
@@ -38,8 +38,10 @@ import {
   hoyEnLima,
   nombreArchivoProforma,
   sumarDias,
+  textoMultilinea,
   textoPlano,
 } from '../../util/documentos/proforma-documento';
+import { textoWhatsappProforma } from '../../util/documentos/proforma-whatsapp';
 import { generarProformaPdf } from '../../util/documentos/proforma-pdf';
 import { generarProformaExcel } from '../../util/documentos/proforma-excel';
 import { obtenerLogoEmisor } from '../../util/documentos/logo-emisor';
@@ -55,8 +57,21 @@ export interface DocumentoProforma {
 const DIAS_VIGENCIA_POR_DEFECTO = 7;
 /** Diferencia máxima (en soles) que se tolera entre total y gravada + IGV. */
 const TOLERANCIA_TOTALES = 0.05;
-/** Ítems que se listan en el mensaje de WhatsApp antes de resumir. */
-const ITEMS_EN_TEXTO_WA = 8;
+/** Líneas de condiciones propias que se aceptan en la configuración. */
+const MAX_CONDICIONES_EXTRA = 8;
+
+/** Datos del emisor tal como están en la configuración (ya con los valores por defecto). */
+interface ConfigEmisor {
+  ruc: string;
+  razon_social: string;
+  direccion: string;
+  ubicacion: string;
+  logo_url: string;
+  telefono: string;
+  email: string;
+  web: string;
+  condiciones: string[];
+}
 
 const CUENTAS_DOCUMENTO_POR_DEFECTO: CuentaBancariaProforma[] = [
   {
@@ -350,8 +365,9 @@ export class ProformaBussnies implements IProformaBussniees {
   private async datosDocumento(id: number): Promise<DatosProformaDocumento> {
     const p = await this.obtenerEntidad(id);
 
+    const cfg = await this.leerConfigEmisor();
     const [emisor, cuentas, almacenes] = await Promise.all([
-      this.resolverEmisor(),
+      this.resolverEmisor(cfg),
       this.repo.cuentasParaDocumento(),
       this.repo.nombresAlmacenes([p.id_almacen]),
     ]);
@@ -390,15 +406,16 @@ export class ProformaBussnies implements IProformaBussniees {
       cuentas: (cuentas.length ? cuentas : CUENTAS_DOCUMENTO_POR_DEFECTO).map((c) =>
         this.cuentaDocumento(c),
       ),
+      condiciones_extra: cfg.condiciones,
       generado_en: new Date(),
     };
   }
 
   /** Datos del emisor: `configuraciones` manda; si falta una clave, el config local. */
-  private async resolverEmisor(): Promise<EmisorDocumento> {
+  private async leerConfigEmisor(): Promise<ConfigEmisor> {
     let valores: Record<string, string | null> = {};
     try {
-      valores = await this.config.obtenerVarias([...CLAVES_EMISOR]);
+      valores = await this.config.obtenerVarias([...CLAVES_EMISOR, CLAVE_CONDICIONES_PROFORMA]);
     } catch (error: any) {
       this.log.warn(
         `No se pudo leer la configuración del emisor (${error?.message ?? error}); ` +
@@ -409,19 +426,37 @@ export class ProformaBussnies implements IProformaBussniees {
     const dato = (clave: string, porDefecto: string) =>
       textoPlano(valores[clave] ?? '') || porDefecto;
 
-    const logoUrl = dato('emisor_logo_url', emisorConfig.logo_url);
-    // obtenerLogoEmisor nunca lanza: si falla devuelve null y el PDF sale sin logo.
-    const logoLeido = await obtenerLogoEmisor(logoUrl);
-    const logo =
-      logoLeido || (logoUrl !== emisorConfig.logo_url
-        ? await obtenerLogoEmisor(emisorConfig.logo_url)
-        : null);
-
     return {
       ruc: dato('emisor_ruc', emisorConfig.ruc),
       razon_social: dato('emisor_razon_social', emisorConfig.razon_social),
       direccion: dato('emisor_direccion', emisorConfig.direccion),
       ubicacion: dato('emisor_ubicacion', emisorConfig.ubicacion),
+      logo_url: dato('emisor_logo_url', emisorConfig.logo_url),
+      telefono: dato('emisor_telefono', emisorConfig.telefono),
+      email: dato('emisor_email', emisorConfig.email),
+      web: dato('emisor_web', emisorConfig.web),
+      condiciones: textoMultilinea(valores[CLAVE_CONDICIONES_PROFORMA])
+        .filter(Boolean)
+        .slice(0, MAX_CONDICIONES_EXTRA),
+    };
+  }
+
+  private async resolverEmisor(cfg: ConfigEmisor): Promise<EmisorDocumento> {
+    // obtenerLogoEmisor nunca lanza: si falla devuelve null y el PDF sale sin logo.
+    const logoLeido = await obtenerLogoEmisor(cfg.logo_url);
+    const logo =
+      logoLeido || (cfg.logo_url !== emisorConfig.logo_url
+        ? await obtenerLogoEmisor(emisorConfig.logo_url)
+        : null);
+
+    return {
+      ruc: cfg.ruc,
+      razon_social: cfg.razon_social,
+      direccion: cfg.direccion,
+      ubicacion: cfg.ubicacion,
+      telefono: cfg.telefono || null,
+      email: cfg.email || null,
+      web: cfg.web || null,
       logo,
     };
   }
@@ -454,35 +489,23 @@ export class ProformaBussnies implements IProformaBussniees {
 
   // ── WhatsApp ────────────────────────────────────────────────────
 
-  armarTextoWa(p: ProformaResponse, razonSocial?: string): string {
-    const emisor = textoPlano(razonSocial) || emisorConfig.razon_social;
-    const items = p.items ?? [];
-    const lineas = items
-      .slice(0, ITEMS_EN_TEXTO_WA)
-      .map(
-        (i) =>
-          `• ${i.descripcion || 'Producto'} x${i.cantidad} — S/ ${Number(
-            i.subtotal ?? Number(i.precio_unitario) * Number(i.cantidad),
-          ).toFixed(2)}`,
-      )
-      .join('\n');
-    const restantes = items.length - ITEMS_EN_TEXTO_WA;
-    const extra = restantes > 0 ? `\n… y ${restantes} ítem(s) más` : '';
-    return [
-      `Hola${p.cliente_nombre ? ` ${p.cliente_nombre}` : ''},`,
-      `Cotización *${p.codigo || '#' + p.id_proforma}* — ${emisor}`,
-      p.valida_hasta ? `Válida hasta: ${p.valida_hasta}` : null,
-      ``,
-      lineas + extra,
-      ``,
-      `*Total: S/ ${Number(p.total).toFixed(2)}* (inc. IGV)`,
-      p.observaciones ? `Nota: ${p.observaciones}` : null,
-      ``,
-      `Adjunto la proforma de cotización.`,
-      `¿Desea proceder? Responda a este mensaje.`,
-    ]
-      .filter((x) => x != null)
-      .join('\n');
+  /** Mensaje que acompaña a la proforma: mismas cifras y formatos que el PDF y el Excel. */
+  armarTextoWa(p: ProformaResponse, emisor?: { razon_social?: string; telefono?: string }): string {
+    return textoWhatsappProforma({
+      razon_social: textoPlano(emisor?.razon_social) || emisorConfig.razon_social,
+      telefono_emisor: emisor?.telefono || null,
+      codigo: p.codigo || `COT-${p.id_proforma}`,
+      cliente_nombre: p.cliente_nombre,
+      es_empresa: !!p.id_empresa || String(p.cliente_documento ?? '').replace(/\D/g, '').length === 11,
+      valida_hasta: p.valida_hasta,
+      items: (p.items ?? []).map((i) => ({
+        descripcion: i.descripcion,
+        cantidad: i.cantidad,
+        subtotal: i.subtotal,
+        precio_unitario: i.precio_unitario,
+      })),
+      total: Number(p.total ?? 0),
+    });
   }
 
   whatsappEstado() {
@@ -509,8 +532,8 @@ export class ProformaBussnies implements IProformaBussniees {
     if (opts.id_proforma) {
       const cot = await this.getById(opts.id_proforma);
       if (!texto) {
-        const razonSocial = await this.razonSocialEmisor();
-        texto = this.armarTextoWa(cot, razonSocial);
+        const emisor = await this.leerConfigEmisor();
+        texto = this.armarTextoWa(cot, emisor);
       }
 
       // Vía ferretería: wa.me + adjunto proforma (sin Meta). Meta queda opcional para después.
@@ -578,15 +601,6 @@ export class ProformaBussnies implements IProformaBussniees {
         error?.stack,
       );
       return 'No se pudo marcar la cotización como enviada; hágalo a mano desde la lista.';
-    }
-  }
-
-  private async razonSocialEmisor(): Promise<string> {
-    try {
-      return await this.config.obtenerTexto('emisor_razon_social', emisorConfig.razon_social);
-    } catch (error: any) {
-      this.log.warn(`No se pudo leer la razón social del emisor: ${error?.message ?? error}`);
-      return emisorConfig.razon_social;
     }
   }
 

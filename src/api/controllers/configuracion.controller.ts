@@ -29,6 +29,7 @@ export class ConfiguracionController {
     @Body()
     body: {
       emisor?: Record<string, string>;
+      proforma?: { condiciones?: string };
       series?: { serie_boleta?: string; serie_factura?: string };
     },
   ) {
