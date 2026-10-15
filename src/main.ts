@@ -1,15 +1,20 @@
-import 'dotenv/config';
+import './config/entorno';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
-import { ValidationPipe, Logger } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { join } from 'path';
 import cookieParser from 'cookie-parser';
 import { JWT_DEFAULT_DEV } from './config/jwt.config';
-import { esProduccion } from './config/runtime.config';
+import { booleanoEntorno, esProduccion } from './config/runtime.config';
 import { postgresConfigurado } from './config/database.config';
 import { nubefactConfigurado } from './config/nubefact.config';
+import { opcionesCors, origenesPermitidos } from './util/http/cors.config';
+import { crearMiddlewareCabecerasSeguridad } from './util/http/cabeceras-seguridad.middleware';
+import { crearMiddlewareRegistroPeticiones } from './util/http/registro-peticiones.middleware';
+import { crearValidationPipe } from './util/http/validacion/validation-pipe.factory';
+import { configServidorDesdeEntorno, configurarTiemposServidor } from './util/http/servidor-http';
 
 function validarEntornoProduccion(): void {
   const esProd = esProduccion();
@@ -46,37 +51,28 @@ function validarEntornoProduccion(): void {
       'Bootstrap',
     );
   }
+
+  if (esProd && !process.env.SUNAT_TOKEN?.trim() && !process.env.APIPERU_TOKEN?.trim()) {
+    Logger.warn(
+      'SUNAT_TOKEN (ApiPeru) no configurado: las consultas de DNI/RUC fallarán hasta definirlo en Railway.',
+      'Bootstrap',
+    );
+  }
+
+  const tz = (process.env.TZ ?? '').trim();
+  if (tz && !/^(utc|etc\/utc)$/i.test(tz)) {
+    Logger.warn(
+      `TZ=${tz}: node-postgres leerá los "timestamp" sin zona como hora local y desplazará las fechas. Quite TZ en Railway.`,
+      'Bootstrap',
+    );
+  }
+
+  if (esProd && !booleanoEntorno('LIMITE_PETICIONES_ACTIVO', true)) {
+    Logger.warn('LIMITE_PETICIONES_ACTIVO=false: el límite de peticiones (login, DNI/RUC) está apagado.', 'Bootstrap');
+  }
 }
 
-async function bootstrap() {
-  validarEntornoProduccion();
-
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
-  const esProd = esProduccion();
-
-  const allowedOrigins = (process.env.CORS_ORIGIN ?? '')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-
-  const corsOrigins = esProd
-    ? allowedOrigins
-    : (allowedOrigins.length > 0 ? allowedOrigins : ['http://localhost:4200']);
-
-  app.use(cookieParser());
-  app.enableCors({
-    credentials: true,
-    origin: corsOrigins,
-  });
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      transform: true,
-    }),
-  );
-
-  app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads/' });
-
+function montarSwagger(app: NestExpressApplication): void {
   const config = new DocumentBuilder()
     .setTitle('HatunSales API')
     .setVersion('1.0')
@@ -92,10 +88,43 @@ async function bootstrap() {
 
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api', app, document);
+}
 
-  await app.listen(process.env.PORT ?? 3000);
+async function bootstrap() {
+  validarEntornoProduccion();
 
-  console.log(`Servidor:  http://localhost:${process.env.PORT ?? 3000}`);
-  console.log(`Swagger:   http://localhost:${process.env.PORT ?? 3000}/api`);
+  const esProd = esProduccion();
+  const servidor = configServidorDesdeEntorno(esProd);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const logger = new Logger('Bootstrap');
+
+  // Detrás del edge de Railway: req.ip es la IP real del cliente (X-Forwarded-For).
+  app.set('trust proxy', servidor.confiarEnProxy);
+  app.disable('x-powered-by');
+
+  // Orden: id de petición y log → cabeceras → CORS (responde los preflight) → cookies → cuerpo.
+  app.use(crearMiddlewareRegistroPeticiones({ umbralLentoMs: servidor.umbralPeticionLentaMs }));
+  app.use(crearMiddlewareCabecerasSeguridad({ hsts: esProd }));
+  app.enableCors(opcionesCors(origenesPermitidos({ corsOrigin: process.env.CORS_ORIGIN, produccion: esProd })));
+  app.use(cookieParser());
+  // JSON y formularios; las subidas multipart (imágenes, certificado .pfx) las limita multer en cada ruta.
+  app.useBodyParser('json', { limit: servidor.limiteCuerpo });
+  app.useBodyParser('urlencoded', { limit: servidor.limiteCuerpo, extended: true });
+  app.useGlobalPipes(crearValidationPipe());
+
+  // Los archivos de /uploads tienen nombre único (UUID): se pueden cachear.
+  app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads/', maxAge: '7d', index: false });
+
+  if (servidor.swagger) montarSwagger(app);
+
+  // SIGTERM de Railway: deja de aceptar conexiones, termina las peticiones en curso y cierra el pool.
+  app.enableShutdownHooks();
+  configurarTiemposServidor(app.getHttpServer(), servidor.keepAliveMs);
+
+  const puerto = process.env.PORT ?? 3000;
+  await app.listen(puerto);
+
+  logger.log(`Servidor escuchando en el puerto ${puerto}`);
+  logger.log(servidor.swagger ? `Swagger: http://localhost:${puerto}/api` : 'Swagger desactivado (SWAGGER_ENABLED=true para activarlo).');
 }
 bootstrap();

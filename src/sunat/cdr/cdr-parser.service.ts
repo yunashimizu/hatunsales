@@ -1,53 +1,38 @@
-import { FiscalStatusMapper } from '../fiscal/fiscal-status.mapper';
+import { EstadoCdr, leerCdr } from '../nucleo/cdr/lector-cdr';
+import type { ObservacionSunat } from '../nucleo/documento-fiscal.types';
 
 export interface CdrParseResult {
   codigo: string;
   descripcion: string;
+  /** Observaciones como texto ("4252 - El dato ingresado…"), forma heredada. */
   observaciones: string[];
-  estado: 'ACEPTADO' | 'ACEPTADO_CON_OBSERVACIONES' | 'RECHAZADO' | 'ERROR_TRANSPORTE' | 'ESTADO_DESCONOCIDO';
+  /**
+   * 0 sin notas → ACEPTADO; 0 con notas o ≥ 4000 → ACEPTADO_CON_OBSERVACIONES;
+   * 2000–3999 → RECHAZADO; 0100–1999 → EXCEPCION (Manual del Programador §4.1).
+   */
+  estado: EstadoCdr | 'ERROR_TRANSPORTE';
   rawXml: string;
+  /** Observaciones separadas en código y descripción. */
+  observacionesDetalle?: ObservacionSunat[];
+  /** cbc:ReferenceID del comprobante al que responde. */
+  referencia?: string;
 }
 
+/**
+ * Interpreta la constancia (ApplicationResponse) de SUNAT con @xmldom, sin
+ * depender de prefijos ni atributos (<cbc:ResponseCode listAgencyName="PE:SUNAT">).
+ */
 export class CdrParserService {
   parse(xml: string): CdrParseResult {
-    if (!xml || !xml.includes('ApplicationResponse')) {
-      return {
-        codigo: 'ERROR',
-        descripcion: 'No se pudo interpretar la CDR de SUNAT.',
-        observaciones: ['La respuesta no contiene un ApplicationResponse válido.'],
-        estado: 'ESTADO_DESCONOCIDO',
-        rawXml: xml,
-      };
-    }
-
-    const codigoMatch = xml.match(/<cbc:ResponseCode>([^<]+)<\/cbc:ResponseCode>|<ResponseCode>([^<]+)<\/ResponseCode>/i);
-    const descripcionMatch = xml.match(/<cbc:Description>([^<]+)<\/cbc:Description>|<Description>([^<]+)<\/Description>/i);
-    const notesMatches = [...xml.matchAll(/<(?:cbc|cac):?Note>([^<]+)<\/(?:cbc|cac):?Note>/gi)];
-
-    const codigo = (codigoMatch?.[1] ?? codigoMatch?.[2] ?? 'ERROR').trim();
-    const descripcion = (descripcionMatch?.[1] ?? descripcionMatch?.[2] ?? 'Respuesta no reconocida por Sunat.').trim();
-    const observaciones = notesMatches.map((match) => match[1].trim()).filter(Boolean);
-
-    let estado: CdrParseResult['estado'] = 'ESTADO_DESCONOCIDO';
-
-    // codigo '0' con Notes: SUNAT acepta el documento pero deja observaciones
-    // (confirmado contra un CDR real de Beta: código 0 + 5 <cbc:Note> de
-    // formato de dirección) — no es un rechazo, así que va antes que RECHAZADO,
-    // pero tampoco es "sin nada que corregir".
-    if (codigo === '0' && observaciones.length === 0) estado = 'ACEPTADO';
-    else if (codigo === '0' || codigo === '2001' || codigo === '2002' || codigo === '2003' || codigo === '2004' || observaciones.length > 0) {
-      estado = 'ACEPTADO_CON_OBSERVACIONES';
-    } else if (codigo.startsWith('1') || codigo.startsWith('2') || codigo.startsWith('3') || codigo.startsWith('4')) {
-      estado = 'RECHAZADO';
-    }
-
-    const mappedEstado = FiscalStatusMapper.normalizar(estado) as CdrParseResult['estado'];
+    const cdr = leerCdr(xml);
     return {
-      codigo,
-      descripcion,
-      observaciones,
-      estado: mappedEstado,
+      codigo: cdr.codigo,
+      descripcion: cdr.descripcion,
+      observaciones: cdr.observaciones.map((o) => (o.codigo ? `${o.codigo} - ${o.descripcion}` : o.descripcion)),
+      estado: cdr.estado,
       rawXml: xml,
+      observacionesDetalle: cdr.observaciones,
+      referencia: cdr.referencia,
     };
   }
 }

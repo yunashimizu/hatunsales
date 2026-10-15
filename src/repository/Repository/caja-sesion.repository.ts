@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
+import { ConfiguracionRepository } from './configuracion.repository';
+import { EsquemaCajaService, SnapshotEsquema } from '../../caja/esquema/esquema-caja.service';
+import { Dinero } from '../../caja/dominio/dinero';
 
 export type AperturaSesion = {
   id_apertura: number;
@@ -21,147 +24,140 @@ export type CajaDisponible = {
   ocupada: boolean;
 };
 
-type MetaApertura = {
-  colFecha: string | null;
-  colMonto: string | null;
-  listo: boolean;
+export type ResumenTurno = {
+  ventas: number;
+  total: number;
+  por_metodo: { metodo: string; total: number; cantidad: number }[];
 };
 
+/** Lo que el arqueo de cierre (u otro llamador) aporta al cierre, dentro de su transacción. */
+export interface PreparacionCierre {
+  /** Si viene, reemplaza el monto contado del cuerpo. */
+  montoConteo?: number | null;
+  observacion?: string | null;
+  /** Efectivo esperado por el sistema → cierres_caja.monto_final (texto NUMERIC). */
+  montoFinal?: string | null;
+  /** Se ejecuta tras insertar el cierre (p. ej. enlazar el arqueo). */
+  alCerrar?: (manager: EntityManager, idCierre: number) => Promise<void>;
+}
+
+export interface ResultadoCierre {
+  id_apertura: number;
+  id_cierre: number | null;
+  cerrada: boolean;
+  monto_conteo: number | null;
+}
+
+type MetaApertura = { colFecha: string | null; colMonto: string | null };
 type MetaCierre = {
   colFecha: string | null;
   colMonto: string | null;
   colObs: string | null;
   tieneIdUsuario: boolean;
-  listo: boolean;
+  tieneMontoFinal: boolean;
 };
+type MetaCaja = { exprNombre: string; tieneSucursal: boolean };
+
+interface MetaSesion {
+  snapshot: SnapshotEsquema;
+  apertura: MetaApertura;
+  cierre: MetaCierre;
+  caja: MetaCaja;
+}
+
+const CANDADO_APERTURA_USUARIO = 'caja:apertura:usuario:';
 
 /**
  * Sesión de caja (apertura / cierre).
- * Descubre columnas reales para no romper esquemas distintos.
+ *
+ * Descubre las columnas reales (para no romper esquemas antiguos) leyendo el catálogo una
+ * sola vez (EsquemaCajaService) y nunca ejecuta DDL. GET /caja/sesion hace 1-2 consultas.
  */
 @Injectable()
 export class CajaSesionRepository {
   private readonly log = new Logger(CajaSesionRepository.name);
-  private metaApertura: MetaApertura | null = null;
-  private metaCierre: MetaCierre | null = null;
+  private meta: MetaSesion | null = null;
 
   constructor(
     @InjectDataSource('pgConnection')
     private readonly dataSource: DataSource,
+    private readonly esquema: EsquemaCajaService,
+    private readonly config: ConfiguracionRepository,
   ) {}
 
-  async asegurarSchema(): Promise<void> {
-    await this.dataSource.query(`
-      ALTER TABLE aperturas_caja ADD COLUMN IF NOT EXISTS id_usuario INTEGER
-    `);
-    await this.dataSource.query(`
-      CREATE INDEX IF NOT EXISTS idx_aperturas_caja_id_usuario
-        ON aperturas_caja (id_usuario)
-        WHERE id_usuario IS NOT NULL
-    `).catch(() => undefined);
+  /** Metadatos derivados del catálogo; se recalculan solo si el catálogo se releyó. */
+  private async metaSesion(): Promise<MetaSesion> {
+    const snapshot = await this.esquema.snapshot();
+    if (this.meta?.snapshot === snapshot) return this.meta;
 
-    // Columnas opcionales: ignorar si el tipo/nombre choca
-    for (const sql of [
-      `ALTER TABLE aperturas_caja ADD COLUMN IF NOT EXISTS monto_inicial NUMERIC(12, 2)`,
-      `ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS id_usuario INTEGER`,
-      `ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS monto_conteo NUMERIC(12, 2)`,
-      `ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS observacion TEXT`,
-    ]) {
-      await this.dataSource.query(sql).catch(() => undefined);
-    }
+    const colsAp = snapshot.columnas('aperturas_caja');
+    const colsCi = snapshot.columnas('cierres_caja');
+    const colsCaja = snapshot.columnas('cajas');
+    const primera = (cols: ReadonlySet<string>, candidatas: string[]) => candidatas.find((c) => cols.has(c)) ?? null;
 
-    await this.dataSource.query(
-      `INSERT INTO configuraciones (clave, valor)
-       SELECT v.clave, v.valor
-         FROM (VALUES
-           ('caja_modo', 'blando'),
-           ('caja_estricto_bypass_admin', 'false')
-         ) AS v(clave, valor)
-        WHERE NOT EXISTS (SELECT 1 FROM configuraciones c WHERE c.clave = v.clave)`,
-    ).catch(() => undefined);
-
-    this.metaApertura = null;
-    this.metaCierre = null;
-  }
-
-  private async columnas(tabla: string): Promise<Set<string>> {
-    const filas = await this.dataSource.query(
-      `SELECT column_name
-         FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = $1`,
-      [tabla],
-    );
-    return new Set((filas as { column_name: string }[]).map((f) => f.column_name));
-  }
-
-  private async metaAp(): Promise<MetaApertura> {
-    if (this.metaApertura?.listo) return this.metaApertura;
-    const cols = await this.columnas('aperturas_caja');
-    const colFecha = ['fecha', 'fecha_apertura', 'abierto_en', 'created_at'].find((c) => cols.has(c)) ?? null;
-    const colMonto = ['monto_inicial', 'saldo_inicial', 'monto_apertura', 'monto'].find((c) => cols.has(c)) ?? null;
-    this.metaApertura = { colFecha, colMonto, listo: true };
-    return this.metaApertura;
-  }
-
-  private async metaCi(): Promise<MetaCierre> {
-    if (this.metaCierre?.listo) return this.metaCierre;
-    const cols = await this.columnas('cierres_caja');
-    const colFecha = ['fecha', 'fecha_cierre', 'cerrado_en', 'created_at'].find((c) => cols.has(c)) ?? null;
-    const colMonto = ['monto_conteo', 'monto_cierre', 'saldo_final', 'monto'].find((c) => cols.has(c)) ?? null;
-    const colObs = ['observacion', 'observaciones', 'nota', 'comentario'].find((c) => cols.has(c)) ?? null;
-    this.metaCierre = {
-      colFecha,
-      colMonto,
-      colObs,
-      tieneIdUsuario: cols.has('id_usuario'),
-      listo: true,
+    this.meta = {
+      snapshot,
+      apertura: {
+        colFecha: primera(colsAp, ['fecha', 'fecha_apertura', 'abierto_en', 'created_at']),
+        colMonto: primera(colsAp, ['monto_inicial', 'saldo_inicial', 'monto_apertura', 'monto']),
+      },
+      cierre: {
+        colFecha: primera(colsCi, ['fecha', 'fecha_cierre', 'cerrado_en', 'created_at']),
+        colMonto: primera(colsCi, ['monto_conteo', 'monto_cierre', 'saldo_final']),
+        colObs: primera(colsCi, ['observacion', 'observaciones', 'nota', 'comentario']),
+        tieneIdUsuario: colsCi.has('id_usuario'),
+        tieneMontoFinal: colsCi.has('monto_final'),
+      },
+      caja: {
+        exprNombre: colsCaja.has('nombre')
+          ? `COALESCE(c.nombre, 'Caja ' || c.id_caja::text)`
+          : colsCaja.has('descripcion')
+            ? `COALESCE(c.descripcion, 'Caja ' || c.id_caja::text)`
+            : `'Caja ' || c.id_caja::text`,
+        tieneSucursal: colsCaja.has('id_sucursal'),
+      },
     };
-    return this.metaCierre;
+    return this.meta;
   }
 
+  /** caja_modo (configuraciones, caché de 60 s). */
   async modoCaja(): Promise<'blando' | 'estricto'> {
-    const filas = await this.dataSource.query(
-      `SELECT valor FROM configuraciones WHERE clave = 'caja_modo' LIMIT 1`,
-    );
-    const v = String(filas[0]?.valor ?? 'blando').toLowerCase();
+    const v = (await this.config.obtenerTexto('caja_modo', 'blando')).trim().toLowerCase();
     return v === 'estricto' ? 'estricto' : 'blando';
   }
 
   async bypassAdminEstricto(): Promise<boolean> {
-    const filas = await this.dataSource.query(
-      `SELECT valor FROM configuraciones WHERE clave = 'caja_estricto_bypass_admin' LIMIT 1`,
-    );
-    const v = String(filas[0]?.valor ?? 'false').toLowerCase();
-    return ['true', '1', 'si', 'sí'].includes(v);
+    return this.config.obtenerBooleano('caja_estricto_bypass_admin', false);
   }
 
-  async sesionUsuario(idUsuario: number): Promise<AperturaSesion | null> {
-    await this.asegurarSchema();
-    const meta = await this.metaAp();
-    const orden = meta.colFecha ? `a.${meta.colFecha} DESC` : 'a.id_apertura DESC';
-    const selFecha = meta.colFecha ? `a.${meta.colFecha}` : 'NULL';
-    const selMonto = meta.colMonto ? `a.${meta.colMonto}` : 'NULL';
-
-    const nombreExpr = await this.exprNombreCaja('c');
-    const colsCaja = await this.columnas('cajas');
-    const joinSuc = colsCaja.has('id_sucursal')
-      ? 'LEFT JOIN sucursales s ON s.id_sucursal = c.id_sucursal'
-      : '';
-    const selSuc = colsCaja.has('id_sucursal')
+  /** SELECT de una apertura con su caja y sucursal (las columnas dependen del esquema). */
+  private selectApertura(m: MetaSesion): { campos: string; joins: string } {
+    const selFecha = m.apertura.colFecha ? `a.${m.apertura.colFecha}` : 'NULL';
+    const selMonto = m.apertura.colMonto ? `a.${m.apertura.colMonto}` : 'NULL';
+    const selSuc = m.caja.tieneSucursal
       ? 'c.id_sucursal, s.nombre AS sucursal_nombre'
       : 'NULL::int AS id_sucursal, NULL::text AS sucursal_nombre';
-
-    const filas = await this.dataSource.query(
-      `SELECT a.id_apertura,
+    return {
+      campos: `a.id_apertura,
               a.id_caja,
-              ${nombreExpr} AS caja_nombre,
+              ${m.caja.exprNombre} AS caja_nombre,
               ${selSuc},
               a.id_usuario,
               ${selFecha} AS fecha,
-              ${selMonto} AS monto_inicial
+              ${selMonto} AS monto_inicial`,
+      joins: `JOIN cajas c ON c.id_caja = a.id_caja
+         ${m.caja.tieneSucursal ? 'LEFT JOIN sucursales s ON s.id_sucursal = c.id_sucursal' : ''}`,
+    };
+  }
+
+  async sesionUsuario(idUsuario: number): Promise<AperturaSesion | null> {
+    const m = await this.metaSesion();
+    const { campos, joins } = this.selectApertura(m);
+    const orden = m.apertura.colFecha ? `a.${m.apertura.colFecha} DESC, a.id_apertura DESC` : 'a.id_apertura DESC';
+    const filas = await this.dataSource.query(
+      `SELECT ${campos}
          FROM aperturas_caja a
-         JOIN cajas c ON c.id_caja = a.id_caja
-         ${joinSuc}
+         ${joins}
         WHERE a.id_usuario = $1
           AND NOT EXISTS (
                 SELECT 1 FROM cierres_caja ci WHERE ci.id_apertura = a.id_apertura
@@ -170,9 +166,7 @@ export class CajaSesionRepository {
         LIMIT 1`,
       [idUsuario],
     );
-
-    if (!filas[0]) return null;
-    return this.mapApertura(filas[0]);
+    return filas[0] ? this.mapApertura(filas[0]) : null;
   }
 
   async tieneAperturaAbiertaUsuario(idUsuario: number, manager?: EntityManager): Promise<boolean> {
@@ -213,53 +207,23 @@ export class CajaSesionRepository {
     return filas.length > 0;
   }
 
-  private async exprNombreCaja(alias = 'c'): Promise<string> {
-    const cols = await this.columnas('cajas');
-    if (cols.has('nombre')) return `COALESCE(${alias}.nombre, 'Caja ' || ${alias}.id_caja::text)`;
-    if (cols.has('descripcion')) {
-      return `COALESCE(${alias}.descripcion, 'Caja ' || ${alias}.id_caja::text)`;
-    }
-    return `'Caja ' || ${alias}.id_caja::text`;
-  }
-
   async listarDisponibles(): Promise<CajaDisponible[]> {
-    await this.asegurarSchema();
-    const nombreExpr = await this.exprNombreCaja('c');
-    const cols = await this.columnas('cajas');
-    const tieneSucursal = cols.has('id_sucursal');
-
-    const filas = tieneSucursal
-      ? await this.dataSource.query(
-          `SELECT c.id_caja,
-                  ${nombreExpr} AS nombre,
-                  c.id_sucursal,
-                  s.nombre AS sucursal_nombre,
-                  EXISTS (
-                    SELECT 1 FROM aperturas_caja a
-                     WHERE a.id_caja = c.id_caja
-                       AND NOT EXISTS (
-                             SELECT 1 FROM cierres_caja ci WHERE ci.id_apertura = a.id_apertura
-                           )
-                  ) AS ocupada
-             FROM cajas c
-             LEFT JOIN sucursales s ON s.id_sucursal = c.id_sucursal
-            ORDER BY c.id_caja ASC`,
-        )
-      : await this.dataSource.query(
-          `SELECT c.id_caja,
-                  ${nombreExpr} AS nombre,
-                  NULL::int AS id_sucursal,
-                  NULL::text AS sucursal_nombre,
-                  EXISTS (
-                    SELECT 1 FROM aperturas_caja a
-                     WHERE a.id_caja = c.id_caja
-                       AND NOT EXISTS (
-                             SELECT 1 FROM cierres_caja ci WHERE ci.id_apertura = a.id_apertura
-                           )
-                  ) AS ocupada
-             FROM cajas c
-            ORDER BY c.id_caja ASC`,
-        );
+    const m = await this.metaSesion();
+    const filas = await this.dataSource.query(
+      `SELECT c.id_caja,
+              ${m.caja.exprNombre} AS nombre,
+              ${m.caja.tieneSucursal ? 'c.id_sucursal, s.nombre AS sucursal_nombre' : 'NULL::int AS id_sucursal, NULL::text AS sucursal_nombre'},
+              EXISTS (
+                SELECT 1 FROM aperturas_caja a
+                 WHERE a.id_caja = c.id_caja
+                   AND NOT EXISTS (
+                         SELECT 1 FROM cierres_caja ci WHERE ci.id_apertura = a.id_apertura
+                       )
+              ) AS ocupada
+         FROM cajas c
+         ${m.caja.tieneSucursal ? 'LEFT JOIN sucursales s ON s.id_sucursal = c.id_sucursal' : ''}
+        ORDER BY c.id_caja ASC`,
+    );
 
     return (filas as any[]).map((f) => ({
       id_caja: Number(f.id_caja),
@@ -270,16 +234,21 @@ export class CajaSesionRepository {
     }));
   }
 
+  /**
+   * Abre el turno. Candados en orden fijo: usuario (consultivo) → fila de la caja. Así ni el
+   * mismo usuario abre dos cajas a la vez ni dos usuarios abren la misma caja.
+   */
   async abrir(params: {
     idCaja: number;
     idUsuario: number;
     montoInicial?: number | null;
   }): Promise<AperturaSesion> {
-    await this.asegurarSchema();
-    const meta = await this.metaAp();
+    const m = await this.metaSesion();
 
     return this.dataSource.transaction(async (manager) => {
-      // Evita doble click / carrera
+      await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `${CANDADO_APERTURA_USUARIO}${params.idUsuario}`,
+      ]);
       await manager.query(`SELECT id_caja FROM cajas WHERE id_caja = $1 FOR UPDATE`, [params.idCaja]);
 
       if (await this.tieneAperturaAbiertaUsuario(params.idUsuario, manager)) {
@@ -290,20 +259,22 @@ export class CajaSesionRepository {
       }
 
       const cols = ['id_caja', 'id_usuario'];
-      const vals: any[] = [params.idCaja, params.idUsuario];
-      if (meta.colFecha) {
-        cols.push(meta.colFecha);
-        vals.push(new Date());
+      const vals: unknown[] = [params.idCaja, params.idUsuario];
+      if (m.apertura.colMonto && params.montoInicial != null && Number.isFinite(Number(params.montoInicial))) {
+        cols.push(m.apertura.colMonto);
+        vals.push(Dinero.desdeNumeroRedondeado(Number(params.montoInicial)).aTexto());
       }
-      if (meta.colMonto && params.montoInicial != null && Number.isFinite(Number(params.montoInicial))) {
-        cols.push(meta.colMonto);
-        vals.push(Number(params.montoInicial));
+      const placeholders = vals.map((_, i) => `$${i + 1}`);
+      // La fecha la pone la BD (NOW()), igual que ventas.fecha: el turno y sus ventas
+      // se comparan con el mismo reloj.
+      if (m.apertura.colFecha) {
+        cols.push(m.apertura.colFecha);
+        placeholders.push('NOW()');
       }
 
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
       const insertadas = await manager.query(
         `INSERT INTO aperturas_caja (${cols.join(', ')})
-         VALUES (${placeholders})
+         VALUES (${placeholders.join(', ')})
          RETURNING id_apertura`,
         vals,
       );
@@ -320,36 +291,29 @@ export class CajaSesionRepository {
     manager?: EntityManager,
   ): Promise<AperturaSesion | null> {
     const q = manager ?? this.dataSource;
-    const meta = await this.metaAp();
-    const selFecha = meta.colFecha ? `a.${meta.colFecha}` : 'NULL';
-    const selMonto = meta.colMonto ? `a.${meta.colMonto}` : 'NULL';
-
-    const nombreExpr = await this.exprNombreCaja('c');
-    const colsCaja = await this.columnas('cajas');
-    const joinSuc = colsCaja.has('id_sucursal')
-      ? 'LEFT JOIN sucursales s ON s.id_sucursal = c.id_sucursal'
-      : '';
-    const selSuc = colsCaja.has('id_sucursal')
-      ? 'c.id_sucursal, s.nombre AS sucursal_nombre'
-      : 'NULL::int AS id_sucursal, NULL::text AS sucursal_nombre';
-
+    const m = await this.metaSesion();
+    const { campos, joins } = this.selectApertura(m);
     const filas = await q.query(
-      `SELECT a.id_apertura,
-              a.id_caja,
-              ${nombreExpr} AS caja_nombre,
-              ${selSuc},
-              a.id_usuario,
-              ${selFecha} AS fecha,
-              ${selMonto} AS monto_inicial
+      `SELECT ${campos}
          FROM aperturas_caja a
-         JOIN cajas c ON c.id_caja = a.id_caja
-         ${joinSuc}
+         ${joins}
         WHERE a.id_apertura = $1
         LIMIT 1`,
       [idApertura],
     );
-    if (!filas[0]) return null;
-    return this.mapApertura(filas[0]);
+    return filas[0] ? this.mapApertura(filas[0]) : null;
+  }
+
+  /**
+   * Bloquea la fila de la apertura (FOR UPDATE). Cierre, arqueo e ingresos/egresos del turno
+   * toman este mismo candado primero, así no se cruzan entre sí.
+   */
+  async bloquearApertura(manager: EntityManager, idApertura: number): Promise<boolean> {
+    const filas = await manager.query(
+      `SELECT id_apertura FROM aperturas_caja WHERE id_apertura = $1 FOR UPDATE`,
+      [idApertura],
+    );
+    return filas.length > 0;
   }
 
   async estaCerrada(idApertura: number, manager?: EntityManager): Promise<boolean> {
@@ -361,127 +325,137 @@ export class CajaSesionRepository {
     return filas.length > 0;
   }
 
-  async cerrar(params: {
-    idApertura: number;
-    idUsuario: number;
-    montoConteo?: number | null;
-    observacion?: string | null;
-  }): Promise<{ id_apertura: number; id_cierre: number | null; cerrada: boolean; monto_conteo: number | null }> {
-    await this.asegurarSchema();
-    const meta = await this.metaCi();
+  /**
+   * Cierra el turno en una transacción: bloquea la apertura, verifica que siga abierta,
+   * deja que `preparar` (el arqueo de cierre) complete los datos y registra el cierre.
+   */
+  async cerrar(
+    params: {
+      idApertura: number;
+      idUsuario: number;
+      montoConteo?: number | null;
+      observacion?: string | null;
+    },
+    preparar?: (manager: EntityManager) => Promise<PreparacionCierre>,
+  ): Promise<ResultadoCierre> {
+    const m = await this.metaSesion();
 
     return this.dataSource.transaction(async (manager) => {
-      const apertura = await this.obtenerAperturaPorId(params.idApertura, manager);
-      if (!apertura) throw new Error('CAJA_APERTURA_NO_ENCONTRADA');
+      if (!(await this.bloquearApertura(manager, params.idApertura))) {
+        throw new Error('CAJA_APERTURA_NO_ENCONTRADA');
+      }
       if (await this.estaCerrada(params.idApertura, manager)) {
         throw new Error('CAJA_YA_CERRADA');
       }
 
+      const prep: PreparacionCierre = preparar ? await preparar(manager) : {};
+      const montoConteo = prep.montoConteo !== undefined ? prep.montoConteo : params.montoConteo;
+      const observacion = prep.observacion !== undefined && prep.observacion !== null && String(prep.observacion).trim()
+        ? prep.observacion
+        : params.observacion;
+      const conteoValido = montoConteo != null && Number.isFinite(Number(montoConteo));
+
       const cols = ['id_apertura'];
-      const vals: any[] = [params.idApertura];
-      if (meta.tieneIdUsuario) {
+      const vals: unknown[] = [params.idApertura];
+      if (m.cierre.tieneIdUsuario) {
         cols.push('id_usuario');
         vals.push(params.idUsuario);
       }
-      if (meta.colFecha) {
-        cols.push(meta.colFecha);
-        vals.push(new Date());
+      if (m.cierre.colMonto && conteoValido) {
+        cols.push(m.cierre.colMonto);
+        vals.push(Dinero.desdeNumeroRedondeado(Number(montoConteo)).aTexto());
       }
-      if (meta.colMonto && params.montoConteo != null && Number.isFinite(Number(params.montoConteo))) {
-        cols.push(meta.colMonto);
-        vals.push(Number(params.montoConteo));
+      if (m.cierre.colObs && observacion != null && String(observacion).trim()) {
+        cols.push(m.cierre.colObs);
+        vals.push(String(observacion).trim().slice(0, 500));
       }
-      if (meta.colObs && params.observacion != null && String(params.observacion).trim()) {
-        cols.push(meta.colObs);
-        vals.push(String(params.observacion).trim());
+      if (m.cierre.tieneMontoFinal && prep.montoFinal != null) {
+        cols.push('monto_final');
+        vals.push(prep.montoFinal);
+      }
+      const placeholders = vals.map((_, i) => `$${i + 1}`);
+      if (m.cierre.colFecha) {
+        cols.push(m.cierre.colFecha);
+        placeholders.push('NOW()');
       }
 
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
       let idCierre: number | null = null;
       try {
         const insertadas = await manager.query(
           `INSERT INTO cierres_caja (${cols.join(', ')})
-           VALUES (${placeholders})
+           VALUES (${placeholders.join(', ')})
            RETURNING *`,
           vals,
         );
         const row = insertadas[0] ?? {};
-        idCierre =
-          row.id_cierre != null
-            ? Number(row.id_cierre)
-            : row.id != null
-              ? Number(row.id)
-              : null;
+        idCierre = row.id_cierre != null ? Number(row.id_cierre) : row.id != null ? Number(row.id) : null;
       } catch (e) {
         this.log.error(`Error al insertar cierre: ${String((e as Error)?.message ?? e)}`);
         throw e;
       }
 
+      if (idCierre != null && prep.alCerrar) await prep.alCerrar(manager, idCierre);
+
       return {
         id_apertura: params.idApertura,
         id_cierre: idCierre,
         cerrada: true,
-        monto_conteo:
-          params.montoConteo != null && Number.isFinite(Number(params.montoConteo))
-            ? Number(params.montoConteo)
-            : null,
+        monto_conteo: conteoValido ? Dinero.desdeNumeroRedondeado(Number(montoConteo)).aNumero() : null,
       };
     });
   }
 
   /**
-   * Resumen blando del turno: ventas de la caja desde la apertura
-   * (no bloquea; solo informa al cerrar).
+   * Resumen informativo del turno: ventas de la caja desde la apertura (no bloquea; solo
+   * informa al cerrar). Total y desglose por método en paralelo.
    */
-  async resumenTurno(apertura: AperturaSesion): Promise<{
-    ventas: number;
-    total: number;
-    por_metodo: { metodo: string; total: number; cantidad: number }[];
-  }> {
-    await this.asegurarSchema();
-    const desde = apertura.fecha ? new Date(apertura.fecha) : null;
-    if (!desde || !apertura.id_caja) {
+  async resumenTurno(apertura: AperturaSesion): Promise<ResumenTurno> {
+    const m = await this.metaSesion();
+    if (!apertura.fecha || !apertura.id_caja || !m.apertura.colFecha) {
       return { ventas: 0, total: 0, por_metodo: [] };
     }
+    // La ventana se arma en SQL con la fecha guardada de la apertura (sin ir y volver a JS).
+    const sinAnuladas = m.snapshot.tieneColumna('ventas', 'estado')
+      ? `AND COALESCE(v.estado, 'activa') <> 'anulada'`
+      : '';
+    const ventana = `v.id_caja = a.id_caja
+            AND v.fecha >= a.${m.apertura.colFecha}
+            ${sinAnuladas}`;
 
-    const totales = await this.dataSource.query(
-      `SELECT COUNT(*)::int AS ventas, COALESCE(SUM(v.total), 0)::float AS total
-         FROM ventas v
-        WHERE v.id_caja = $1
-          AND v.fecha >= $2
-          AND COALESCE(v.estado, 'activa') <> 'anulada'`,
-      [apertura.id_caja, desde],
-    );
-
-    let porMetodo: { metodo: string; total: number; cantidad: number }[] = [];
-    try {
-      const filas = await this.dataSource.query(
+    const [totales, filas] = await Promise.all([
+      this.dataSource.query(
+        `SELECT COUNT(*)::int AS ventas, COALESCE(SUM(v.total), 0)::text AS total
+           FROM aperturas_caja a
+           JOIN ventas v ON ${ventana}
+          WHERE a.id_apertura = $1`,
+        [apertura.id_apertura],
+      ),
+      this.dataSource.query(
         `SELECT COALESCE(mp.nombre, 'Otro') AS metodo,
-                COALESCE(SUM(vp.monto), 0)::float AS total,
+                COALESCE(SUM(vp.monto), 0)::text AS total,
                 COUNT(*)::int AS cantidad
-           FROM venta_pago vp
-           JOIN ventas v ON v.id_venta = vp.id_venta
+           FROM aperturas_caja a
+           JOIN ventas v ON ${ventana}
+           JOIN venta_pago vp ON vp.id_venta = v.id_venta
            LEFT JOIN metodos_pago mp ON mp.id_metodo = vp.id_metodo
-          WHERE v.id_caja = $1
-            AND v.fecha >= $2
-            AND COALESCE(v.estado, 'activa') <> 'anulada'
+          WHERE a.id_apertura = $1
           GROUP BY 1
-          ORDER BY total DESC`,
-        [apertura.id_caja, desde],
-      );
-      porMetodo = (filas || []).map((f: any) => ({
-        metodo: String(f.metodo || 'Otro'),
-        total: Number(f.total || 0),
-        cantidad: Number(f.cantidad || 0),
-      }));
-    } catch {
-      porMetodo = [];
-    }
+          ORDER BY SUM(vp.monto) DESC`,
+        [apertura.id_apertura],
+      ).catch((e: Error) => {
+        this.log.warn(`Resumen por método no disponible: ${e?.message ?? e}`);
+        return [];
+      }),
+    ]);
 
     return {
       ventas: Number(totales[0]?.ventas ?? 0),
-      total: Number(totales[0]?.total ?? 0),
-      por_metodo: porMetodo,
+      total: Dinero.desdeBd(totales[0]?.total).aNumero(),
+      por_metodo: (filas || []).map((f: any) => ({
+        metodo: String(f.metodo || 'Otro'),
+        total: Dinero.desdeBd(f.total).aNumero(),
+        cantidad: Number(f.cantidad || 0),
+      })),
     };
   }
 

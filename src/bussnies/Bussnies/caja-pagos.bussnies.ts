@@ -5,6 +5,12 @@ import {
 } from '@nestjs/common';
 import { CajaPagosRepository } from '../../repository/Repository/caja-pagos.repository';
 import { randomBytes } from 'crypto';
+import {
+  ActualizarCuentaBancariaRequest,
+  CuentaBancariaRequest,
+  IniciarYapeRequest,
+} from '../../models/model/caja.request';
+import { relanzarHttp } from '../../caja/http/errores-caja.http';
 
 @Injectable()
 export class CajaPagosBussnies {
@@ -14,28 +20,48 @@ export class CajaPagosBussnies {
     return this.repo.pasarelaPos();
   }
 
-  listarCuentas(todas = false) {
-    return this.repo.listarCuentas(!todas);
+  async listarCuentas(todas = false) {
+    try {
+      return await this.repo.listarCuentas(!todas);
+    } catch (error) {
+      relanzarHttp(error);
+    }
   }
 
-  async crearCuenta(body: any) {
+  async crearCuenta(body: CuentaBancariaRequest) {
     if (!String(body?.banco ?? '').trim()) {
       throw new BadRequestException('El banco es obligatorio');
     }
-    return this.repo.crearCuenta(body);
+    try {
+      return await this.repo.crearCuenta(body);
+    } catch (error) {
+      relanzarHttp(error);
+    }
   }
 
-  async actualizarCuenta(id: number, body: any) {
-    const fila = await this.repo.actualizarCuenta(id, body);
+  async actualizarCuenta(id: number, body: ActualizarCuentaBancariaRequest) {
+    if (body?.banco !== undefined && !String(body.banco).trim()) {
+      throw new BadRequestException('El banco no puede quedar vacío');
+    }
+    let fila: unknown;
+    try {
+      fila = await this.repo.actualizarCuenta(id, body ?? {});
+    } catch (error) {
+      relanzarHttp(error);
+    }
     if (!fila) throw new NotFoundException('Cuenta no encontrada');
     return fila;
   }
 
-  eliminarCuenta(id: number) {
-    return this.repo.eliminarCuenta(id);
+  async eliminarCuenta(id: number) {
+    try {
+      return await this.repo.eliminarCuenta(id);
+    } catch (error) {
+      relanzarHttp(error);
+    }
   }
 
-  async iniciarYape(body: { monto: number; email?: string; descripcion?: string }) {
+  async iniciarYape(body: IniciarYapeRequest) {
     const monto = Number(body?.monto);
     if (!(monto > 0)) throw new BadRequestException('Monto inválido');
 
@@ -75,9 +101,11 @@ export class CajaPagosBussnies {
   }
 
   async verificarYape(orderId: string) {
-    if (!orderId?.trim()) throw new BadRequestException('order_id requerido');
+    const id = String(orderId ?? '').trim();
+    if (!id) throw new BadRequestException('order_id requerido');
+    if (id.length > 80) throw new BadRequestException('order_id inválido');
     try {
-      const estado = await this.repo.consultarOrdenCulqi(orderId.trim());
+      const estado = await this.repo.consultarOrdenCulqi(id);
       return {
         ...estado,
         validacion: estado.pagado ? 'culqi' : 'pendiente',

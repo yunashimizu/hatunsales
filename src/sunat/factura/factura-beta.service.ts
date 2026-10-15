@@ -38,8 +38,8 @@ export interface EmitirFacturaBetaResult {
   mensaje: string;
 }
 
-/** Serie de Factura: letra F + 3 digitos (ej. F001), tal como exige SUNAT (catalogo de series, distinto de la serie de Boleta que empieza con B). */
-const SERIE_FACTURA_REGEX = /^F\d{3}$/i;
+/** Serie de Factura: F + 3 letras o dígitos (F001, FFF1, FC01), distinta de la de Boleta (B…). */
+const SERIE_FACTURA_REGEX = /^F[A-Z0-9]{3}$/i;
 
 export class FacturaBetaService {
   private readonly builder = new InvoiceUblBuilder();
@@ -49,7 +49,7 @@ export class FacturaBetaService {
 
     const resultado = this.builder.build({
       tipoDocumento: '01',
-      serie: dto.serie,
+      serie: dto.serie.trim().toUpperCase(),
       numero: dto.numero,
       fechaEmision: dto.fechaEmision,
       horaEmision: dto.horaEmision,
@@ -92,8 +92,8 @@ export class FacturaBetaService {
     if (!dto.rucCliente || dto.rucCliente.length !== 11) {
       throw new Error('El RUC del cliente debe tener 11 dígitos');
     }
-    if (!dto.serie || !SERIE_FACTURA_REGEX.test(dto.serie)) {
-      throw new Error('La serie debe tener formato F###');
+    if (!dto.serie || !SERIE_FACTURA_REGEX.test(dto.serie.trim())) {
+      throw new Error('La serie debe tener formato F### (F seguida de 3 letras o dígitos, p. ej. F001 o FFF1)');
     }
     if (!dto.items || dto.items.length === 0) {
       throw new Error('La factura debe tener al menos una línea');

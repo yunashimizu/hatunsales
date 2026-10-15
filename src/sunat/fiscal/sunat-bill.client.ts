@@ -1,5 +1,17 @@
-import axios from 'axios';
 import { CdrExtractorUtil, SoapFaultInfo } from '../cdr/cdr-extractor.util';
+import { construirSobreSoap, MetodoSoapSunat, soapActionDe } from '../nucleo/soap/sobre-soap';
+import { ErrorTransporteSoap, TransporteSoap, TransporteSoapAxios } from '../nucleo/soap/transporte-soap';
+import { escaparXml } from '../nucleo/xml/escritor-xml';
+
+// Cliente nuevo del núcleo (contrato §12.1): úselo en todo código nuevo.
+export {
+  FabricaClienteSoapSunat,
+  SunatSoapClient,
+  TIMEOUT_POS_MS,
+  TIMEOUT_WORKER_MS,
+  ESTADOS_CONSULTA_SUNAT,
+} from '../nucleo/soap/sunat-soap-client';
+export type { ConfiguracionClienteSoap, DependenciasClienteSoap } from '../nucleo/soap/sunat-soap-client';
 
 export interface SunatBillClientConfig {
   username: string;
@@ -11,13 +23,15 @@ export interface SunatBillClientConfig {
 export interface SunatSoapResultado {
   ok: boolean;
   status: 'ACEPTADO' | 'PENDIENTE' | 'ERROR_TRANSPORTE' | 'RECHAZADO';
-  /** Cuerpo crudo de la respuesta SOAP, tal como llegó (incluye el envelope completo). */
+  /** Cuerpo de la respuesta SOAP con las credenciales redactadas. */
   raw: string;
   /** XML del CDR/ApplicationResponse ya descomprimido y decodificado, listo para CdrParserService.parse(). null si no venía o no se pudo extraer. */
   cdrXml: string | null;
   /** Detalle del SOAP Fault (credenciales inválidas, XML mal formado, etc.) cuando SUNAT devuelve uno en vez de un CDR. */
   fault: SoapFaultInfo | null;
   message: string;
+  /** Estado HTTP de la respuesta (0 si no hubo respuesta). */
+  httpStatus?: number;
 }
 
 export interface SunatSendSummaryResultado {
@@ -40,101 +54,95 @@ export interface SunatGetStatusResultado {
 }
 
 /**
- * Cliente SOAP para los servicios web de SUNAT (billService): envío directo
- * de Factura/Boleta/Nota de Crédito/Guía de Remisión, sin OSE ni facturador
- * de pago. Mismo endpoint y credenciales (usuario/clave SOL vía WS-Security
- * UsernameToken) en BETA y en PRODUCCIÓN — solo cambia la URL del endpoint.
+ * @deprecated Cliente heredado (lo usan la GRE SOAP y los proveedores BETA).
+ * El código nuevo usa SunatSoapClient, que normaliza y clasifica las
+ * respuestas. Se mantienen sus métodos y tipos de retorno; se corrigieron el
+ * SOAPAction (urn:método, como declaran los WSDL), el espacio de nombres de
+ * WS-Security y el escape XML de usuario y clave.
  */
 export class SunatBillClient {
   private readonly cdrExtractor = new CdrExtractorUtil();
 
-  constructor(private readonly config: SunatBillClientConfig) {}
+  constructor(
+    private readonly config: SunatBillClientConfig,
+    private readonly transporte: TransporteSoap = new TransporteSoapAxios(),
+  ) {}
 
-  private buildEnvelope(metodo: string, argumentosXml: string): string {
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ser="http://service.sunat.gob.pe">
-  <soapenv:Header>
-    <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-2004-01-wss-wssecurity-secext-1.0.xsd">
-      <wsse:UsernameToken>
-        <wsse:Username>${this.config.username}</wsse:Username>
-        <wsse:Password>${this.config.password}</wsse:Password>
-      </wsse:UsernameToken>
-    </wsse:Security>
-  </soapenv:Header>
-  <soapenv:Body>
-    <ser:${metodo}>
-      ${argumentosXml}
-    </ser:${metodo}>
-  </soapenv:Body>
-</soapenv:Envelope>`;
+  private buildEnvelope(metodo: MetodoSoapSunat, argumentos: ReadonlyArray<readonly [string, string]>): string {
+    return construirSobreSoap(metodo, { usuario: this.config.username ?? '', clave: this.config.password ?? '' }, argumentos);
   }
 
   buildSendBillEnvelope(fileName: string, contentFileBase64: string): string {
-    return this.buildEnvelope('sendBill', `<fileName>${fileName}</fileName>
-      <contentFile>${contentFileBase64}</contentFile>`);
+    return this.buildEnvelope('sendBill', [['fileName', fileName], ['contentFile', contentFileBase64]]);
   }
 
   buildSendSummaryEnvelope(fileName: string, contentFileBase64: string): string {
-    return this.buildEnvelope('sendSummary', `<fileName>${fileName}</fileName>
-      <contentFile>${contentFileBase64}</contentFile>`);
+    return this.buildEnvelope('sendSummary', [['fileName', fileName], ['contentFile', contentFileBase64]]);
   }
 
   buildGetStatusEnvelope(ticket: string): string {
-    return this.buildEnvelope('getStatus', `<ticket>${ticket}</ticket>`);
+    return this.buildEnvelope('getStatus', [['ticket', ticket]]);
   }
 
-  private async postSoap(envelope: string, soapAction: string): Promise<{ ok: boolean; httpStatus: number; raw: string; message: string }> {
+  /** `cuerpo` (sin redactar) solo se usa para extraer el CDR; `raw` es lo único que se devuelve al llamador. */
+  private async postSoap(
+    envelope: string,
+    metodo: MetodoSoapSunat,
+  ): Promise<{ ok: boolean; httpStatus: number; cuerpo: string; raw: string; message: string }> {
     if (!this.config.username || !this.config.password || !this.config.endpoint) {
       return {
         ok: false,
         httpStatus: 0,
-        raw: envelope,
+        cuerpo: '',
+        raw: this.redactarCredenciales(envelope),
         message: 'Credenciales o endpoint SUNAT no configurados para envío real.',
       };
     }
 
     try {
-      const response = await axios.post(this.config.endpoint, envelope, {
-        headers: {
-          'Content-Type': 'text/xml; charset=utf-8',
-          SOAPAction: `"http://service.sunat.gob.pe/ser:${soapAction}"`,
-        },
-        timeout: this.config.timeoutMs ?? 30000,
-        validateStatus: () => true,
+      const respuesta = await this.transporte.enviar({
+        url: this.config.endpoint,
+        cuerpo: envelope,
+        soapAction: soapActionDe(metodo),
+        timeoutMs: this.config.timeoutMs ?? 30000,
       });
-
-      const raw = String(response.data ?? '');
-      const enRango2xx = response.status >= 200 && response.status < 300;
-
+      const enRango2xx = respuesta.estadoHttp >= 200 && respuesta.estadoHttp < 300;
       return {
         ok: enRango2xx,
-        httpStatus: response.status,
-        raw: this.redactarCredenciales(raw),
-        message: enRango2xx ? 'SOAP enviado a SUNAT.' : `Error HTTP ${response.status}: ${response.statusText}`,
+        httpStatus: respuesta.estadoHttp,
+        cuerpo: respuesta.cuerpo,
+        raw: this.redactarCredenciales(respuesta.cuerpo),
+        message: enRango2xx ? 'SOAP enviado a SUNAT.' : `Error HTTP ${respuesta.estadoHttp}`,
       };
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const mensaje = error instanceof ErrorTransporteSoap || error instanceof Error ? error.message : 'Error de transporte al comunicarse con SUNAT.';
       return {
         ok: false,
         httpStatus: 0,
+        cuerpo: '',
         raw: this.redactarCredenciales(envelope),
-        message: error?.message ?? 'Error de transporte al comunicarse con SUNAT.',
+        message: this.redactarCredenciales(mensaje),
       };
     }
   }
 
   /**
-   * Nunca se debe guardar el usuario/clave SOL en logs ni en la base de
-   * datos: cuando falta configuración o la petición falla antes de llegar a
-   * SUNAT, `raw` es el envelope SALIENTE (que sí trae las credenciales en
-   * <wsse:UsernameToken>). Se reemplazan por "***" antes de devolverlo, sea
-   * cual sea el llamador (aunque solo lo persista él mismo).
+   * Nunca se guarda el usuario ni la clave SOL en logs o en la base: si la
+   * petición falla antes de llegar a SUNAT, `raw` es el envelope SALIENTE
+   * (que trae el UsernameToken). Se reemplazan por "***" (también escapados).
    */
   private redactarCredenciales(texto: string): string {
-    if (!this.config.username && !this.config.password) return texto;
-    let resultado = texto;
-    if (this.config.username) resultado = resultado.split(this.config.username).join('***');
-    if (this.config.password) resultado = resultado.split(this.config.password).join('***');
+    let resultado = String(texto ?? '');
+    for (const secreto of [this.config.password, this.config.username]) {
+      if (!secreto) continue;
+      for (const forma of new Set([secreto, escaparXml(secreto)])) resultado = resultado.split(forma).join('***');
+    }
     return resultado;
+  }
+
+  private faultRedactado(cuerpo: string): SoapFaultInfo | null {
+    const fault = this.cdrExtractor.extraerFault(cuerpo);
+    return fault ? { ...fault, faultString: this.redactarCredenciales(fault.faultString) } : null;
   }
 
   /** Envío síncrono de UN comprobante (Factura, Boleta, Nota de Crédito o Guía). SUNAT responde de inmediato con el CDR. */
@@ -142,7 +150,7 @@ export class SunatBillClient {
     const envelope = this.buildSendBillEnvelope(fileName, contentFileBase64);
     const respuesta = await this.postSoap(envelope, 'sendBill');
 
-    const fault = this.cdrExtractor.extraerFault(respuesta.raw);
+    const fault = this.faultRedactado(respuesta.cuerpo);
     if (fault) {
       return {
         ok: false,
@@ -151,10 +159,11 @@ export class SunatBillClient {
         cdrXml: null,
         fault,
         message: `SUNAT rechazó la solicitud (${fault.faultCode}): ${fault.faultString}`,
+        httpStatus: respuesta.httpStatus,
       };
     }
 
-    const cdrXml = respuesta.ok ? this.cdrExtractor.extraerCdrXml(respuesta.raw) : null;
+    const cdrXml = respuesta.ok ? this.cdrExtractor.extraerCdrXml(respuesta.cuerpo) : null;
 
     return {
       ok: respuesta.ok && !!cdrXml,
@@ -163,15 +172,16 @@ export class SunatBillClient {
       cdrXml,
       fault: null,
       message: cdrXml ? 'CDR recibido de SUNAT.' : respuesta.message,
+      httpStatus: respuesta.httpStatus,
     };
   }
 
-  /** Envío asíncrono (Resumen Diario de Boletas, Comunicación de Baja): SUNAT devuelve un ticket, el CDR se consulta despues con getStatus. */
+  /** Envío asíncrono (Resumen Diario de Boletas, Comunicación de Baja): SUNAT devuelve un ticket, el CDR se consulta después con getStatus. */
   async sendSummary(fileName: string, contentFileBase64: string): Promise<SunatSendSummaryResultado> {
     const envelope = this.buildSendSummaryEnvelope(fileName, contentFileBase64);
     const respuesta = await this.postSoap(envelope, 'sendSummary');
 
-    const fault = this.cdrExtractor.extraerFault(respuesta.raw);
+    const fault = this.faultRedactado(respuesta.cuerpo);
     if (fault) {
       return {
         ok: false,
@@ -182,7 +192,7 @@ export class SunatBillClient {
       };
     }
 
-    const ticket = respuesta.ok ? this.cdrExtractor.extraerTicket(respuesta.raw) : null;
+    const ticket = respuesta.ok ? this.cdrExtractor.extraerTicket(respuesta.cuerpo) : null;
 
     return {
       ok: respuesta.ok && !!ticket,
@@ -198,7 +208,7 @@ export class SunatBillClient {
     const envelope = this.buildGetStatusEnvelope(ticket);
     const respuesta = await this.postSoap(envelope, 'getStatus');
 
-    const fault = this.cdrExtractor.extraerFault(respuesta.raw);
+    const fault = this.faultRedactado(respuesta.cuerpo);
     if (fault) {
       return {
         ok: false,
@@ -211,8 +221,8 @@ export class SunatBillClient {
       };
     }
 
-    const cdrXml = respuesta.ok ? this.cdrExtractor.extraerCdrXml(respuesta.raw) : null;
-    const statusCode = respuesta.ok ? this.cdrExtractor.extraerStatusCode(respuesta.raw) : null;
+    const cdrXml = respuesta.ok ? this.cdrExtractor.extraerCdrXml(respuesta.cuerpo) : null;
+    const statusCode = respuesta.ok ? this.cdrExtractor.extraerStatusCode(respuesta.cuerpo) : null;
 
     return {
       ok: respuesta.ok,

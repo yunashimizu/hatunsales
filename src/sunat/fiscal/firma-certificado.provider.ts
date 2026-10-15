@@ -1,105 +1,106 @@
+import { createHash, createPrivateKey, X509Certificate } from 'crypto';
 import { readFileSync } from 'fs';
-import * as forge from 'node-forge';
-import { SignedXml } from 'xml-crypto';
-import { DOMParser } from '@xmldom/xmldom';
+import { leerPkcs12 } from '../certificado/certificado-digital.util';
+import type { MaterialFirma } from '../nucleo/documento-fiscal.types';
+import { firmarXml, verificarFirmaXml } from '../nucleo/firma/firmador-xml';
+import { separarCertificadosPem } from '../nucleo/firma/material-certificado';
+
+// API del núcleo (contrato §12.1): firma genérica por raíz UBL, también para la GRE (DespatchAdvice).
+export { extraerDigestValue, FirmadorXmlSunat, firmarXml, verificarFirmaXml, ALGORITMOS_FIRMA_SUNAT } from '../nucleo/firma/firmador-xml';
+export type { OpcionesFirmaXml } from '../nucleo/firma/firmador-xml';
+export { prepararMaterialFirma, separarCertificadosPem } from '../nucleo/firma/material-certificado';
+export type { MaterialFirma } from '../nucleo/documento-fiscal.types';
 
 export interface CertificadoCargado {
   privateKeyPem: string;
   certificatePem: string;
 }
 
+/** Arma un MaterialFirma a partir de una clave y su certificado (elige la hoja si el PEM trae la cadena). */
+export function materialDesdeCertificado(certificado: CertificadoCargado): MaterialFirma {
+  const bloques = separarCertificadosPem(certificado.certificatePem);
+  let hoja: X509Certificate | null = null;
+  try {
+    const clave = createPrivateKey(certificado.privateKeyPem);
+    hoja = bloques.map((b) => new X509Certificate(b)).find((x) => x.checkPrivateKey(clave)) ?? null;
+  } catch {
+    hoja = null;
+  }
+  const referencia = hoja ?? (bloques[0] ? new X509Certificate(bloques[0]) : null);
+  return {
+    privateKeyPem: certificado.privateKeyPem,
+    certificatePem: certificado.certificatePem,
+    huellaSha256: referencia ? createHash('sha256').update(referencia.raw).digest('hex') : '',
+    vigenteHasta: referencia ? new Date(referencia.validTo) : new Date(0),
+    autofirmado: referencia ? referencia.checkIssued(referencia) : false,
+  };
+}
+
 /**
- * Lee un certificado digital .p12/.pfx (el CDT gratuito de SUNAT+RENIEC o uno
- * comercial de un PSC acreditado ante INDECOPI) y extrae la clave privada y
- * el certificado en formato PEM para poder firmar XML.
+ * Lee un certificado .p12/.pfx (CDT de SUNAT/RENIEC o uno comercial) y
+ * devuelve la clave privada y SU certificado (no el primero del archivo:
+ * en muchos .pfx el primero es el de la entidad certificadora). Acepta
+ * pkcs8ShroudedKeyBag y keyBag. Delega en certificado-digital.util (leerPkcs12),
+ * que traduce los errores a mensajes claros en español.
  */
 export class CertificadoDigitalService {
+  /** @deprecated Ruta heredada (SUNAT_CERT_PATH). El certificado real se sube por el panel y se guarda cifrado. */
   cargarDesdeArchivo(rutaP12: string, password: string): CertificadoCargado {
-    const buffer = readFileSync(rutaP12);
-    return this.cargarDesdeBuffer(buffer, password);
+    return this.cargarDesdeBuffer(readFileSync(rutaP12), password);
   }
 
   cargarDesdeBuffer(buffer: Buffer, password: string): CertificadoCargado {
-    let p12: forge.pkcs12.Pkcs12Pfx;
-    try {
-      const p12Asn1 = forge.asn1.fromDer(buffer.toString('binary'));
-      p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, password);
-    } catch (error: any) {
-      throw new Error(`No se pudo leer el certificado .p12: ${error?.message ?? 'archivo o clave inválidos'}`);
-    }
+    const leido = leerPkcs12(buffer, password);
+    return { privateKeyPem: leido.privateKeyPem, certificatePem: leido.certificatePem };
+  }
 
-    const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag] ?? [];
-    const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] ?? [];
-
-    const privateKey = keyBags[0]?.key;
-    const certificate = certBags[0]?.cert;
-
-    if (!privateKey || !certificate) {
-      throw new Error('El archivo .p12 no contiene una clave privada y un certificado válidos.');
-    }
-
+  /** MaterialFirma con los metadatos del certificado (huella, RUC, vigencia, autofirmado). */
+  materialDesdeBuffer(buffer: Buffer, password: string): MaterialFirma {
+    const leido = leerPkcs12(buffer, password);
     return {
-      privateKeyPem: forge.pki.privateKeyToPem(privateKey),
-      certificatePem: forge.pki.certificateToPem(certificate),
+      privateKeyPem: leido.privateKeyPem,
+      certificatePem: leido.certificatePem,
+      huellaSha256: leido.info.huellaSha256,
+      ruc: leido.info.ruc,
+      vigenteHasta: leido.info.vigenteHasta,
+      autofirmado: leido.info.autofirmado,
     };
   }
 }
 
 export interface FirmaCertificadoResultado {
   xmlFirmado: string;
+  /** DigestValue en base64 (valor resumen). */
   digest: string;
   signatureValue: string;
 }
 
 /**
- * Firma XML-DSig real (canonicalización C14N + enveloped-signature + RSA-SHA256)
- * sobre documentos UBL 2.1, colocando la firma dentro de
- * ext:UBLExtensions/ext:UBLExtension/ext:ExtensionContent tal como exige SUNAT.
- * Reemplaza, cuando hay certificado configurado, a la firma DEMO (hash sin
- * clave privada) que sigue siendo el comportamiento por defecto.
+ * @deprecated Use firmarXml(xml, material). Envoltorio heredado: firma XMLDSig
+ * real (C14N, enveloped-signature, RSA-SHA256) con Id="SignatureSP" dentro del
+ * ext:ExtensionContent y verificación local antes de devolver.
  */
 export class FirmadorXmlCertificado {
-  constructor(private readonly certificado: CertificadoCargado) {}
+  private readonly material: MaterialFirma;
 
-  firmar(xml: string): FirmaCertificadoResultado {
-    const firmante = new SignedXml({
-      privateKey: this.certificado.privateKeyPem,
-      publicCert: this.certificado.certificatePem,
-      signatureAlgorithm: 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256',
-      canonicalizationAlgorithm: 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315',
-    });
-
-    firmante.addReference({
-      xpath: '/*',
-      isEmptyUri: true,
-      transforms: ['http://www.w3.org/2000/09/xmldsig#enveloped-signature'],
-      digestAlgorithm: 'http://www.w3.org/2001/04/xmlenc#sha256',
-    });
-
-    firmante.computeSignature(xml, {
-      prefix: 'ds',
-      existingPrefixes: { ds: 'http://www.w3.org/2000/09/xmldsig#' },
-      location: {
-        reference: "//*[local-name(.)='ExtensionContent']",
-        action: 'append',
-      },
-    });
-
-    const xmlFirmado = firmante.getSignedXml();
-    const signatureXml = firmante.getSignatureXml();
-    const digest = signatureXml.match(/<(?:ds:)?DigestValue>([^<]+)<\/(?:ds:)?DigestValue>/)?.[1] ?? '';
-    const signatureValue = signatureXml.match(/<(?:ds:)?SignatureValue>([^<]+)<\/(?:ds:)?SignatureValue>/)?.[1] ?? '';
-
-    return { xmlFirmado, digest, signatureValue };
+  constructor(certificado: CertificadoCargado) {
+    this.material = materialDesdeCertificado(certificado);
   }
 
-  /** Verifica criptograficamente un XML ya firmado contra el certificado configurado. Util para probar antes de enviar a SUNAT. */
+  firmar(xml: string): FirmaCertificadoResultado {
+    const resultado = firmarXml(xml, this.material);
+    return { xmlFirmado: resultado.xmlFirmado, digest: resultado.digestValue, signatureValue: resultado.signatureValue };
+  }
+
+  /** Verifica criptográficamente un XML ya firmado contra el certificado configurado. */
   verificar(xmlFirmado: string): boolean {
-    const verificador = new SignedXml({ publicCert: this.certificado.certificatePem });
-    const documento = new DOMParser().parseFromString(xmlFirmado);
-    const [firma] = verificador.findSignatures(documento);
-    if (!firma) return false;
-    verificador.loadSignature(firma);
-    return verificador.checkSignature(xmlFirmado);
+    const bloques = separarCertificadosPem(this.material.certificatePem);
+    try {
+      const clave = createPrivateKey(this.material.privateKeyPem);
+      const hoja = bloques.find((b) => new X509Certificate(b).checkPrivateKey(clave));
+      return verificarFirmaXml(xmlFirmado, hoja ?? bloques[0]);
+    } catch {
+      return false;
+    }
   }
 }

@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { CreditoBussnies } from '../../bussnies/Bussnies/credito.bussnies';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
 import { Roles } from '../../guards/roles.decorator';
 import { UsuarioActual } from '../../guards/usuario-actual.decorator';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
+import { AbonoCreditoRequest, LineaCreditoRequest } from '../../models/model/credito.request';
 
 @Controller('credito')
 @UseGuards(JwtGuard, RolesGuard)
@@ -15,9 +16,11 @@ export class CreditoController {
   /** Línea de crédito del cliente o empresa (para el POS). */
   @Get('linea')
   linea(@Query('id_cliente') idCliente?: string, @Query('id_empresa') idEmpresa?: string) {
+    const cliente = Number(idCliente);
+    const empresa = Number(idEmpresa);
     return this.service.lineaDe({
-      id_cliente: idCliente ? Number(idCliente) : undefined,
-      id_empresa: idEmpresa ? Number(idEmpresa) : undefined,
+      id_cliente: Number.isInteger(cliente) && cliente > 0 ? cliente : undefined,
+      id_empresa: Number.isInteger(empresa) && empresa > 0 ? empresa : undefined,
     });
   }
 
@@ -37,36 +40,36 @@ export class CreditoController {
   }
 
   @Get('cuentas/:id')
-  obtener(@Param('id') id: string) {
-    return this.service.obtener(Number(id));
+  obtener(@Param('id', ParseIntPipe) id: number) {
+    return this.service.obtener(id);
   }
 
   @Post('cuentas/:id/abonos')
   abonar(
-    @Param('id') id: string,
-    @Body() body: { monto: number; id_metodo?: number; referencia?: string },
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AbonoCreditoRequest,
     @UsuarioActual() usuario: UsuarioToken,
   ) {
-    return this.service.abonar(Number(id), body, usuario);
+    return this.service.abonar(id, body, usuario);
   }
 
   @Put('cliente/:id')
   @Roles('admin')
   actualizarCliente(
-    @Param('id') id: string,
-    @Body() body: { credito_activo?: boolean; limite_credito?: number; dias_credito?: number },
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: LineaCreditoRequest,
     @UsuarioActual() usuario: UsuarioToken,
   ) {
-    return this.service.actualizarCliente(Number(id), body, usuario);
+    return this.service.actualizarCliente(id, body, usuario);
   }
 
   @Put('empresa/:id')
   @Roles('admin')
   actualizarEmpresa(
-    @Param('id') id: string,
-    @Body() body: { credito_activo?: boolean; limite_credito?: number; dias_credito?: number },
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: LineaCreditoRequest,
     @UsuarioActual() usuario: UsuarioToken,
   ) {
-    return this.service.actualizarEmpresa(Number(id), body, usuario);
+    return this.service.actualizarEmpresa(id, body, usuario);
   }
 }

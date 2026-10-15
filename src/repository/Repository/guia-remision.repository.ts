@@ -121,11 +121,13 @@ export class GuiaRemisionRepository {
        LIMIT 1
     `, [idVenta]);
 
+    // La subconsulta compara con $1 y no con s.id_venta: s.id_venta no está en
+    // el GROUP BY y PostgreSQL rechaza la consulta entera ("ungrouped column").
     const items = await this.dataSource.query(`
       SELECT (
                SELECT MIN(d.id_detalle)
                  FROM detalle_venta d
-                WHERE d.id_venta = s.id_venta AND d.id_producto = s.id_producto
+                WHERE d.id_venta = $1 AND d.id_producto = s.id_producto
              ) AS id_venta_detalle,
              s.id_producto,
              COALESCE(SUM(s.cantidad), 0) AS cantidad,
@@ -272,7 +274,7 @@ export class GuiaRemisionRepository {
         ) VALUES (
           $1, $2, $3, $4, $5, $6, 'remitente', 'borrador', NOW(), $7,
           $8, 'Venta', $9, $10, $11, $12, $13, $14, $12, $15::text,
-          $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
+          $15::numeric, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
           $27, $28, $29, $30, $31
         ) RETURNING id_guia
       `, [

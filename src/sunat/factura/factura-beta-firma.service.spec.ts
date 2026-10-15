@@ -34,10 +34,10 @@ describe('FacturaBetaFirmaService', () => {
     const service = new FacturaBetaFirmaService();
     const xml = `<?xml version="1.0" encoding="UTF-8"?><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"></Invoice>`;
 
-    const result = await service.firmar(xml);
+    const result = await service.firmar(xml, undefined, { permitirDemo: true });
 
     expect(result.ok).toBe(true);
-    expect(result.xmlFirmado).toContain('<ds:Signature>');
+    expect(result.xmlFirmado).toContain('<ds:Signature Id="SignatureSP">');
     expect(result.xmlFirmado).toContain('<ds:SignatureValue>');
     expect(result.xmlFirmado).toContain('signature-');
     expect(result.digest.length).toBeGreaterThan(10);
@@ -57,7 +57,7 @@ describe('FacturaBetaFirmaService', () => {
   </ext:UBLExtensions>
 </Invoice>`;
 
-    const result = await service.firmar(xml);
+    const result = await service.firmar(xml, undefined, { permitirDemo: true });
 
     expect(result.xmlFirmado.match(/<ext:UBLExtensions>/g)?.length).toBe(1);
   });

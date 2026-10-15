@@ -1,4 +1,4 @@
-import { AfectacionIgv, CATALOGO_09_MOTIVO_NOTA_CREDITO, MotivoNotaCredito, motivoNotaCreditoValidoParaTipo } from '../catalogos/sunat.catalogos';
+import { AfectacionIgv, esMotivoNotaCredito, MotivoNotaCredito, motivoNotaCreditoValidoParaTipo } from '../catalogos/sunat.catalogos';
 import { AfectacionIgvTipo } from './factura-beta.service';
 import { NotaCreditoUblBuilder } from './nota-credito-ubl.builder';
 
@@ -48,7 +48,7 @@ export class NotaCreditoBetaService {
     this.validarDto(dto);
 
     const resultado = this.builder.build({
-      serie: dto.serie,
+      serie: dto.serie.trim().toUpperCase(),
       numero: dto.numero,
       fechaEmision: dto.fechaEmision,
       horaEmision: dto.horaEmision,
@@ -97,9 +97,19 @@ export class NotaCreditoBetaService {
     if (!dto.serie || dto.serie.trim().toUpperCase()[0] !== prefijoEsperado) {
       throw new Error(`La serie de la Nota de Crédito debe empezar con "${prefijoEsperado}" porque modifica un documento tipo ${dto.documentoModificado.tipoDocumento}`);
     }
+    // Misma regla que las series de factura y boleta: prefijo + 3 letras o dígitos (FC01, BC01, F001…).
+    if (!/^[FB][A-Z0-9]{3}$/i.test(dto.serie.trim())) {
+      throw new Error(`La serie de la Nota de Crédito debe tener formato ${prefijoEsperado}### (${prefijoEsperado} seguida de 3 letras o dígitos, p. ej. ${prefijoEsperado}C01)`);
+    }
+    if (!/^[FB][A-Z0-9]{3}$/i.test(String(dto.documentoModificado.serie).trim())) {
+      throw new Error('La serie del documento modificado debe ser F o B seguida de 3 letras o dígitos');
+    }
 
+    if (!esMotivoNotaCredito(dto.motivo)) {
+      throw new Error(`El motivo ${dto.motivo} no existe en el catálogo 09 de notas de crédito`);
+    }
     if (!motivoNotaCreditoValidoParaTipo(dto.motivo, dto.documentoModificado.tipoDocumento)) {
-      throw new Error(`El motivo ${dto.motivo} no se puede usar sobre una Boleta (motivos ${CATALOGO_09_MOTIVO_NOTA_CREDITO.DESCUENTO_GLOBAL}, ${CATALOGO_09_MOTIVO_NOTA_CREDITO.DESCUENTO_POR_ITEM} y ${CATALOGO_09_MOTIVO_NOTA_CREDITO.BONIFICACION} solo aplican a Factura)`);
+      throw new Error(`El motivo ${dto.motivo} no se puede usar sobre una Boleta (los motivos 04, 05, 08 y 13 solo aplican a Factura)`);
     }
 
     if (!dto.items || dto.items.length === 0) {

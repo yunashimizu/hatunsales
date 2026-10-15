@@ -1,4 +1,10 @@
-import AdmZip from 'adm-zip';
+import type { PaqueteZip } from '../nucleo/documento-fiscal.types';
+import { PaqueteZipError } from '../nucleo/errores-nucleo';
+import { nombreBaseCpe } from '../nucleo/identificadores-cpe';
+import { empaquetarZip } from '../nucleo/zip/paquete-zip';
+
+// API del núcleo (contrato §12.1): ZIP genérico para comprobantes, RC, RA y GRE.
+export { empaquetarZip, leerXmlDeZip, sha256Hex } from '../nucleo/zip/paquete-zip';
 
 export interface FacturaZipResultado {
   ok: boolean;
@@ -7,29 +13,28 @@ export interface FacturaZipResultado {
   mensaje: string;
 }
 
+const TIPOS_ZIP = new Set(['01', '03', '07', '08', '09']);
+
 export class FacturaBetaZipService {
+  /**
+   * @deprecated Firma heredada (la usan los proveedores BETA y la GRE SOAP).
+   * Empaqueta `${ruc}-${tipo}-${serie}-${numero(8)}.xml` dentro de `….zip`.
+   */
   generarZip(xmlFirmado: string, ruc: string, tipo: string, serie: string, numero: number): FacturaZipResultado {
-    // Empaqueta Factura/Boleta (<Invoice), Nota de Credito (<CreditNote),
-    // Resumen Diario (<SummaryDocuments) y Guía de Remisión (<DespatchAdvice).
-    if (!xmlFirmado || !/<(Invoice|CreditNote|SummaryDocuments|DespatchAdvice)[\s>]/.test(xmlFirmado)) {
-      throw new Error('El XML firmado no es válido para empaquetar');
+    if (!TIPOS_ZIP.has(tipo)) {
+      throw new PaqueteZipError(`Tipo de documento no válido para el ZIP: "${tipo}".`);
     }
-
-    const fileName = `${ruc}-${tipo}-${serie}-${this.padNumero(numero)}.xml`;
-    const zip = new AdmZip();
-    zip.addFile(fileName, Buffer.from(xmlFirmado, 'utf8'));
-
-    const zipBase64 = zip.toBuffer().toString('base64');
-
+    const paquete = empaquetarZip(nombreBaseCpe(ruc, tipo as '01' | '03' | '07' | '08' | '09', serie, numero), xmlFirmado);
     return {
       ok: true,
-      fileName: `${ruc}-${tipo}-${serie}-${this.padNumero(numero)}.zip`,
-      zipBase64,
+      fileName: paquete.nombreZip,
+      zipBase64: paquete.base64,
       mensaje: 'ZIP SUNAT preparado correctamente.',
     };
   }
 
-  private padNumero(numero: number): string {
-    return String(numero).padStart(8, '0');
+  /** ZIP genérico: `${nombreBase}.xml` dentro; devuelve el buffer, base64 y SHA-256 (hex). */
+  empaquetarZip(nombreBase: string, xml: string): PaqueteZip {
+    return empaquetarZip(nombreBase, xml);
   }
 }

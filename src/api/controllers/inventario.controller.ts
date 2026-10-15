@@ -31,11 +31,14 @@ export class InventarioController {
     @Query('solo_alertas') soloAlertas?: string,
     @Query('pagina') pagina?: string,
     @Query('por_pagina') porPagina?: string,
+    @Query('id_producto') idProducto?: string,
   ) {
+    const producto = Number(idProducto);
     return this.service.listar({
       texto,
       id_almacen: idAlmacen ? Number(idAlmacen) : undefined,
       id_categoria: idCategoria ? Number(idCategoria) : undefined,
+      id_producto: Number.isInteger(producto) && producto > 0 ? producto : undefined,
       solo_alertas: soloAlertas === 'true',
       pagina: Number(pagina) || 1,
       por_pagina: Number(porPagina) || 50,

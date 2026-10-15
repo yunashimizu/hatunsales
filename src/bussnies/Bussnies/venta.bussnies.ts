@@ -79,7 +79,6 @@ export class VentaBussnies {
   }
 
   async metodosPago() {
-    await this.creditoRepo.asegurarSchema();
     return this.creditoRepo.metodosConTipo();
   }
 
@@ -424,7 +423,6 @@ export class VentaBussnies {
     receptor: { id_cliente?: number; id_empresa?: number; numero_documento?: string },
     usuario?: UsuarioToken,
   ) {
-    await this.creditoRepo.asegurarSchema();
     const metodos = await this.creditoRepo.metodosConTipo();
     const mapaTipo = new Map(metodos.map((m) => [Number(m.id_metodo), String(m.tipo || '').toLowerCase()]));
     const idCredito = await this.creditoRepo.idMetodoCredito();

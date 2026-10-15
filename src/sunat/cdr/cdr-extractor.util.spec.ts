@@ -1,5 +1,6 @@
 import AdmZip from 'adm-zip';
 import { CdrExtractorUtil } from './cdr-extractor.util';
+import { respuestaGetStatus } from '../nucleo/pruebas/respuestas-sunat-prueba-spec';
 
 function construirRespuestaSendBill(cdrXml: string): string {
   const zip = new AdmZip();
@@ -35,7 +36,7 @@ describe('CdrExtractorUtil', () => {
   });
 
   it('descomprime el content de una respuesta getStatus ya resuelta', () => {
-    const respuestaSoap = construirRespuestaSendBill(cdrXmlOriginal).replace(/applicationResponse/g, 'content');
+    const respuestaSoap = respuestaGetStatus('0', cdrXmlOriginal);
 
     const cdrXml = new CdrExtractorUtil().extraerCdrXml(respuestaSoap);
 

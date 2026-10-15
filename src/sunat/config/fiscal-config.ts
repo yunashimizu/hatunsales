@@ -1,3 +1,5 @@
+import { ENDPOINTS_SUNAT, endpointsSunat, EndpointsSunat } from '../nucleo/soap/endpoints-sunat';
+
 export type AmbienteFiscal = 'beta' | 'produccion';
 
 export interface FiscalConfig {
@@ -14,24 +16,40 @@ export interface FiscalConfig {
 }
 
 /**
- * Endpoints SOAP verificados contra fuentes oficiales SUNAT (Manual del
- * Programador SEE-Sistemas del Contribuyente, cpe.sunat.gob.pe; orientacion.sunat.gob.pe/12-pautas-servicio-beta).
- * Factura/Boleta/Nota de Crédito comparten el mismo servicio billService.
- * La Guía de Remisión usa un subdominio y un Beta propios y distintos
- * (e-guiaremision, no e-factura); SUNAT tambien ofrece para GRE una via
- * REST/OAuth2 alterna ("Plataforma Nueva GRE") no implementada aquí todavía.
+ * Endpoints SOAP verificados contra los WSDL oficiales (design §2):
+ *  - facturaBoletaNotaCredito: billService (sendBill, sendSummary, getStatus).
+ *  - consultaCdr: billConsultService (getStatusCdr y getStatus por RUC, tipo,
+ *    serie y número). Solo producción: BETA no tiene servicio de consulta.
+ *  - consultaValidez: billValidService (validaCDPcriterios), para una fase posterior.
+ *  - guiaRemision: GRE por SOAP (obsoleta; la vigente va por API REST).
+ * La fuente única es ENDPOINTS_SUNAT del núcleo.
  */
 export const SUNAT_ENDPOINTS = {
   beta: {
-    facturaBoletaNotaCredito: 'https://e-beta.sunat.gob.pe/ol-ti-itcpfegem-beta/billService',
-    guiaRemision: 'https://e-beta.sunat.gob.pe/ol-ti-itemision-guia-gem-beta/billService',
+    facturaBoletaNotaCredito: ENDPOINTS_SUNAT.beta.billService,
+    guiaRemision: ENDPOINTS_SUNAT.beta.guiaRemision,
+    consultaCdr: null,
+    consultaValidez: null,
   },
   produccion: {
-    facturaBoletaNotaCredito: 'https://e-factura.sunat.gob.pe/ol-ti-itcpfegem/billService',
-    guiaRemision: 'https://e-guiaremision.sunat.gob.pe/ol-ti-itemision-guia-gem/billService',
+    facturaBoletaNotaCredito: ENDPOINTS_SUNAT.produccion.billService,
+    guiaRemision: ENDPOINTS_SUNAT.produccion.guiaRemision,
+    consultaCdr: ENDPOINTS_SUNAT.produccion.consultaCdr,
+    consultaValidez: ENDPOINTS_SUNAT.produccion.consultaValidez,
   },
 } as const;
 
+/** Endpoints del núcleo para un ambiente (billService, consultaCdr, consultaValidez, guiaRemision). */
+export function endpointsFiscales(ambiente: AmbienteFiscal): Readonly<EndpointsSunat> {
+  return endpointsSunat(ambiente);
+}
+
+/**
+ * @deprecated Configuración heredada por variables de entorno. La
+ * configuración real vive en FiscalConfigService (tabla configuraciones,
+ * editable desde Panel → Facturación SUNAT). Se mantiene para la ruta BETA
+ * antigua (/sunat/beta/*) y sus specs.
+ */
 export function getFiscalConfig(): FiscalConfig {
   const proveedorActivo = (process.env.SUNAT_FISCAL_PROVIDER ?? 'none').toLowerCase();
   const ambiente = (process.env.SUNAT_FISCAL_ENVIRONMENT ?? 'beta').toLowerCase() === 'produccion'
@@ -57,8 +75,12 @@ export function getFiscalConfig(): FiscalConfig {
   };
 }
 
-/** Endpoint SOAP correcto según el ambiente configurado y el tipo de documento. */
-export function endpointBillServicePorTipo(documentType: '01' | '03' | '07' | '09', ambiente: AmbienteFiscal): string {
+/**
+ * @deprecated Endpoint billService según tipo y ambiente, para la ruta BETA
+ * antigua. El código nuevo usa SunatSoapClient (elige el endpoint por ambiente).
+ * SUNAT_BILL_ENDPOINT lo reemplaza (solo pruebas).
+ */
+export function endpointBillServicePorTipo(documentType: '01' | '03' | '07' | '08' | '09', ambiente: AmbienteFiscal): string {
   const overrideEnv = process.env.SUNAT_BILL_ENDPOINT;
   if (overrideEnv) return overrideEnv;
 
@@ -66,4 +88,5 @@ export function endpointBillServicePorTipo(documentType: '01' | '03' | '07' | '0
   return documentType === '09' ? set.guiaRemision : set.facturaBoletaNotaCredito;
 }
 
+/** @deprecated Se evalúa al cargar el módulo; use FiscalConfigService. */
 export const fiscalConfigDefault: FiscalConfig = getFiscalConfig();

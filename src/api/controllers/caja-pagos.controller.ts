@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseIntPipe,
   Post,
   Put,
   Query,
@@ -13,6 +14,11 @@ import { CajaPagosBussnies } from '../../bussnies/Bussnies/caja-pagos.bussnies';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
 import { Roles } from '../../guards/roles.decorator';
+import {
+  ActualizarCuentaBancariaRequest,
+  CuentaBancariaRequest,
+  IniciarYapeRequest,
+} from '../../models/model/caja.request';
 
 @Controller('caja')
 @UseGuards(JwtGuard, RolesGuard)
@@ -33,25 +39,25 @@ export class CajaPagosController {
 
   @Post('cuentas-bancarias')
   @Roles('admin')
-  crear(@Body() body: any) {
+  crear(@Body() body: CuentaBancariaRequest) {
     return this.service.crearCuenta(body);
   }
 
   @Put('cuentas-bancarias/:id')
   @Roles('admin')
-  actualizar(@Param('id') id: string, @Body() body: any) {
-    return this.service.actualizarCuenta(Number(id), body);
+  actualizar(@Param('id', ParseIntPipe) id: number, @Body() body: ActualizarCuentaBancariaRequest) {
+    return this.service.actualizarCuenta(id, body);
   }
 
   @Delete('cuentas-bancarias/:id')
   @Roles('admin')
-  eliminar(@Param('id') id: string) {
-    return this.service.eliminarCuenta(Number(id));
+  eliminar(@Param('id', ParseIntPipe) id: number) {
+    return this.service.eliminarCuenta(id);
   }
 
   /** Genera orden Culqi para Yape (o indica modo manual). */
   @Post('yape/iniciar')
-  iniciarYape(@Body() body: { monto: number; email?: string; descripcion?: string }) {
+  iniciarYape(@Body() body: IniciarYapeRequest) {
     return this.service.iniciarYape(body);
   }
 

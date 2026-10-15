@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, EntityManager } from 'typeorm';
 import { Inventario } from '../../models/DBModel/inventario.entity';
@@ -8,10 +8,15 @@ export interface FiltroInventario {
   texto?: string;
   id_almacen?: number;
   id_categoria?: number;
+  /** Solo las filas de ese producto (la edición de producto lo usa para leer su stock). */
+  id_producto?: number;
   solo_alertas?: boolean;
   pagina?: number;
   por_pagina?: number;
 }
+
+/** Máximo de la columna `inventario.stock` (integer de PostgreSQL). */
+export const STOCK_MAXIMO_BD = 2_147_483_647;
 
 export interface FilaInventario {
   id_inventario: number;
@@ -34,7 +39,9 @@ export interface FilaInventario {
 }
 
 @Injectable()
-export class InventarioRepository extends CrudRepository<Inventario> {
+export class InventarioRepository extends CrudRepository<Inventario> implements OnModuleInit {
+
+  private readonly log = new Logger(InventarioRepository.name);
 
   constructor(
     @InjectRepository(Inventario, 'pgConnection')
@@ -44,6 +51,23 @@ export class InventarioRepository extends CrudRepository<Inventario> {
     private readonly dataSource: DataSource,
   ) {
     super(inventarioRepo);
+  }
+
+  /**
+   * En producción `movimientos_inventario.tipo` es el enum tipo_movimiento_inv
+   * (entrada, salida, ajuste) y no admitía 'transferencia': toda transferencia
+   * entre almacenes fallaba. Se agrega el valor (idempotente, igual que
+   * sql/fase8_correcciones_esquema.sql). Si la columna no es un enum en otra
+   * base, el ALTER falla y solo queda el aviso.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      await this.dataSource.query(
+        `ALTER TYPE tipo_movimiento_inv ADD VALUE IF NOT EXISTS 'transferencia'`,
+      );
+    } catch (error: any) {
+      this.log.warn(`No se pudo asegurar el tipo 'transferencia' del kardex: ${error?.message ?? error}`);
+    }
   }
 
   // ── Compatibilidad con el comportamiento anterior ────────────
@@ -112,6 +136,10 @@ export class InventarioRepository extends CrudRepository<Inventario> {
     if (filtro.id_categoria) {
       parametros.push(filtro.id_categoria);
       condiciones.push(`p.id_categoria = $${parametros.length}`);
+    }
+    if (filtro.id_producto) {
+      parametros.push(filtro.id_producto);
+      condiciones.push(`i.id_producto = $${parametros.length}`);
     }
     if (filtro.solo_alertas) {
       condiciones.push('COALESCE(i.stock, 0) <= COALESCE(i.stock_minimo, 0)');
@@ -265,44 +293,78 @@ export class InventarioRepository extends CrudRepository<Inventario> {
     idAlmacen: number,
     cantidad: number,
     descripcion: string,
+    manager?: EntityManager,
   ): Promise<number> {
-    return this.dataSource.transaction(async (manager) => {
-      const filas = await manager.query(
-        'SELECT id_inventario, stock FROM inventario WHERE id_producto = $1 AND id_almacen = $2 FOR UPDATE',
-        [idProducto, idAlmacen],
-      );
+    // Con `manager` el ajuste entra en la transacción de quien llama (alta de
+    // producto con stock inicial); sin él abre la suya.
+    if (manager) return this.ajustarCon(manager, idProducto, idAlmacen, cantidad, descripcion);
+    return this.dataSource.transaction((m) =>
+      this.ajustarCon(m, idProducto, idAlmacen, cantidad, descripcion),
+    );
+  }
 
-      let stockFinal: number;
+  private async ajustarCon(
+    manager: EntityManager,
+    idProducto: number,
+    idAlmacen: number,
+    cantidad: number,
+    descripcion: string,
+  ): Promise<number> {
+    const filas = await manager.query(
+      'SELECT id_inventario, stock FROM inventario WHERE id_producto = $1 AND id_almacen = $2 FOR UPDATE',
+      [idProducto, idAlmacen],
+    );
 
-      if (filas.length) {
-        stockFinal = Number(filas[0].stock ?? 0) + cantidad;
-        if (stockFinal < 0) {
-          throw new Error(`STOCK_NEGATIVO:${Number(filas[0].stock ?? 0)}`);
-        }
-        await manager.query('UPDATE inventario SET stock = $1 WHERE id_inventario = $2', [
-          stockFinal,
-          filas[0].id_inventario,
-        ]);
-      } else {
-        if (cantidad < 0) throw new Error('STOCK_NEGATIVO:0');
-        stockFinal = cantidad;
-        await manager.query(
-          'INSERT INTO inventario (id_producto, id_almacen, stock, stock_minimo) VALUES ($1, $2, $3, 0)',
-          [idProducto, idAlmacen, cantidad],
-        );
+    let stockFinal: number;
+
+    if (filas.length) {
+      stockFinal = Number(filas[0].stock ?? 0) + cantidad;
+      if (stockFinal < 0) {
+        throw new Error(`STOCK_NEGATIVO:${Number(filas[0].stock ?? 0)}`);
       }
-
-      await this.registrarMovimiento(
-        manager,
-        idProducto,
-        idAlmacen,
-        Math.abs(cantidad),
-        cantidad >= 0 ? 'entrada' : 'salida',
-        descripcion,
+      if (stockFinal > STOCK_MAXIMO_BD) throw new Error(`STOCK_FUERA_DE_RANGO:${STOCK_MAXIMO_BD}`);
+      await manager.query('UPDATE inventario SET stock = $1 WHERE id_inventario = $2', [
+        stockFinal,
+        filas[0].id_inventario,
+      ]);
+    } else {
+      if (cantidad < 0) throw new Error('STOCK_NEGATIVO:0');
+      if (cantidad > STOCK_MAXIMO_BD) throw new Error(`STOCK_FUERA_DE_RANGO:${STOCK_MAXIMO_BD}`);
+      stockFinal = cantidad;
+      await manager.query(
+        'INSERT INTO inventario (id_producto, id_almacen, stock, stock_minimo) VALUES ($1, $2, $3, 0)',
+        [idProducto, idAlmacen, cantidad],
       );
+    }
 
-      return stockFinal;
-    });
+    await this.registrarMovimiento(
+      manager,
+      idProducto,
+      idAlmacen,
+      Math.abs(cantidad),
+      cantidad >= 0 ? 'entrada' : 'salida',
+      descripcion,
+    );
+
+    return stockFinal;
+  }
+
+  /** Crea la fila del producto en el almacén con stock 0 (sin movimiento en el kardex). */
+  async crearFilaVacia(manager: EntityManager, idProducto: number, idAlmacen: number): Promise<void> {
+    const existe = await manager.query(
+      'SELECT 1 FROM inventario WHERE id_producto = $1 AND id_almacen = $2 LIMIT 1',
+      [idProducto, idAlmacen],
+    );
+    if (existe.length) return;
+    await manager.query(
+      'INSERT INTO inventario (id_producto, id_almacen, stock, stock_minimo) VALUES ($1, $2, 0, 0)',
+      [idProducto, idAlmacen],
+    );
+  }
+
+  async existeAlmacen(idAlmacen: number): Promise<boolean> {
+    const filas = await this.dataSource.query('SELECT 1 FROM almacenes WHERE id_almacen = $1 LIMIT 1', [idAlmacen]);
+    return filas.length > 0;
   }
 
   async transferir(
@@ -327,9 +389,13 @@ export class InventarioRepository extends CrudRepository<Inventario> {
       ]);
 
       const destino = await manager.query(
-        'SELECT id_inventario FROM inventario WHERE id_producto = $1 AND id_almacen = $2 FOR UPDATE',
+        'SELECT id_inventario, stock FROM inventario WHERE id_producto = $1 AND id_almacen = $2 FOR UPDATE',
         [idProducto, idDestino],
       );
+
+      if (Number(destino[0]?.stock ?? 0) + cantidad > STOCK_MAXIMO_BD) {
+        throw new Error(`STOCK_FUERA_DE_RANGO:${STOCK_MAXIMO_BD}`);
+      }
 
       if (destino.length) {
         await manager.query('UPDATE inventario SET stock = stock + $1 WHERE id_inventario = $2', [

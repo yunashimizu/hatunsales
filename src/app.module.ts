@@ -2,11 +2,10 @@ import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { postgresConfig, sqliteConfig } from './config/database.config';
+import { postgresConfig } from './config/database.config';
 import { Usuario } from './models/DBModel/user.entity';
 import { Usuarios as UsuarioAuth } from './models/DBModel/usuarios.entity';          // ← agregar
 import { VwUsuarioPermisos } from './models/DBModel/vw-usuario-permisos.entity';   // ← agregar
-import { Log } from './models/DBModel/log.entity';
 import { UserController } from './api/controllers/user.controller';
 import { LogController } from './api/controllers/log.controller';
 import { AuthController } from './api/controllers/auth.controller';
@@ -17,7 +16,6 @@ import { AuthBussnies } from './bussnies/Bussnies/auth.bussnies';
 import { JwtStrategy } from './guards/jwt.strategy';
 import { JwtModule } from '@nestjs/jwt';
 import { jwtConfig } from './config/jwt.config';
-import { loginController } from './api/controllers/login.controller';
 import { AdminController } from './api/controllers/admin.controller';
 import { AdminBussnies } from './bussnies/Bussnies/admin.bussnies';
 import { RolBussnies } from './bussnies/Bussnies/rol.bussnies';
@@ -160,11 +158,12 @@ import { BaseDatosAlmacen } from './util/storage/base-datos.almacen';
 import { DiscoAlmacen } from './util/storage/disco.almacen';
 import { almacenProvider } from './util/storage/almacen.provider';
 import { ArchivoController } from './api/controllers/archivo.controller';
+// Registros por dominio (sunat/registro/*, caja/registro/*, registro/plataforma.registro.ts)
+import { REGISTROS } from './registro/registros';
 
 @Module({
   imports: [
     TypeOrmModule.forRoot(postgresConfig),
-    TypeOrmModule.forRoot(sqliteConfig),
     TypeOrmModule.forFeature(
       [Usuario, UsuarioAuth, VwUsuarioPermisos, Cliente, Documento, Empresa, Proveedor, Rol,
         Producto, Inventario, GuiaRemision, GuiaRemisionItem, Proforma, ProformaItem,
@@ -172,10 +171,10 @@ import { ArchivoController } from './api/controllers/archivo.controller';
         Comprobante, ComprobanteItem, TipoComprobante, Moneda,
         Almacen, Banner, ProductoAtributo, DireccionEnvio, MetodoEnvio, MetodoPago, Cupon,
         Carrito, CarritoItem, Pedido, PedidoItem, PedidoEstado, PedidoPago, Favorito, Resena,
-        CuentaPorCobrar, AbonoCredito],
+        CuentaPorCobrar, AbonoCredito,
+        ...REGISTROS.entidades],
       'pgConnection',
     ),
-    TypeOrmModule.forFeature([Log], 'sqliteConnection'),
     JwtModule.register({
       secret: jwtConfig.secret,
       signOptions: { expiresIn: '12h' },
@@ -183,14 +182,15 @@ import { ArchivoController } from './api/controllers/archivo.controller';
     }),
   ],
   controllers: [AppController, UserController, LogController, AuthController,
-  loginController, AdminController, SunatController, ComprobanteController, ClienteController,
+  AdminController, SunatController, ComprobanteController, ClienteController,
   ProductoController, InventarioController, GuiaRemisionController, ProformaController,
   ReportesController, StockSucursalController, ProductoImagenController, CategoriaController, MarcaController, AlmacenController, RolController, RolesAdminController,
   CatalogoController, CarritoController, CheckoutController, PagoWebhookController,
   PedidoController, PedidoAdminController, CuentaTiendaController,
   ReceptorController, VentaController, ArchivoController, CreditoController, CajaPagosController,
   CajaSesionController,
-  ProveedorController, RecepcionController, ConfiguracionController, FacturaBetaAdminController],
+  ProveedorController, RecepcionController, ConfiguracionController, FacturaBetaAdminController,
+  ...REGISTROS.controladores],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
   LogRepository, AuthBussnies, AdminBussnies, RolBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
@@ -207,6 +207,7 @@ import { ArchivoController } from './api/controllers/archivo.controller';
    VentaRepository, VentaBussnies, CreditoRepository, CreditoBussnies, CajaPagosRepository, CajaPagosBussnies,
    CajaSesionRepository, CajaSesionBussnies,
    RecepcionRepository, RecepcionBussnies,
-   CloudinaryAlmacen, BaseDatosAlmacen, DiscoAlmacen, almacenProvider],
+   CloudinaryAlmacen, BaseDatosAlmacen, DiscoAlmacen, almacenProvider,
+   ...REGISTROS.proveedores],
 })
 export class AppModule {}

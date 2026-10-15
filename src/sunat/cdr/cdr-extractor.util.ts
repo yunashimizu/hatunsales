@@ -1,71 +1,69 @@
-import AdmZip from 'adm-zip';
+import { leerRespuestaSoap, normalizarCodigoFault, RespuestaSoapLeida } from '../nucleo/soap/lector-respuesta-soap';
+import { leerXmlDeZip } from '../nucleo/zip/paquete-zip';
 
 export interface SoapFaultInfo {
+  /** faultcode tal como llegó ('soap-env:Client.0111'). */
   faultCode: string;
   faultString: string;
+  /** Código de SUNAT normalizado a 4 dígitos ('0111'); '' si el Fault no trae número. */
+  codigoNumerico: string;
+}
+
+function textoPorRegex(xml: string, elemento: string): string | null {
+  const patron = new RegExp(`<(?:[\\w-]+:)?${elemento}[^>]*>([^<]+)</(?:[\\w-]+:)?${elemento}>`, 'i');
+  return patron.exec(xml)?.[1]?.trim() || null;
 }
 
 /**
- * La respuesta SOAP real de sendBill/sendSummary/getStatus de SUNAT no trae
- * el CDR como XML suelto en el cuerpo: lo trae dentro de un elemento
- * <applicationResponse> (o <content> en getStatus) cuyo contenido es un ZIP
- * codificado en base64, que a su vez contiene el XML ApplicationResponse
- * firmado. Este helper hace ese trabajo: decodifica el base64, descomprime
- * el ZIP y devuelve el XML real listo para CdrParserService.parse().
+ * La respuesta SOAP de sendBill/getStatus no trae el CDR suelto: lo trae en
+ * <applicationResponse> (o <content> en getStatus) como un ZIP en base64 que
+ * contiene el ApplicationResponse firmado. Este helper lo decodifica y
+ * descomprime. Lee el DOM sin depender de prefijos y, si la respuesta no es
+ * XML bien formado, cae a la lectura por expresiones regulares heredada.
  */
 export class CdrExtractorUtil {
-  /**
-   * Busca <applicationResponse>...</applicationResponse> o
-   * <content>...</content> (getStatus) en el XML crudo de la respuesta SOAP,
-   * lo decodifica de base64 y descomprime el ZIP para obtener el XML del
-   * ApplicationResponse (CDR) real. Devuelve null si no encuentra ese
-   * elemento (por ejemplo si la respuesta es un SOAP Fault).
-   */
+  /** XML del ApplicationResponse (CDR), o null si no viene o no se puede leer (p. ej. un SOAP Fault). */
   extraerCdrXml(respuestaSoapCruda: string): string | null {
     const base64 = this.extraerContenidoBase64(respuestaSoapCruda);
-    if (!base64) return null;
+    return base64 ? (leerXmlDeZip(base64)?.xml ?? null) : null;
+  }
 
-    try {
-      const zipBuffer = Buffer.from(base64, 'base64');
-      const zip = new AdmZip(zipBuffer);
-      const entradaXml = zip.getEntries().find((entrada) => entrada.entryName.toLowerCase().endsWith('.xml'));
-      if (!entradaXml) return null;
-      return zip.readAsText(entradaXml, 'utf8');
-    } catch {
-      return null;
-    }
+  private leer(xml: string): RespuestaSoapLeida | null {
+    const leida = leerRespuestaSoap(String(xml ?? ''));
+    return leida.esXml ? leida : null;
   }
 
   private extraerContenidoBase64(xml: string): string | null {
-    const applicationResponse = xml.match(/<(?:[\w-]+:)?applicationResponse[^>]*>([^<]+)<\/(?:[\w-]+:)?applicationResponse>/i);
-    if (applicationResponse?.[1]) return applicationResponse[1].trim();
-
-    const content = xml.match(/<(?:[\w-]+:)?content[^>]*>([^<]+)<\/(?:[\w-]+:)?content>/i);
-    if (content?.[1]) return content[1].trim();
-
-    return null;
+    const leida = this.leer(xml);
+    if (leida) return leida.applicationResponse ?? leida.estado?.content ?? null;
+    return textoPorRegex(String(xml ?? ''), 'applicationResponse') ?? textoPorRegex(String(xml ?? ''), 'content');
   }
 
-  /** Extrae el ticket que devuelve sendSummary (envio asincrono de resumenes/comunicaciones de baja). */
+  /** Ticket de sendSummary (resúmenes y comunicaciones de baja). */
   extraerTicket(xml: string): string | null {
-    const match = xml.match(/<(?:[\w-]+:)?ticket[^>]*>([^<]+)<\/(?:[\w-]+:)?ticket>/i);
-    return match?.[1]?.trim() ?? null;
+    return this.leer(xml)?.ticket ?? textoPorRegex(String(xml ?? ''), 'ticket');
   }
 
-  /** Extrae el estado de un getStatus todavia en proceso (SUNAT devuelve statusCode sin CDR mientras procesa). */
+  /** statusCode de getStatus (98 en proceso, 0 procesado, 99 con errores). */
   extraerStatusCode(xml: string): string | null {
-    const match = xml.match(/<(?:[\w-]+:)?statusCode[^>]*>([^<]+)<\/(?:[\w-]+:)?statusCode>/i);
-    return match?.[1]?.trim() ?? null;
+    return this.leer(xml)?.estado?.statusCode ?? textoPorRegex(String(xml ?? ''), 'statusCode');
   }
 
-  /** Detecta y extrae un SOAP Fault (credenciales invalidas, XML mal formado, etc.). */
+  /** SOAP Fault (credenciales inválidas, XML mal formado, rechazo…), con el código normalizado. */
   extraerFault(xml: string): SoapFaultInfo | null {
-    if (!/<(?:[\w-]+:)?Fault[>\s]/i.test(xml)) return null;
-
-    const faultCode = xml.match(/<(?:[\w-]+:)?faultcode>([^<]+)<\/(?:[\w-]+:)?faultcode>/i)?.[1]?.trim() ?? 'DESCONOCIDO';
-    const faultString = xml.match(/<(?:[\w-]+:)?faultstring>([^<]+)<\/(?:[\w-]+:)?faultstring>/i)?.[1]?.trim()
-      ?? 'SUNAT devolvió un SOAP Fault sin detalle.';
-
-    return { faultCode, faultString };
+    const leida = this.leer(xml);
+    if (leida) {
+      if (!leida.fault) return null;
+      return {
+        faultCode: leida.fault.codigoOriginal || 'DESCONOCIDO',
+        faultString: leida.fault.mensaje,
+        codigoNumerico: leida.fault.codigo,
+      };
+    }
+    const texto = String(xml ?? '');
+    if (!/<(?:[\w-]+:)?Fault[>\s]/i.test(texto)) return null;
+    const faultCode = textoPorRegex(texto, 'faultcode') ?? 'DESCONOCIDO';
+    const faultString = textoPorRegex(texto, 'faultstring') ?? 'SUNAT devolvió un SOAP Fault sin detalle.';
+    return { faultCode, faultString, codigoNumerico: normalizarCodigoFault(faultCode, faultString) };
   }
 }

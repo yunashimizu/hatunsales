@@ -19,6 +19,23 @@ const ETIQUETA_MOTIVO: Record<string, string> = {
   otro: 'Ajuste manual',
 };
 
+/** Convierte los errores técnicos de stock (repositorio o PostgreSQL) en un mensaje para el usuario. */
+export function traducirErrorStock(mensaje: string): string {
+  if (mensaje.startsWith('STOCK_FUERA_DE_RANGO:')) {
+    return 'El stock resultante supera el máximo que admite el sistema (2,147,483,647 unidades)';
+  }
+  if (/integer out of range|numeric field overflow/i.test(mensaje)) {
+    return 'La cantidad es demasiado grande para el sistema. Revise el número ingresado.';
+  }
+  if (/invalid input syntax for type integer/i.test(mensaje)) {
+    return 'La cantidad debe ser un número entero de unidades (sin decimales)';
+  }
+  if (/invalid input value for enum tipo_movimiento_inv/i.test(mensaje)) {
+    return 'Falta aplicar la migración de inventario (sql/fase8_correcciones_esquema.sql) en la base de datos';
+  }
+  return mensaje;
+}
+
 @Injectable()
 export class InventarioBussnies implements IInventarioBussniees {
 
@@ -74,6 +91,10 @@ export class InventarioBussnies implements IInventarioBussniees {
   /** Corrige el stock dejando escrito el motivo en el kardex. */
   async ajustar(dto: AjustarStockRequest) {
     if (!dto.cantidad) throw new BadRequestException('Indique cuántas unidades ingresan o salen');
+    // También llegan ajustes internos (recepción) que no pasan por el ValidationPipe.
+    if (!Number.isInteger(Number(dto.cantidad))) {
+      throw new BadRequestException('La cantidad debe ser un número entero de unidades (sin decimales)');
+    }
 
     const producto = await this.productoRepo.getById(dto.id_producto);
     if (!producto) throw new NotFoundException(`Producto ${dto.id_producto} no encontrado`);
@@ -83,7 +104,7 @@ export class InventarioBussnies implements IInventarioBussniees {
       .join(' · ');
 
     try {
-      const stock = await this.repo.ajustar(dto.id_producto, dto.id_almacen, dto.cantidad, descripcion);
+      const stock = await this.repo.ajustar(dto.id_producto, dto.id_almacen, Number(dto.cantidad), descripcion);
       return { id_producto: dto.id_producto, id_almacen: dto.id_almacen, stock };
     } catch (error: any) {
       const mensaje = String(error?.message ?? '');
@@ -93,7 +114,7 @@ export class InventarioBussnies implements IInventarioBussniees {
           `No se puede retirar esa cantidad: solo hay ${disponible} unidades en ese almacén`,
         );
       }
-      throw new BadRequestException(mensaje || 'No se pudo ajustar el stock');
+      throw new BadRequestException(traducirErrorStock(mensaje) || 'No se pudo ajustar el stock');
     }
   }
 
@@ -120,7 +141,7 @@ export class InventarioBussnies implements IInventarioBussniees {
           `El almacén de origen solo tiene ${mensaje.split(':')[1]} unidades disponibles`,
         );
       }
-      throw new BadRequestException(mensaje || 'No se pudo transferir el stock');
+      throw new BadRequestException(traducirErrorStock(mensaje) || 'No se pudo transferir el stock');
     }
   }
 

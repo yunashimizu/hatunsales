@@ -4,9 +4,13 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { CreditoRepository } from '../../repository/Repository/credito.repository';
+import { CreditoRepository, ESTADOS_CXC } from '../../repository/Repository/credito.repository';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
+import { AbonoCreditoRequest, LineaCreditoRequest } from '../../models/model/credito.request';
+import { relanzarHttp } from '../../caja/http/errores-caja.http';
+import { categoriaMetodo } from '../../caja/dominio/metodo-pago';
+import { CodigoErrorCaja, cuerpoErrorCaja } from '../../caja/dominio/errores-caja';
 
 @Injectable()
 export class CreditoBussnies {
@@ -17,33 +21,50 @@ export class CreditoBussnies {
   }
 
   async lineaDe(params: { id_cliente?: number; id_empresa?: number }) {
-    if (params.id_empresa) {
-      const linea = await this.repo.lineaEmpresa(params.id_empresa);
-      if (!linea) {
-        throw new NotFoundException(
-          cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Empresa no encontrada'),
-        );
+    try {
+      if (params.id_empresa) {
+        const linea = await this.repo.lineaEmpresa(params.id_empresa);
+        if (!linea) {
+          throw new NotFoundException(
+            cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Empresa no encontrada'),
+          );
+        }
+        return { tipo: 'empresa', id: params.id_empresa, ...linea };
       }
-      return { tipo: 'empresa', id: params.id_empresa, ...linea };
-    }
-    if (params.id_cliente) {
-      const linea = await this.repo.lineaCliente(params.id_cliente);
-      if (!linea) {
-        throw new NotFoundException(
-          cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Cliente no encontrado'),
-        );
+      if (params.id_cliente) {
+        const linea = await this.repo.lineaCliente(params.id_cliente);
+        if (!linea) {
+          throw new NotFoundException(
+            cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Cliente no encontrado'),
+          );
+        }
+        return { tipo: 'cliente', id: params.id_cliente, ...linea };
       }
-      return { tipo: 'cliente', id: params.id_cliente, ...linea };
+    } catch (error) {
+      relanzarHttp(error);
     }
     throw new BadRequestException('Indique id_cliente o id_empresa');
   }
 
-  listar(filtros: any) {
-    return this.repo.listar(filtros);
+  async listar(filtros: { estado?: string; texto?: string; pagina?: number; limite?: number }) {
+    const estado = String(filtros.estado ?? '').trim().toLowerCase();
+    if (estado && !(ESTADOS_CXC as readonly string[]).includes(estado)) {
+      throw new BadRequestException(`Estado inválido. Use: ${ESTADOS_CXC.join(', ')}.`);
+    }
+    try {
+      return await this.repo.listar({ ...filtros, estado: estado || undefined });
+    } catch (error) {
+      relanzarHttp(error);
+    }
   }
 
   async obtener(id: number) {
-    const cxc = await this.repo.obtener(id);
+    let cxc: unknown;
+    try {
+      cxc = await this.repo.obtener(id);
+    } catch (error) {
+      relanzarHttp(error);
+    }
     if (!cxc) {
       throw new NotFoundException(
         cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Cuenta por cobrar no encontrada'),
@@ -52,12 +73,9 @@ export class CreditoBussnies {
     return cxc;
   }
 
-  async abonar(
-    idCxc: number,
-    body: { monto: number; id_metodo?: number; referencia?: string },
-    usuario?: UsuarioToken,
-  ) {
+  async abonar(idCxc: number, body: AbonoCreditoRequest, usuario?: UsuarioToken) {
     this.assertPuedeCobrar(usuario);
+    if (body.id_metodo != null) await this.validarMedioAbono(Number(body.id_metodo));
     try {
       return await this.repo.registrarAbono({
         id_cxc: idCxc,
@@ -77,13 +95,18 @@ export class CreditoBussnies {
       if (codigo === 'CxC_MONTO_INVALIDO') {
         throw new BadRequestException('El abono debe ser mayor a 0 y no superar el saldo');
       }
-      throw error;
+      relanzarHttp(error);
     }
   }
 
-  async actualizarCliente(id: number, body: any, usuario?: UsuarioToken) {
+  async actualizarCliente(id: number, body: LineaCreditoRequest, usuario?: UsuarioToken) {
     this.assertPuedeConfigurar(usuario);
-    const linea = await this.repo.actualizarLineaCliente(id, body);
+    let linea: unknown;
+    try {
+      linea = await this.repo.actualizarLineaCliente(id, body ?? {});
+    } catch (error) {
+      relanzarHttp(error);
+    }
     if (!linea) {
       throw new NotFoundException(
         cuerpoError(
@@ -92,12 +115,17 @@ export class CreditoBussnies {
         ),
       );
     }
-    return { tipo: 'cliente', id, ...linea };
+    return { tipo: 'cliente', id, ...(linea as object) };
   }
 
-  async actualizarEmpresa(id: number, body: any, usuario?: UsuarioToken) {
+  async actualizarEmpresa(id: number, body: LineaCreditoRequest, usuario?: UsuarioToken) {
     this.assertPuedeConfigurar(usuario);
-    const linea = await this.repo.actualizarLineaEmpresa(id, body);
+    let linea: unknown;
+    try {
+      linea = await this.repo.actualizarLineaEmpresa(id, body ?? {});
+    } catch (error) {
+      relanzarHttp(error);
+    }
     if (!linea) {
       throw new NotFoundException(
         cuerpoError(
@@ -106,7 +134,7 @@ export class CreditoBussnies {
         ),
       );
     }
-    return { tipo: 'empresa', id, ...linea };
+    return { tipo: 'empresa', id, ...(linea as object) };
   }
 
   /** Admin y caja pueden dar crédito / cobrar abonos. */
@@ -117,6 +145,24 @@ export class CreditoBussnies {
         cuerpoError(
           CodigoError.CREDITO_SIN_PERMISO,
           'Solo admin o caja pueden registrar ventas a crédito',
+        ),
+      );
+    }
+  }
+
+  /** El abono debe hacerse con un medio activo y que sea dinero (no "Crédito"). */
+  private async validarMedioAbono(idMetodo: number): Promise<void> {
+    const metodo = (await this.repo.metodosConTipo()).find((m) => m.id_metodo === idMetodo);
+    if (!metodo) {
+      throw new BadRequestException(
+        cuerpoErrorCaja(CodigoErrorCaja.VENTA_PAGO_INVALIDO, 'El medio de pago del abono no existe o está inactivo.'),
+      );
+    }
+    if (categoriaMetodo(metodo.tipo, metodo.nombre) === 'credito') {
+      throw new BadRequestException(
+        cuerpoErrorCaja(
+          CodigoErrorCaja.VENTA_PAGO_INVALIDO,
+          'Elija cómo pagó el cliente (efectivo, Yape, transferencia…): «Crédito» no sirve para abonar.',
         ),
       );
     }

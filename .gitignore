@@ -42,6 +42,9 @@ lerna-debug.log*
 .env.test.local
 .env.production.local
 .env.local
+.env.fiscal.local
+*.[pP]12
+*.[pP][fF][xX]
 
 # Notas personales / tokens (nunca subir)
 text.text

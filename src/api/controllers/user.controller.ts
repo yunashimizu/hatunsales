@@ -7,6 +7,7 @@ import { UserRequest } from '../../models/model/user-request';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
 import { Roles } from '../../guards/roles.decorator';
+import { IdEnteroPipe } from '../../util/http/pipes/id-entero.pipe';
 
 /**
  * CRUD legacy de usuarios. Solo admin (el panel usa /admin/usuarios
@@ -27,8 +28,8 @@ export class UserController {
   }
 
   @Get(':id')
-  getById(@Param('id') id: string) {
-    return this.service.getById(Number(id));
+  getById(@Param('id', IdEnteroPipe) id: number) {
+    return this.service.getById(id);
   }
 
   @Post()
@@ -37,12 +38,12 @@ export class UserController {
   }
 
   @Put(':id')
-  update(@Param('id') id: string, @Body() body: UserRequest) {
-    return this.service.update(Number(id), body);
+  update(@Param('id', IdEnteroPipe) id: number, @Body() body: UserRequest) {
+    return this.service.update(id, body);
   }
 
   @Delete(':id')
-  delete(@Param('id') id: string) {
-    return this.service.delete(Number(id));
+  delete(@Param('id', IdEnteroPipe) id: number) {
+    return this.service.delete(id);
   }
 }

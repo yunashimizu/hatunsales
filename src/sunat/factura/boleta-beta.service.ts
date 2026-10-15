@@ -28,8 +28,8 @@ export interface EmitirBoletaBetaResult {
   mensaje: string;
 }
 
-/** Serie de Boleta: letra B + 3 digitos (ej. B001), distinta de la de Factura (F###). */
-const SERIE_BOLETA_REGEX = /^B\d{3}$/i;
+/** Serie de Boleta: B + 3 letras o dígitos (B001, BBB1, BC01), distinta de la de Factura (F…). */
+const SERIE_BOLETA_REGEX = /^B[A-Z0-9]{3}$/i;
 
 const LONGITUD_ESPERADA_POR_TIPO_DOC: Record<string, number | null> = {
   '0': null, // sin documento: SUNAT no exige numero para ventas menores
@@ -47,7 +47,7 @@ export class BoletaBetaService {
 
     const resultado = this.builder.build({
       tipoDocumento: '03',
-      serie: dto.serie,
+      serie: dto.serie.trim().toUpperCase(),
       numero: dto.numero,
       fechaEmision: dto.fechaEmision,
       horaEmision: dto.horaEmision,
@@ -61,7 +61,8 @@ export class BoletaBetaService {
       },
       cliente: {
         tipoDocumento: dto.tipoDocumentoCliente,
-        numeroDocumento: dto.numeroDocumentoCliente || '00000000',
+        // Sin documento SUNAT pide un guion (tipo 0); el '00000000' solo queda para un DNI vacío heredado.
+        numeroDocumento: dto.numeroDocumentoCliente || (dto.tipoDocumentoCliente === '0' ? '-' : '00000000'),
         razonSocial: dto.denominacionCliente,
         direccion: dto.direccionCliente,
       },
@@ -87,8 +88,8 @@ export class BoletaBetaService {
     if (!dto.rucEmisor || dto.rucEmisor.length !== 11) {
       throw new Error('El RUC del emisor debe tener 11 dígitos');
     }
-    if (!dto.serie || !SERIE_BOLETA_REGEX.test(dto.serie)) {
-      throw new Error('La serie debe tener formato B###');
+    if (!dto.serie || !SERIE_BOLETA_REGEX.test(dto.serie.trim())) {
+      throw new Error('La serie debe tener formato B### (B seguida de 3 letras o dígitos, p. ej. B001 o BBB1)');
     }
     if (!dto.items || dto.items.length === 0) {
       throw new Error('La boleta debe tener al menos una línea');

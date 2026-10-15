@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, ConflictException, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
@@ -10,6 +10,7 @@ import { ResumenDiarioEnvioService } from '../fiscal/resumen-diario-envio.servic
 import type { EmitirResumenDiarioBetaDto } from './resumen-diario-beta.service';
 import { FiscalEnvioRepository } from '../repository/fiscal-envio.repository';
 import { emisorConfig } from '../../config/emisor.config';
+import { getFiscalConfig } from '../config/fiscal-config';
 
 /**
  * Endpoints admin para probar el pipeline SUNAT-direct BETA (Factura,
@@ -34,24 +35,34 @@ export class FacturaBetaAdminController {
   /** Factura (01), Boleta (03) o Nota de Crédito (07): documentType decide el flujo. */
   @Post('documento')
   async emitirDocumento(@Body() documento: DocumentoFiscalBase) {
+    this.exigirBeta();
     return this.fiscalProviderService.preparar(documento);
   }
 
   @Post('guia-remision')
   async emitirGuiaRemision(@Body() documento: FiscalGreDocument) {
+    this.exigirBeta();
     const provider = new SunatDirectGreProvider(this.fiscalEnvioRepository);
     return provider.emitir(documento);
   }
 
   @Post('resumen-diario')
   async enviarResumenDiario(@Body() dto: EmitirResumenDiarioBetaDto) {
+    this.exigirBeta();
     const service = new ResumenDiarioEnvioService(this.fiscalEnvioRepository);
     return service.enviar(dto);
   }
 
   @Get('resumen-diario/:ticket')
   async consultarResumenDiario(@Param('ticket') ticket: string) {
+    this.exigirBeta();
     const service = new ResumenDiarioEnvioService(this.fiscalEnvioRepository);
     return service.consultarTicket(ticket, emisorConfig.ruc);
+  }
+
+  private exigirBeta(): void {
+    if (getFiscalConfig().ambiente !== 'beta') {
+      throw new ConflictException({ codigo: 'FISCAL_SOLO_BETA', message: 'Los endpoints /sunat/beta solo están disponibles para el ambiente BETA.' });
+    }
   }
 }

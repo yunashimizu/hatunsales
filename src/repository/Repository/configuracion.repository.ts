@@ -72,12 +72,30 @@ export class ConfiguracionRepository {
     return resultado;
   }
 
+  /**
+   * UPDATE y, si la clave no existía, INSERT. No usa ON CONFLICT (clave): en
+   * producción `configuraciones` no tiene índice único en `clave` y ese upsert
+   * fallaba siempre. El candado consultivo evita duplicar la clave si dos
+   * personas guardan a la vez.
+   */
   async guardar(clave: string, valor: string): Promise<void> {
-    await this.dataSource.query(
-      `INSERT INTO configuraciones (clave, valor) VALUES ($1, $2)
-       ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor`,
-      [clave, valor],
-    );
+    await this.dataSource.transaction(async (manager) => {
+      await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`configuraciones:${clave}`]);
+
+      // TypeORM devuelve [filas, filasAfectadas] para los UPDATE en PostgreSQL.
+      const resultado = await manager.query(
+        'UPDATE configuraciones SET valor = $2 WHERE clave = $1',
+        [clave, valor],
+      );
+      const afectadas = Array.isArray(resultado) ? Number(resultado[1] ?? 0) : 0;
+
+      if (!afectadas) {
+        await manager.query(
+          'INSERT INTO configuraciones (clave, valor) VALUES ($1, $2)',
+          [clave, valor],
+        );
+      }
+    });
     this.cache.delete(clave);
   }
 

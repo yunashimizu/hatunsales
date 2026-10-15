@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import {
   CLAVES_EMISOR,
@@ -16,10 +16,20 @@ import {
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { whatsappCloudListo } from '../../config/whatsapp.config';
 import { nubefactConfig } from '../../config/nubefact.config';
+import { FiscalConfigService } from '../../sunat/config/fiscal-config.service';
+import { CLAVES_EMISOR_FISCAL } from '../../sunat/config/fiscal-config.tipos';
+import { NotificadorCambiosFiscales } from '../../sunat/config/notificador-cambios-fiscales';
+import { partirUbicacion } from '../../sunat/config/snapshot-config-fiscal';
 
 @Injectable()
 export class ConfiguracionFiscalBussnies {
-  constructor(private readonly config: ConfiguracionRepository) {}
+  private readonly logger = new Logger(ConfiguracionFiscalBussnies.name);
+
+  constructor(
+    private readonly config: ConfiguracionRepository,
+    private readonly fiscal: FiscalConfigService,
+    private readonly cambiosFiscales: NotificadorCambiosFiscales,
+  ) {}
 
   /** Series efectivas para el POS (solo lectura en mostrador). */
   async seriesPos() {
@@ -69,6 +79,7 @@ export class ConfiguracionFiscalBussnies {
     ];
     const valores = await this.config.obtenerVarias([...claves]);
     const series = await this.seriesPos();
+    const fiscal = await this.estadoFiscal();
 
     return {
       emisor: {
@@ -92,8 +103,41 @@ export class ConfiguracionFiscalBussnies {
         nubefact_configurado: !!(nubefactConfig.url && nubefactConfig.token),
         whatsapp_cloud: whatsappCloudListo(),
         caja_modo: (valores.caja_modo || 'blando').toLowerCase() === 'estricto' ? 'estricto' : 'blando',
+        // Facturación electrónica directa (detalle completo en GET /fiscal/configuracion).
+        proveedor_fiscal: fiscal.proveedor,
+        ambiente_fiscal: fiscal.ambiente,
+        sunat_directo_listo: fiscal.listo,
       },
     };
+  }
+
+  /** Nunca rompe esta pantalla: si falta la fase 9 o la BD falla, informa Nubefact y «no listo». */
+  private async estadoFiscal(): Promise<{ proveedor: string; ambiente: string; listo: boolean }> {
+    try {
+      const [proveedor, ambiente, preparacion] = await Promise.all([
+        this.fiscal.proveedorActivo(),
+        this.fiscal.ambiente(),
+        this.fiscal.listoParaProduccion(),
+      ]);
+      return { proveedor, ambiente, listo: preparacion.listo };
+    } catch (error: any) {
+      this.logger.warn(`No se pudo leer el estado de SUNAT directo: ${error?.message ?? error}`);
+      return { proveedor: 'nubefact', ambiente: 'beta', listo: false };
+    }
+  }
+
+  /** Con SUNAT directo o la GRE electrónica activos, el RUC está atado al certificado. */
+  private async exigirRucEditable(rucNuevo: string): Promise<void> {
+    const snapshot = await this.fiscal.snapshotFresco();
+    if (rucNuevo === snapshot.emisor.ruc) return;
+    if (snapshot.proveedor === 'sunat_directo' || snapshot.gre.activa) {
+      throw new ConflictException(
+        cuerpoError(
+          CodigoError.FISCAL_CONFIG_INVALIDA,
+          'No se puede cambiar el RUC mientras SUNAT directo o la guía electrónica están activos: primero vuelva a Nubefact.',
+        ),
+      );
+    }
   }
 
   async guardarAdmin(body: {
@@ -112,7 +156,11 @@ export class ConfiguracionFiscalBussnies {
   }) {
     if (body.emisor) {
       const e = body.emisor;
-      if (e.ruc != null) await this.config.guardar('emisor_ruc', String(e.ruc).trim());
+      if (e.ruc != null) {
+        const ruc = String(e.ruc).trim();
+        await this.exigirRucEditable(ruc);
+        await this.config.guardar('emisor_ruc', ruc);
+      }
       if (e.razon_social != null) {
         await this.config.guardar('emisor_razon_social', String(e.razon_social).trim());
       }
@@ -120,7 +168,15 @@ export class ConfiguracionFiscalBussnies {
         await this.config.guardar('emisor_direccion', String(e.direccion).trim());
       }
       if (e.ubicacion != null) {
-        await this.config.guardar('emisor_ubicacion', String(e.ubicacion).trim());
+        const ubicacion = String(e.ubicacion).trim();
+        await this.config.guardar('emisor_ubicacion', ubicacion);
+        // Mantiene coherentes los datos del emisor de SUNAT directo (distrito/provincia/departamento).
+        const partes = partirUbicacion(ubicacion);
+        if (partes.distrito && partes.provincia && partes.departamento) {
+          await this.config.guardar(CLAVES_EMISOR_FISCAL.distrito, partes.distrito);
+          await this.config.guardar(CLAVES_EMISOR_FISCAL.provincia, partes.provincia);
+          await this.config.guardar(CLAVES_EMISOR_FISCAL.departamento, partes.departamento);
+        }
       }
       if (e.logo_url != null) {
         await this.config.guardar('emisor_logo_url', String(e.logo_url).trim());
@@ -153,6 +209,8 @@ export class ConfiguracionFiscalBussnies {
     }
 
     this.config.limpiarCache();
+    // El emisor también lo usa SUNAT directo: su caché (y la del estado) se renuevan al instante.
+    this.cambiosFiscales.notificar('config');
     return this.obtenerAdmin();
   }
 

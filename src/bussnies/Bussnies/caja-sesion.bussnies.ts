@@ -3,28 +3,37 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-  OnModuleInit,
 } from '@nestjs/common';
 import { CajaSesionRepository } from '../../repository/Repository/caja-sesion.repository';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { normalizarRol } from '../../config/roles.config';
+import { AbrirCajaRequest, CerrarCajaRequest } from '../../models/model/caja.request';
+import { CajaArqueoBussnies } from './caja-arqueo.bussnies';
+import type { ResultadoPreparacionCierre } from '../Ibussnies/ICajaArqueoBussniees';
+import { relanzarHttp } from '../../caja/http/errores-caja.http';
 
+/**
+ * Turno de caja (apertura / cierre). Sin DDL: el esquema se lee del catálogo una sola vez
+ * y la configuración (caja_modo) sale de ConfiguracionRepository con su caché.
+ */
 @Injectable()
-export class CajaSesionBussnies implements OnModuleInit {
-  constructor(private readonly repo: CajaSesionRepository) {}
+export class CajaSesionBussnies {
+  constructor(
+    private readonly repo: CajaSesionRepository,
+    private readonly arqueos: CajaArqueoBussnies,
+  ) {}
 
-  async onModuleInit() {
-    await this.repo.asegurarSchema().catch(() => undefined);
-  }
-
+  /** GET /caja/sesion (dashboard y POS): modo y turno en paralelo. */
   async sesion(usuario: UsuarioToken) {
-    const modo = await this.repo.modoCaja();
     const idUsuario = Number(usuario?.id_usuario);
+    const [modo, apertura] = await Promise.all([
+      this.repo.modoCaja(),
+      idUsuario ? this.repo.sesionUsuario(idUsuario) : Promise.resolve(null),
+    ]);
     if (!idUsuario) {
       return { modo, abierta: false, apertura: null, resumen: null };
     }
-    const apertura = await this.repo.sesionUsuario(idUsuario);
     const resumen = apertura ? await this.repo.resumenTurno(apertura) : null;
     return {
       modo,
@@ -54,16 +63,13 @@ export class CajaSesionBussnies implements OnModuleInit {
     return { items };
   }
 
-  async abrir(
-    body: { id_caja?: number; monto_inicial?: number | null },
-    usuario: UsuarioToken,
-  ) {
+  async abrir(body: AbrirCajaRequest, usuario: UsuarioToken) {
     const idUsuario = Number(usuario?.id_usuario);
     if (!idUsuario) {
       throw new ForbiddenException('Sesión inválida');
     }
     const idCaja = Number(body?.id_caja);
-    if (!Number.isFinite(idCaja) || idCaja <= 0) {
+    if (!Number.isInteger(idCaja) || idCaja <= 0) {
       throw new BadRequestException('Indique la caja a abrir (id_caja)');
     }
     if (!(await this.repo.cajaExiste(idCaja))) {
@@ -73,32 +79,29 @@ export class CajaSesionBussnies implements OnModuleInit {
     }
 
     try {
-      const apertura = await this.repo.abrir({
+      return await this.repo.abrir({
         idCaja,
         idUsuario,
         montoInicial: body?.monto_inicial,
       });
-      return apertura;
     } catch (e: any) {
       this.mapError(e);
     }
   }
 
-  async cerrar(
-    body: {
-      id_apertura?: number;
-      monto_conteo?: number | null;
-      observacion?: string | null;
-    },
-    usuario: UsuarioToken,
-  ) {
+  /**
+   * Cierra el turno. Si llega id_arqueo (o hay un arqueo de cierre vigente y no se mandó
+   * monto_conteo) el conteo sale del arqueo y queda enlazado; sin arqueo, igual que antes.
+   * Además guarda el efectivo esperado en cierres_caja.monto_final.
+   */
+  async cerrar(body: CerrarCajaRequest, usuario: UsuarioToken) {
     const idUsuario = Number(usuario?.id_usuario);
     if (!idUsuario) {
       throw new ForbiddenException('Sesión inválida');
     }
 
     let idApertura = Number(body?.id_apertura);
-    if (!Number.isFinite(idApertura) || idApertura <= 0) {
+    if (!Number.isInteger(idApertura) || idApertura <= 0) {
       const propia = await this.repo.sesionUsuario(idUsuario);
       if (!propia) {
         throw new NotFoundException(
@@ -118,8 +121,7 @@ export class CajaSesionBussnies implements OnModuleInit {
       );
     }
 
-    const rol = normalizarRol(usuario?.rol);
-    const esAdmin = rol === 'admin';
+    const esAdmin = normalizarRol(usuario?.rol) === 'admin';
     if (apertura.id_usuario != null && apertura.id_usuario !== idUsuario && !esAdmin) {
       throw new ForbiddenException(
         cuerpoError(
@@ -131,13 +133,30 @@ export class CajaSesionBussnies implements OnModuleInit {
 
     try {
       const resumen = await this.repo.resumenTurno(apertura);
-      const cerrado = await this.repo.cerrar({
-        idApertura,
-        idUsuario,
-        montoConteo: body?.monto_conteo,
-        observacion: body?.observacion,
-      });
-      return { ...cerrado, resumen };
+      const info: { valor: ResultadoPreparacionCierre | null } = { valor: null };
+      const cerrado = await this.repo.cerrar(
+        {
+          idApertura,
+          idUsuario,
+          montoConteo: body?.monto_conteo,
+          observacion: body?.observacion,
+        },
+        async (manager) => {
+          info.valor = await this.arqueos.prepararCierre(manager, idApertura, {
+            idArqueo: body?.id_arqueo,
+            montoConteoCuerpo: body?.monto_conteo,
+          });
+          return info.valor.preparacion;
+        },
+      );
+      const extra = info.valor;
+      return {
+        ...cerrado,
+        resumen,
+        ...(extra?.efectivo_esperado != null ? { efectivo_esperado: extra.efectivo_esperado } : {}),
+        ...(extra?.arqueo ? { arqueo: extra.arqueo } : {}),
+        ...(extra?.aviso ? { aviso: extra.aviso } : {}),
+      };
     } catch (e: any) {
       this.mapError(e);
     }
@@ -146,15 +165,12 @@ export class CajaSesionBussnies implements OnModuleInit {
   /** Para modo estricto en ventas (C4). */
   async usuarioTieneApertura(idUsuario?: number): Promise<boolean> {
     if (!idUsuario) return false;
-    await this.repo.asegurarSchema();
     return this.repo.tieneAperturaAbiertaUsuario(idUsuario);
   }
 
   async configEstricto(): Promise<{ modo: 'blando' | 'estricto'; bypassAdmin: boolean }> {
-    return {
-      modo: await this.repo.modoCaja(),
-      bypassAdmin: await this.repo.bypassAdminEstricto(),
-    };
+    const [modo, bypassAdmin] = await Promise.all([this.repo.modoCaja(), this.repo.bypassAdminEstricto()]);
+    return { modo, bypassAdmin };
   }
 
   private mapError(e: any): never {
@@ -185,6 +201,6 @@ export class CajaSesionBussnies implements OnModuleInit {
         cuerpoError(CodigoError.CAJA_YA_CERRADA, 'Esa apertura ya está cerrada'),
       );
     }
-    throw e;
+    relanzarHttp(e);
   }
 }
