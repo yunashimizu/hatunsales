@@ -15,7 +15,7 @@ export class AbonoCredito {
   @Column({ type: 'numeric', precision: 12, scale: 2 })
   monto!: number;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', length: 120, nullable: true })
   referencia!: string | null;
 
   @Column({ type: 'int', nullable: true })
