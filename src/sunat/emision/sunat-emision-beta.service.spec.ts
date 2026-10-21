@@ -73,7 +73,13 @@ describe('SunatEmisionBetaService: circuito completo sin red', () => {
       expect(repo.registrarPreparado).toHaveBeenCalledTimes(1);
       return { estadoHttp: 200, cuerpo: respuestaSendBill(cdr) };
     });
-    const resultado = await servicio.emitir(facturaPrueba(), material, 1);
+    const resultado = await servicio.emitir(facturaPrueba(), material, 1, 314);
+    expect(repo.registrarPreparado).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      1,
+      314,
+    );
     const preparado = repo.registrarPreparado.mock.calls[0][1];
     const zip = new AdmZip(preparado.zip.zip);
     expect(zip.getEntries().map((e) => e.entryName)).toEqual([
@@ -88,6 +94,15 @@ describe('SunatEmisionBetaService: circuito completo sin red', () => {
     );
     expect(transporte.enviar.mock.calls[0][0].soapAction).toBe(
       '"urn:sendBill"',
+    );
+    expect(transporte.enviar.mock.calls[0][0].cuerpo).toContain(
+      '<ser:sendBill>',
+    );
+    expect(transporte.enviar.mock.calls[0][0].cuerpo).toContain(
+      `<fileName>${preparado.nombreBase}.zip</fileName>`,
+    );
+    expect(transporte.enviar.mock.calls[0][0].cuerpo).toContain(
+      `<contentFile>${preparado.zip.base64}</contentFile>`,
     );
     expect(transporte.enviar.mock.calls[0][0].cuerpo).not.toContain(
       'CLAVE-PRODUCCION-NO-USAR',
@@ -113,6 +128,72 @@ describe('SunatEmisionBetaService: circuito completo sin red', () => {
     expect(JSON.stringify(resultado)).not.toContain('PRIVATE KEY');
   });
 
+  it('emite dos unidades con S/ 0.20 de descuento c/u en XML firmado, ZIP y cuerpo SOAP', async () => {
+    const doc = facturaPrueba([
+      { descripcion: 'CEMENTO', cantidad: 2, precio: 10, descuento: 0.4 },
+    ]);
+
+    await servicio.emitir(doc, material, null);
+
+    const preparado = repo.registrarPreparado.mock.calls[0][1];
+    const zip = new AdmZip(preparado.zip.zip);
+    expect(zip.getEntries().map((e) => e.entryName)).toEqual([
+      `${preparado.nombreBase}.xml`,
+    ]);
+    const xml = zip.readAsText(zip.getEntries()[0]);
+
+    expect(xml).toMatch(
+      /<cbc:LineExtensionAmount[^>]*>16\.61<\/cbc:LineExtensionAmount>/,
+    );
+    expect(xml).toMatch(/<cbc:Amount[^>]*>0\.34<\/cbc:Amount>/);
+    expect(xml).toMatch(/<cbc:BaseAmount[^>]*>16\.95<\/cbc:BaseAmount>/);
+    expect(xml).toMatch(/<cbc:PayableAmount[^>]*>19\.60<\/cbc:PayableAmount>/);
+    expect(verificarFirmaXml(xml, certificado.certificatePem)).toBe(true);
+    expect(transporte.enviar.mock.calls[0][0].cuerpo).toContain(
+      `<contentFile>${preparado.zip.base64}</contentFile>`,
+    );
+  });
+
+  it('declara el recargo por tarjeta como línea de servicio aparte: XML firmado, ZIP y cuerpo SOAP cuadran con la venta', async () => {
+    // Venta del POS: 2 cementos a S/ 10 con S/ 0.20 c/u (= 19.60) + 3 % de tarjeta (0.59) = 20.19.
+    const doc = facturaPrueba([
+      { descripcion: 'CEMENTO', cantidad: 2, precio: 10, descuento: 0.4, codigoInterno: 'P-0001' },
+      {
+        descripcion: 'RECARGO POR PAGO CON TARJETA (3%)',
+        cantidad: 1,
+        precio: 0.59,
+        unidad: 'ZZ',
+        codigoInterno: 'RECARGO-TARJETA',
+      },
+    ]);
+    expect(doc.totales).toMatchObject({ gravada: 17.11, igv: 3.08, total: 20.19 });
+
+    const resultado = await servicio.emitir(doc, material, null);
+
+    const preparado = repo.registrarPreparado.mock.calls[0][1];
+    const zip = new AdmZip(preparado.zip.zip);
+    expect(zip.getEntries().map((e) => e.entryName)).toEqual([`${preparado.nombreBase}.xml`]);
+    const xml = zip.readAsText(zip.getEntries()[0]);
+
+    expect(xml.match(/<cac:InvoiceLine>/g)).toHaveLength(2);
+    expect(xml).toMatch(/<cbc:InvoicedQuantity unitCode="NIU">2(\.0+)?<\/cbc:InvoicedQuantity>/);
+    expect(xml).toMatch(/<cbc:InvoicedQuantity unitCode="ZZ">1(\.0+)?<\/cbc:InvoicedQuantity>/);
+    expect(xml).toContain('RECARGO POR PAGO CON TARJETA (3%)');
+    // Línea del recargo: 0.59 con IGV = 0.50 de base + 0.09 de IGV.
+    expect(xml).toMatch(/<cbc:LineExtensionAmount[^>]*>0\.50<\/cbc:LineExtensionAmount>/);
+    // Cabecera: la suma de productos y recargo.
+    expect(xml).toMatch(/<cbc:LineExtensionAmount[^>]*>17\.11<\/cbc:LineExtensionAmount>/);
+    expect(xml).toMatch(/<cbc:TaxAmount[^>]*>3\.08<\/cbc:TaxAmount>/);
+    expect(xml).toMatch(/<cbc:PayableAmount[^>]*>20\.19<\/cbc:PayableAmount>/);
+    expect(verificarFirmaXml(xml, certificado.certificatePem)).toBe(true);
+
+    const soap = transporte.enviar.mock.calls[0][0].cuerpo as string;
+    expect(soap).toContain('<ser:sendBill>');
+    expect(soap).toContain(`<fileName>${preparado.nombreBase}.zip</fileName>`);
+    expect(soap).toContain(`<contentFile>${preparado.zip.base64}</contentFile>`);
+    expect(resultado).toMatchObject({ aceptado: true, estado: 'ACEPTADO' });
+  });
+
   it('rechaza un RUC distinto al del certificado antes de persistir o enviar', async () => {
     await expect(
       servicio.emitir(facturaPrueba(), { ...material, ruc: '20131312955' }, 1),
@@ -134,6 +215,34 @@ describe('SunatEmisionBetaService: circuito completo sin red', () => {
     await expect(servicio.emitir(facturaPrueba(), material, 1)).rejects.toThrow(
       'BD no disponible',
     );
+    expect(transporte.enviar).not.toHaveBeenCalled();
+  });
+
+  it('bloquea antes de firmar y enviar una diferencia de S/ 2 en LineExtensionAmount', async () => {
+    const doc = facturaPrueba([{ descripcion: 'PRUEBA', cantidad: 1, precio: 348.01 }]);
+    doc.lineas = [{
+      ...doc.lineas[0],
+      valorUnitario: 292.92,
+      valorVenta: 294.92,
+      igv: 53.09,
+      total: 348.01,
+      precioVentaUnitario: 348.01,
+      descuentoBase: 0,
+    }];
+    doc.totales = {
+      ...doc.totales,
+      gravada: 294.92,
+      igv: 53.09,
+      total: 348.01,
+    };
+
+    await expect(servicio.emitir(doc, material, 1)).rejects.toMatchObject({
+      codigo: 'FISCAL_VALIDACION_CPE',
+      message: expect.stringMatching(
+        /cantidad × valor unitario − descuento \(292\.92\).*cbc:LineExtensionAmount/,
+      ),
+    });
+    expect(repo.registrarPreparado).not.toHaveBeenCalled();
     expect(transporte.enviar).not.toHaveBeenCalled();
   });
 
@@ -209,7 +318,7 @@ describe('SunatEmisionBetaService: circuito completo sin red', () => {
     );
   });
 
-  it('bloquea el reenvío de un registro que no está pendiente o está reservado por otra petición', async () => {
+  it('bloquea el reenvío de un registro que no está disponible para una repetición segura', async () => {
     repo.tomarReenvio.mockResolvedValueOnce(null);
     await expect(servicio.reintentar(42)).rejects.toMatchObject({
       codigo: 'FISCAL_REENVIO_NO_PERMITIDO',

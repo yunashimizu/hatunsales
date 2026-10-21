@@ -198,6 +198,11 @@ export class GenerarComprobanteRequest {
   @IsOptional()
   condiciones_de_pago?: string;
 
+  /** Campo interno del POS; el backend lo deriva de los pagos validados. */
+  @IsNumber()
+  @IsOptional()
+  monto_credito?: number;
+
   @IsString()
   @IsOptional()
   orden_compra_servicio?: string;

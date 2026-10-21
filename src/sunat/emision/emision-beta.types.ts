@@ -40,6 +40,7 @@ export interface EnvioBetaVista {
   estado: string;
   codigo_sunat: string | null;
   mensaje_sunat: string | null;
+  accion_sunat: string | null;
   creado_en: string;
   archivos: TipoArchivoBeta[];
 }

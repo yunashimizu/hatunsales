@@ -84,7 +84,7 @@ export class ClasificadorRespuestaSunat {
       case 'FAULT':
         return this.porFault(respuesta, codigo, contexto);
       case 'NO_DISPONIBLE':
-        return decision('PENDIENTE_REENVIO', 'REINTENTAR', 'La consulta a SUNAT no está disponible en este ambiente: se reenviará el mismo XML.');
+        return decision('PENDIENTE_REENVIO', 'REINTENTAR', 'La consulta a SUNAT no está disponible en este ambiente. Revise el estado antes de solicitar manualmente el reenvío del mismo XML.');
       case 'TRANSPORTE':
         return this.porTransporte(respuesta, codigo);
       default:
@@ -148,7 +148,11 @@ export class ClasificadorRespuestaSunat {
       return decision('ERROR_CONFIG', 'REVISAR_CONFIG', `SUNAT rechazó las credenciales o el perfil del usuario SOL (${descripcion}). Revise Panel → Facturación SUNAT; no se reintentará automáticamente.`);
     }
     if (CODIGOS_RECUPERAR_CDR.has(codigo)) {
-      return decision('PENDIENTE_REENVIO', 'RECUPERAR_CDR', `SUNAT ya había recibido este comprobante (${descripcion}); se recuperará su constancia.`);
+      return decision(
+        'PENDIENTE_REENVIO',
+        'RECUPERAR_CDR',
+        `SUNAT indica que ya recibió este comprobante (${descripcion}). No reenvíe el ZIP: el servicio de consulta de CDR no está disponible en BETA; verifique el envío con SUNAT antes de continuar.`,
+      );
     }
     if (CODIGOS_YA_INFORMADO_INVALIDO.has(codigo)) {
       return decision('RECHAZADO', 'EMITIR_NUEVO', `SUNAT ya tiene este comprobante como anulado o rechazado (${descripcion}): emita uno nuevo.`);
@@ -158,7 +162,7 @@ export class ClasificadorRespuestaSunat {
     }
     if (CODIGOS_FAULT_PAQUETE.has(codigo)) return this.excepcion(descripcion);
     if (CODIGOS_FAULT_TRANSITORIOS.has(codigo)) {
-      return decision('PENDIENTE_REENVIO', 'REINTENTAR', `SUNAT no pudo atender la solicitud (${descripcion}); se reintentará.`);
+      return decision('PENDIENTE_REENVIO', 'REINTENTAR', `SUNAT no pudo confirmar el resultado (${descripcion}). Revise el estado antes de solicitar manualmente el reenvío del mismo XML.`);
     }
 
     const valor = numero(codigo);
@@ -184,7 +188,7 @@ export class ClasificadorRespuestaSunat {
     if (!http && !CODIGOS_TRANSPORTE_TRANSITORIOS.has(codigo)) {
       this.registro.warn(`Error de transporte no catalogado ${codigo}: ${respuesta.descripcion}`);
     }
-    return decision('PENDIENTE_REENVIO', 'REINTENTAR', `No hubo respuesta válida de SUNAT (${codigo}); el comprobante se reenviará automáticamente.`);
+    return decision('PENDIENTE_REENVIO', 'REINTENTAR', `No hubo respuesta válida de SUNAT (${codigo}). El resultado puede ser incierto; revise el estado antes de solicitar manualmente el reenvío del mismo ZIP.`);
   }
 
   private rechazo(descripcion: string, contexto: ContextoClasificacion): ClasificacionRespuesta {

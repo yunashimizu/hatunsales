@@ -272,7 +272,18 @@ export class SunatSoapClient {
       if (!secreto) continue;
       for (const forma of new Set([secreto, escaparXml(secreto)])) resultado = resultado.split(forma).join('***');
     }
-    return resultado.length > LIMITE_RAW_BYTES ? `${resultado.slice(0, LIMITE_RAW_BYTES)}…[truncado]` : resultado;
+    if (Buffer.byteLength(resultado, 'utf8') <= LIMITE_RAW_BYTES) return resultado;
+    const sufijo = '…[truncado]';
+    const maximoContenido = LIMITE_RAW_BYTES - Buffer.byteLength(sufijo, 'utf8');
+    let contenido = '';
+    let bytes = 0;
+    for (const caracter of resultado) {
+      const bytesCaracter = Buffer.byteLength(caracter, 'utf8');
+      if (bytes + bytesCaracter > maximoContenido) break;
+      contenido += caracter;
+      bytes += bytesCaracter;
+    }
+    return `${contenido}${sufijo}`;
   }
 }
 

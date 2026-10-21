@@ -28,6 +28,8 @@ import { TIPOS_ARCHIVO_BETA } from './emision-beta.types';
 import type { TipoArchivoBeta } from './emision-beta.types';
 import { EnvioBetaRepository } from './envio-beta.repository';
 import { SunatEmisionBetaService } from './sunat-emision-beta.service';
+import { PosBetaService } from './pos-beta.service';
+import { PosBetaDto } from './pos-beta.dto';
 
 @Controller('fiscal/beta')
 @UseGuards(JwtGuard, RolesGuard)
@@ -39,7 +41,27 @@ export class BetaAdminController {
     private readonly envios: EnvioBetaRepository,
     private readonly esquema: FiscalEsquemaService,
     private readonly emision: SunatEmisionBetaService,
+    private readonly posBeta: PosBetaService,
   ) {}
+
+  @Get('pos')
+  @Header('Cache-Control', 'no-store')
+  estadoPosBeta() {
+    return this.posBeta.estado();
+  }
+
+  @Put('pos')
+  cambiarEstadoPosBeta(
+    @Body() dto: PosBetaDto,
+    @UsuarioActual() usuario: UsuarioToken,
+    @Req() req: Request,
+  ) {
+    return this.posBeta.cambiarEstado(dto.activo, {
+      id_usuario: usuario.id_usuario,
+      nombre: usuario.nombre ?? null,
+      ip: req.ip ?? null,
+    });
+  }
 
   @Get('emisor')
   @Header('Cache-Control', 'no-store')

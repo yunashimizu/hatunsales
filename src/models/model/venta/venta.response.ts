@@ -43,6 +43,8 @@ export interface VentaResponse {
   comprobante?: ComprobanteResponse;
   /** Motivo por el que el comprobante no pudo emitirse, para reintentarlo. */
   comprobante_error?: string;
+  /** Recargo por pago con tarjeta (con IGV) que ya está dentro de `total`. */
+  recargo_tarjeta?: number;
 }
 
 export interface VentaListadoResponse {

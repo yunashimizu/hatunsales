@@ -139,6 +139,24 @@ export class Comprobante {
   @Column({ nullable: true, type: 'text' })
   error_mensaje!: string;
 
+  @Column({ name: 'proveedor_fiscal', type: 'varchar', length: 20, nullable: true })
+  proveedor_fiscal!: string | null;
+
+  @Column({ name: 'ambiente_fiscal', type: 'varchar', length: 12, nullable: true })
+  ambiente_fiscal!: string | null;
+
+  @Column({ name: 'estado_sunat', type: 'varchar', length: 30, nullable: true })
+  estado_sunat!: string | null;
+
+  @Column({ name: 'emitido_en', type: 'timestamptz', nullable: true })
+  emitido_en!: Date | null;
+
+  @Column({ name: 'sunat_observaciones', type: 'jsonb', nullable: true })
+  sunat_observaciones!: { codigo: string; descripcion: string }[] | null;
+
+  @Column({ name: 'id_envio_ultimo', type: 'integer', nullable: true })
+  id_envio_ultimo!: number | null;
+
   @Column({ nullable: true, type: 'integer' })
   id_usuario!: number;
 

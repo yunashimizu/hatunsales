@@ -41,6 +41,7 @@ export const REQUISITOS_ESQUEMA_FISCAL: readonly RequisitoEsquema[] = [
   ...columnas('emision', 'productos', ['codigo_sunat']),
   ...columnas('emision', 'fiscal_envios', [
     'identificador', 'fecha_referencia', 'proximo_intento_en', 'bloqueado_hasta', 'hash_xml', 'tiempo_ms', 'id_usuario',
+    'id_comprobante',
   ]),
   ...columnas('emision', 'fiscal_artifacts', ['contenido', 'nombre', 'id_comprobante']),
 ];

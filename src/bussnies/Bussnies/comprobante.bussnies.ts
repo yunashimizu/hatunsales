@@ -1,15 +1,12 @@
 import {
   Injectable,
-  Logger,
   BadRequestException,
   ServiceUnavailableException,
   NotFoundException,
 } from '@nestjs/common';
-import axios from 'axios';
 import { ComprobanteRepository, FiltroComprobantes } from '../../repository/Repository/comprobante.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { ReceptorBussnies, TOPE_BOLETA_SIN_DOCUMENTO } from './receptor.bussnies';
-import { nubefactConfig, nubefactConfigurado } from '../../config/nubefact.config';
 import { emisorConfig } from '../../config/emisor.config';
 import {
   GenerarComprobanteRequest,
@@ -34,13 +31,13 @@ import {
   redondear,
 } from '../../util/fiscal/calculo-fiscal';
 import { numeroALetras } from '../../util/fiscal/numero-letras';
+import { construirLineaCpe, totalesCpeDesdeLineas } from '../../sunat/nucleo/linea-cpe';
+import type { AfectacionCpe, DocumentoCpe } from '../../sunat/nucleo/documento-fiscal.types';
+import { PosBetaService } from '../../sunat/emision/pos-beta.service';
 import {
   esNota,
   normalizarSerie,
   nombreTipoComprobante,
-  tipoComprobanteNubefact,
-  tipoComprobanteSunat,
-  tipoDocumentoNubefact,
   monedaNubefact,
   MOTIVOS_NOTA_CREDITO,
   MOTIVOS_NOTA_DEBITO,
@@ -50,8 +47,6 @@ import {
   TIPO_NOTA_DEBITO,
   TIPO_DOC_RUC,
 } from '../../util/fiscal/nubefact.catalogo';
-
-const TIEMPO_LIMITE_MS = 30_000;
 
 const MONEDAS: Record<number, { nombre: string; simbolo: string }> = {
   1: { nombre: 'SOLES', simbolo: 'S/' },
@@ -77,35 +72,28 @@ interface ComprobantePreparado {
 @Injectable()
 export class ComprobanteBussnies implements IComprobanteBussniees {
 
-  private readonly logger = new Logger(ComprobanteBussnies.name);
-
   constructor(
     private readonly repo: ComprobanteRepository,
     private readonly receptorBussnies: ReceptorBussnies,
     private readonly config: ConfiguracionRepository,
+    private readonly posBeta: PosBetaService,
   ) {}
-
-  /**
-   * NUBEFACT espera el token tal cual en la cabecera. El prefijo "Token token="
-   * pertenece a otra convención y hace que la solicitud sea rechazada.
-   */
-  private get headers() {
-    return {
-      'Content-Type': 'application/json; charset=utf-8',
-      Authorization: nubefactConfig.token,
-    };
-  }
 
   // ── Vista previa ─────────────────────────────────────────────
 
   /** Calcula el comprobante completo sin enviarlo ni consumir correlativo. */
   async previsualizar(dto: GenerarComprobanteRequest): Promise<PreviewComprobanteResponse> {
-    const preparado = await this.preparar(dto, { guardarReceptor: false });
-    const numero = dto.numero && dto.numero > 0
+    const betaPos = await this.posBeta.activoEnBeta();
+    const preparado = await this.preparar(dto, { guardarReceptor: false, betaPos });
+    const numero = betaPos
+      ? await this.posBeta.siguienteCorrelativoVista()
+      : dto.numero && dto.numero > 0
       ? dto.numero
       : (await this.repo.buscarUltimoNumeroPorSerie(preparado.serie)) + 1;
 
-    const emisor = await this.emisor();
+    const emisor = betaPos
+      ? await this.emisorBetaPreview()
+      : await this.emisor();
     const moneda = MONEDAS[preparado.idMoneda] ?? MONEDAS[1];
 
     return {
@@ -133,103 +121,258 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       observaciones: dto.observaciones ?? '',
       nota: this.datosNota(dto),
       advertencias: preparado.advertencias,
-      json_nubefact: this.construirPayload(preparado, numero),
+      proveedor_fiscal: 'sunat_directo',
+      ambiente_fiscal: betaPos ? 'beta' : undefined,
     };
   }
 
   // ── Emitir ───────────────────────────────────────────────────
 
   async generar(dto: GenerarComprobanteRequest): Promise<ComprobanteResponse> {
-    if (!nubefactConfigurado()) {
+    const betaPos = await this.posBeta.activoEnBeta();
+    if (!betaPos) {
       throw new ServiceUnavailableException(
-        'NUBEFACT no está configurado. Defina NUBEFACT_URL y NUBEFACT_TOKEN en el servidor.',
+        'La emisión comercial directa solo está habilitada para SUNAT BETA. Active la opción POS BETA en Facturación SUNAT; el comprobante no se enviará a ningún proveedor alternativo.',
+      );
+    }
+    return this.generarBeta(dto);
+  }
+
+  private async generarBeta(dto: GenerarComprobanteRequest): Promise<ComprobanteResponse> {
+    if (dto.id_tipo !== TIPO_FACTURA && dto.id_tipo !== TIPO_BOLETA) {
+      throw new BadRequestException(
+        'El POS SUNAT BETA solo admite facturas y boletas. Las notas requieren un flujo de referencia específico.',
+      );
+    }
+    if (dto.enviar_sunat === false) {
+      throw new BadRequestException(
+        'El POS SUNAT BETA está activo y requiere enviar el comprobante a BETA; no se puede guardar como si ya estuviera emitido.',
+      );
+    }
+    if (Number(dto.descuento_global ?? 0) !== 0) {
+      throw new BadRequestException(
+        'El POS SUNAT BETA no admite descuentos globales sin distribuirlos en las líneas. Aplique el descuento por producto.',
       );
     }
 
-    const preparado = await this.preparar(dto, { guardarReceptor: true });
+    const preparado = await this.preparar(dto, { guardarReceptor: true, betaPos: true });
+    if (preparado.idMoneda !== 1 && preparado.idMoneda !== 2) {
+      throw new BadRequestException('El POS SUNAT BETA solo admite soles (PEN) o dólares (USD).');
+    }
+    const numero = await this.posBeta.siguienteCorrelativo();
+    const documento = await this.documentoCpeBeta(preparado, numero);
+    const documentoPreparado = await this.posBeta.prepararDocumento(documento);
 
-    // El correlativo se toma dentro de una transacción con bloqueo, así dos
-    // cajas emitiendo a la vez no se pisan el número.
-    const comprobante = await this.reservar(preparado, dto.numero);
-    const payload = this.construirPayload(preparado, comprobante.numero);
-
-    let data: any;
+    const comprobante = await this.reservar(preparado, numero, true);
     try {
-      const respuesta = await axios.post(nubefactConfig.url, payload, {
-        headers: this.headers,
-        timeout: TIEMPO_LIMITE_MS,
-      });
-      data = respuesta.data;
-    } catch (error: any) {
-      const mensaje = this.extraerMensajeNubefact(error);
-      await this.repo.marcarError(comprobante.id_comprobante, mensaje);
-      this.logger.error(`Envío fallido de ${preparado.serie}-${comprobante.numero}: ${mensaje}`);
-      throw new ServiceUnavailableException(mensaje);
+      const resultado = await this.posBeta.emitirPreparado(
+        documentoPreparado,
+        comprobante.id_comprobante,
+        null,
+      );
+      const aceptado = resultado.aceptado;
+      const estado =
+        aceptado ? 'emitido' : resultado.estado === 'PENDIENTE_REENVIO' ? 'pendiente' : 'error';
+      return {
+        id_comprobante: comprobante.id_comprobante,
+        tipo_de_comprobante: dto.id_tipo,
+        serie: preparado.serie,
+        numero: comprobante.numero,
+        numero_formateado: this.formatearNumero(preparado.serie, comprobante.numero),
+        aceptada_sunat: aceptado,
+        sunat_description: resultado.mensaje,
+        sunat_responsecode: resultado.codigo,
+        cadena_qr: resultado.cadena_qr,
+        codigo_hash: resultado.digest,
+        estado,
+        error: aceptado ? undefined : resultado.mensaje,
+        proveedor_fiscal: 'sunat_directo',
+        ambiente_fiscal: 'beta',
+        estado_sunat: resultado.estado,
+        id_envio_ultimo: resultado.id_envio,
+        archivos_beta: resultado.archivos,
+      };
+    } catch (error) {
+      const persistido = await this.repo.buscarPorId(comprobante.id_comprobante);
+      if (!persistido?.id_envio_ultimo) {
+        const mensaje =
+          error instanceof Error ? error.message : 'No se pudo preparar el envío BETA';
+        await this.repo.actualizarRespuesta(comprobante.id_comprobante, {
+          estado: 'error',
+          estado_sunat: 'ERROR_CONFIG',
+          error_mensaje: mensaje,
+        });
+      }
+      throw error;
+    }
+  }
+
+  private async emisorBetaPreview(): Promise<PreviewComprobanteResponse['emisor']> {
+    const [beta, general] = await Promise.all([
+      this.posBeta.emisorParaDocumento(),
+      this.emisor(),
+    ]);
+    return {
+      ruc: beta.ruc,
+      razon_social: beta.razonSocial,
+      direccion: beta.direccion,
+      ubicacion: [beta.distrito, beta.provincia, beta.departamento].join(' - '),
+      logo_url: general.logo_url,
+    };
+  }
+
+  private async documentoCpeBeta(
+    preparado: ComprobantePreparado,
+    numero: number,
+  ): Promise<DocumentoCpe> {
+    const documento = preparado.dto;
+    const emisor = await this.posBeta.emisorParaDocumento();
+    const receptor = preparado.receptor;
+    const porcentajeIgv = preparado.resumen.porcentaje_igv;
+    const lineas = preparado.items.map((item) =>
+      construirLineaCpe(
+        {
+          cantidad: item.cantidad,
+          precioUnitario: item.precio_unitario,
+          subtotal: item.subtotal,
+          igv: item.igv,
+          total: item.total,
+          afectacion: this.afectacionCpe(item.tipo_de_igv),
+          descuento: item.descuento,
+        },
+        {
+          unidad: item.unidad_de_medida,
+          descripcion: item.descripcion,
+          codigoInterno: item.codigo,
+          codigoSunat: item.codigo_producto_sunat,
+        },
+        porcentajeIgv,
+      ),
+    );
+    const totales = totalesCpeDesdeLineas(lineas);
+    const esperados = {
+      gravada: preparado.resumen.total_gravada,
+      exonerada: preparado.resumen.total_exonerada,
+      inafecta: preparado.resumen.total_inafecta,
+      igv: preparado.resumen.total_igv,
+      total: preparado.resumen.total,
+    };
+    for (const clave of Object.keys(esperados) as (keyof typeof esperados)[]) {
+      if (redondear(totales[clave]) !== redondear(esperados[clave])) {
+        throw new BadRequestException(
+          `Los totales calculados para SUNAT BETA no coinciden con la venta (${clave}). No se reservó ni envió el comprobante.`,
+        );
+      }
     }
 
-    // NUBEFACT responde 200 aun cuando rechaza, con el detalle en `errors`.
-    if (data?.errors) {
-      const mensaje = Array.isArray(data.errors) ? data.errors.join(', ') : String(data.errors);
-      await this.repo.marcarError(comprobante.id_comprobante, mensaje);
-      throw new BadRequestException(mensaje);
+    const credito = (documento.condiciones_de_pago ?? '').toLowerCase().includes('crédito')
+      || (documento.condiciones_de_pago ?? '').toLowerCase().includes('credito');
+    const fechaEmisionIso = this.fechaIso(preparado.fechaEmision);
+    const fechaVencimientoIso = this.fechaIso(preparado.fechaVencimiento);
+    if (credito && fechaVencimientoIso <= fechaEmisionIso) {
+      throw new BadRequestException(
+        'Para emitir una venta al crédito en BETA, indique una fecha de vencimiento posterior a la emisión.',
+      );
     }
-
-    await this.repo.actualizarRespuesta(comprobante.id_comprobante, {
-      estado: 'emitido',
-      error_mensaje: undefined,
-      enlace: data.enlace ?? '',
-      enlace_pdf: data.enlace_del_pdf ?? '',
-      enlace_xml: data.enlace_del_xml ?? '',
-      enlace_cdr: data.enlace_del_cdr ?? '',
-      aceptada_sunat: data.aceptada_por_sunat ?? false,
-      sunat_description: data.sunat_description ?? '',
-      sunat_responsecode: String(data.sunat_responsecode ?? ''),
-      sunat_soap_error: data.sunat_soap_error ?? '',
-      cadena_qr: data.cadena_para_codigo_qr ?? '',
-      codigo_hash: data.codigo_hash ?? '',
-    });
+    const montoCredito = credito ? Number(documento.monto_credito ?? 0) : 0;
+    if (credito && (!Number.isFinite(montoCredito) || montoCredito <= 0 || montoCredito > totales.total)) {
+      throw new BadRequestException(
+        'El monto del crédito calculado en la venta no es válido para el comprobante BETA.',
+      );
+    }
 
     return {
-      ...this.mapRespuesta(data, comprobante.id_comprobante),
+      tipo: documento.id_tipo === TIPO_FACTURA ? '01' : '03',
       serie: preparado.serie,
-      numero: comprobante.numero,
-      numero_formateado: this.formatearNumero(preparado.serie, comprobante.numero),
-      estado: 'emitido',
+      numero,
+      fechaEmision: fechaEmisionIso,
+      horaEmision: new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'America/Lima',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      }).format(new Date()),
+      fechaVencimiento: credito ? fechaVencimientoIso : undefined,
+      moneda: preparado.idMoneda === 1 ? 'PEN' : 'USD',
+      emisor,
+      cliente: {
+        tipoDoc: String(receptor.tipo_documento),
+        numDoc: receptor.numero_documento,
+        nombre: receptor.denominacion,
+        direccion: receptor.direccion || undefined,
+      },
+      lineas,
+      totales,
+      formaPago: credito
+        ? {
+            tipo: 'Credito',
+            montoPendiente: montoCredito,
+            cuotas: [
+              {
+                numero: 1,
+                monto: montoCredito,
+                fechaPago: fechaVencimientoIso,
+              },
+            ],
+          }
+        : { tipo: 'Contado' },
+      leyendaMontoLetras: preparado.importeEnLetras,
+      observaciones: preparado.dto.observaciones,
     };
+  }
+
+  private fechaIso(fecha: string): string {
+    const partes = fecha.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    if (partes) return `${partes[3]}-${partes[2]}-${partes[1]}`;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return fecha;
+    throw new BadRequestException('La fecha del comprobante no tiene un formato válido para SUNAT.');
+  }
+
+  private afectacionCpe(tipoIgv: number): AfectacionCpe {
+    if (tipoIgv === 1) return '10';
+    if (tipoIgv === 8) return '20';
+    if (tipoIgv === 9) return '30';
+    throw new BadRequestException(
+      `El tipo de afectación IGV ${tipoIgv} todavía no se puede emitir por el flujo comercial SUNAT BETA.`,
+    );
   }
 
   /** Reintenta un comprobante que quedó en error o pendiente, sin gastar otro número. */
   async reintentar(id_comprobante: number): Promise<ComprobanteResponse> {
     const guardado = await this.repo.buscarPorId(id_comprobante);
     if (!guardado) throw new NotFoundException('Comprobante no encontrado');
-    if (guardado.estado === 'emitido') {
-      throw new BadRequestException('El comprobante ya fue emitido correctamente');
+    if (guardado.proveedor_fiscal === 'sunat_directo' && guardado.ambiente_fiscal === 'beta') {
+      if (!guardado.id_envio_ultimo) {
+        throw new BadRequestException('El comprobante BETA no tiene un envío recuperable asociado.');
+      }
+      const resultado = await this.posBeta.reintentar(guardado.id_envio_ultimo);
+      return {
+        id_comprobante,
+        tipo_de_comprobante: guardado.tipo?.id_tipo,
+        serie: guardado.serie,
+        numero: guardado.numero,
+        numero_formateado: this.formatearNumero(guardado.serie, guardado.numero),
+        aceptada_sunat: resultado.aceptado,
+        sunat_description: resultado.mensaje,
+        sunat_responsecode: resultado.codigo,
+        cadena_qr: resultado.cadena_qr,
+        codigo_hash: resultado.digest,
+        estado: resultado.aceptado
+          ? 'emitido'
+          : resultado.estado === 'PENDIENTE_REENVIO'
+            ? 'pendiente'
+            : 'error',
+        error: resultado.aceptado ? undefined : resultado.mensaje,
+        proveedor_fiscal: 'sunat_directo',
+        ambiente_fiscal: 'beta',
+        estado_sunat: resultado.estado,
+        id_envio_ultimo: resultado.id_envio,
+        archivos_beta: resultado.archivos,
+      };
     }
-
-    // Puede que NUBEFACT sí lo haya recibido y solo se perdiera la respuesta.
-    const yaExiste = await this.consultarEnNubefact(
-      guardado.tipo?.id_tipo ?? TIPO_BOLETA,
-      guardado.serie,
-      guardado.numero,
-    );
-
-    if (yaExiste && !yaExiste.errors) {
-      await this.repo.actualizarRespuesta(id_comprobante, {
-        estado: 'emitido',
-        error_mensaje: undefined,
-        enlace: yaExiste.enlace ?? '',
-        enlace_pdf: yaExiste.enlace_del_pdf ?? '',
-        enlace_xml: yaExiste.enlace_del_xml ?? '',
-        aceptada_sunat: yaExiste.aceptada_por_sunat ?? false,
-        sunat_description: yaExiste.sunat_description ?? '',
-        cadena_qr: yaExiste.cadena_para_codigo_qr ?? '',
-        codigo_hash: yaExiste.codigo_hash ?? '',
-      });
-      return { ...this.mapRespuesta(yaExiste, id_comprobante), estado: 'emitido' };
-    }
-
     throw new BadRequestException(
-      'El comprobante no llegó a registrarse en NUBEFACT. Corrija los datos y emita uno nuevo.',
+      'Este comprobante no pertenece a un envío SUNAT BETA recuperable. No se consultará ni reenviará a un proveedor externo.',
     );
   }
 
@@ -237,7 +380,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
 
   private async preparar(
     dto: GenerarComprobanteRequest,
-    opciones: { guardarReceptor: boolean },
+    opciones: { guardarReceptor: boolean; betaPos?: boolean },
   ): Promise<ComprobantePreparado> {
     if (!Array.isArray(dto.items) || dto.items.length === 0) {
       throw new BadRequestException('El comprobante debe tener al menos un producto');
@@ -264,7 +407,12 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     const serieModificada = dto.documento_que_se_modifica_serie;
     // Boleta/factura: serie desde configuración (POS solo lectura). Notas: flujo propio.
     let serieEntrada = dto.serie;
-    if (!esNota(dto.id_tipo)) {
+    if (opciones.betaPos) {
+      if (dto.id_tipo !== TIPO_FACTURA && dto.id_tipo !== TIPO_BOLETA) {
+        throw new BadRequestException('El POS SUNAT BETA solo admite facturas y boletas.');
+      }
+      serieEntrada = dto.id_tipo === TIPO_FACTURA ? 'FB01' : 'BB01';
+    } else if (!esNota(dto.id_tipo)) {
       const clave = dto.id_tipo === TIPO_FACTURA ? 'serie_factura' : 'serie_boleta';
       const defecto = dto.id_tipo === TIPO_FACTURA ? 'FFF1' : 'BBB1';
       serieEntrada = await this.config.obtenerTexto(clave, defecto);
@@ -404,7 +552,11 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     }
   }
 
-  private async reservar(preparado: ComprobantePreparado, numeroSolicitado?: number): Promise<Comprobante> {
+  private async reservar(
+    preparado: ComprobantePreparado,
+    numeroSolicitado?: number,
+    betaPos = false,
+  ): Promise<Comprobante> {
     const { dto, receptor, resumen, serie } = preparado;
 
     try {
@@ -434,6 +586,9 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
           observaciones: dto.observaciones ?? '',
           enviar_sunat: dto.enviar_sunat ?? true,
           enviar_cliente: dto.enviar_cliente ?? false,
+          proveedor_fiscal: betaPos ? 'sunat_directo' : null,
+          ambiente_fiscal: betaPos ? 'beta' : null,
+          estado_sunat: betaPos ? 'NO_ENVIADO' : null,
         },
         preparado.items.map((i) => ({
           id_producto: i.id_producto,
@@ -457,220 +612,29 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     }
   }
 
-  // ── Construcción del cuerpo para NUBEFACT ────────────────────
-
-  private construirPayload(preparado: ComprobantePreparado, numero: number): Record<string, any> {
-    const { dto, receptor, resumen, serie } = preparado;
-
-    return {
-      operacion: 'generar_comprobante',
-      tipo_de_comprobante: tipoComprobanteNubefact(dto.id_tipo),
-      serie,
-      numero,
-      sunat_transaction: 1,
-
-      cliente_tipo_de_documento: tipoDocumentoNubefact(receptor.tipo_documento),
-      cliente_numero_de_documento: receptor.numero_documento,
-      cliente_denominacion: this.limpiarTexto(receptor.denominacion),
-      cliente_direccion: this.limpiarTexto(receptor.direccion),
-      cliente_email: receptor.email ?? '',
-      cliente_email_1: '',
-      cliente_email_2: '',
-
-      fecha_de_emision: preparado.fechaEmision,
-      fecha_de_vencimiento: preparado.fechaVencimiento,
-      moneda: preparado.idMoneda,
-      tipo_de_cambio: '',
-      porcentaje_de_igv: resumen.porcentaje_igv,
-
-      descuento_global: '',
-      total_descuento: resumen.total_descuento || '',
-      total_anticipo: '',
-      total_gravada: resumen.total_gravada || '',
-      total_inafecta: resumen.total_inafecta || '',
-      total_exonerada: resumen.total_exonerada || '',
-      total_igv: resumen.total_igv || '',
-      total_gratuita: '',
-      total_otros_cargos: '',
-      total: resumen.total,
-
-      percepcion_tipo: '',
-      percepcion_base_imponible: '',
-      total_percepcion: '',
-      total_incluido_percepcion: '',
-      retencion_tipo: '',
-      retencion_base_imponible: '',
-      total_retencion: '',
-      total_impuestos_bolsas: '',
-      detraccion: false,
-
-      observaciones: this.limpiarTexto(dto.observaciones ?? ''),
-
-      documento_que_se_modifica_tipo: esNota(dto.id_tipo)
-        ? this.tipoDocumentoModificado(dto.documento_que_se_modifica_tipo)
-        : '',
-      documento_que_se_modifica_serie: esNota(dto.id_tipo)
-        ? (dto.documento_que_se_modifica_serie ?? '').toUpperCase()
-        : '',
-      documento_que_se_modifica_numero: esNota(dto.id_tipo)
-        ? Number(dto.documento_que_se_modifica_numero) || ''
-        : '',
-      tipo_de_nota_de_credito: dto.id_tipo === TIPO_NOTA_CREDITO ? (dto.tipo_de_nota_de_credito ?? '') : '',
-      tipo_de_nota_de_debito: dto.id_tipo === TIPO_NOTA_DEBITO ? (dto.tipo_de_nota_de_debito ?? '') : '',
-
-      enviar_automaticamente_a_la_sunat: dto.enviar_sunat ?? true,
-      enviar_automaticamente_al_cliente: (dto.enviar_cliente ?? false) && Boolean(receptor.email),
-
-      condiciones_de_pago: dto.condiciones_de_pago ?? '',
-      medio_de_pago: dto.medio_de_pago ?? '',
-      placa_vehiculo: '',
-      orden_compra_servicio: dto.orden_compra_servicio ?? '',
-      formato_de_pdf: '',
-      generado_por_contingencia: '',
-      bienes_region_selva: '',
-      servicios_region_selva: '',
-
-      items: preparado.items.map((i) => ({
-        unidad_de_medida: i.unidad_de_medida,
-        codigo: i.codigo,
-        codigo_producto_sunat: i.codigo_producto_sunat,
-        descripcion: i.descripcion,
-        cantidad: i.cantidad,
-        valor_unitario: i.valor_unitario,
-        precio_unitario: i.precio_unitario,
-        descuento: i.descuento || '',
-        subtotal: i.subtotal,
-        tipo_de_igv: i.tipo_de_igv,
-        igv: i.igv,
-        total: i.total,
-        anticipo_regularizacion: false,
-        anticipo_documento_serie: '',
-        anticipo_documento_numero: '',
-      })),
-    };
-  }
-
-  /** El documento corregido se referencia con el código del catálogo 01 de SUNAT. */
-  private tipoDocumentoModificado(valor?: string): string {
-    const limpio = (valor ?? '').toString().trim();
-    if (limpio === '01' || limpio === '03') return limpio;
-    if (limpio === '1' || limpio === String(TIPO_FACTURA)) return tipoComprobanteSunat(TIPO_FACTURA);
-    if (limpio === '2' || limpio === String(TIPO_BOLETA)) return tipoComprobanteSunat(TIPO_BOLETA);
-    return tipoComprobanteSunat(TIPO_FACTURA);
-  }
-
   // ── Consultar ────────────────────────────────────────────────
 
   async consultar(dto: ConsultarComprobanteRequest): Promise<ComprobanteResponse> {
-    const data = await this.consultarEnNubefact(dto.tipo_de_comprobante, dto.serie, dto.numero);
-
-    if (!data || data.errors) {
-      throw new NotFoundException(
-        data?.errors ? String(data.errors) : 'El comprobante no está registrado en NUBEFACT',
-      );
-    }
-
-    const enBD = await this.repo.buscarPorSerieNumero(dto.serie, dto.numero);
-    if (enBD) {
-      await this.repo.actualizarRespuesta(enBD.id_comprobante, {
-        aceptada_sunat: data.aceptada_por_sunat,
-        sunat_description: data.sunat_description,
-        anulado: data.anulado ?? false,
-        estado: data.anulado ? 'anulado' : 'emitido',
-      });
-    }
-
-    return this.mapRespuesta(data, enBD?.id_comprobante);
-  }
-
-  private async consultarEnNubefact(idTipo: number, serie: string, numero: number): Promise<any | null> {
-    try {
-      const { data } = await axios.post(
-        nubefactConfig.url,
-        {
-          operacion: 'consultar_comprobante',
-          tipo_de_comprobante: tipoComprobanteNubefact(idTipo),
-          serie,
-          numero,
-        },
-        { headers: this.headers, timeout: TIEMPO_LIMITE_MS },
-      );
-      return data;
-    } catch (error: any) {
-      this.logger.warn(`Consulta fallida de ${serie}-${numero}: ${this.extraerMensajeNubefact(error)}`);
-      return null;
-    }
+    void dto;
+    throw new ServiceUnavailableException(
+      'La consulta remota de comprobantes aún no está habilitada para SUNAT directo. Revise el estado del envío BETA en Documentos.',
+    );
   }
 
   // ── Anular ───────────────────────────────────────────────────
 
   async anular(dto: AnularComprobanteRequest): Promise<AnulacionResponse> {
-    const enBD = dto.id_comprobante
-      ? await this.repo.buscarPorId(dto.id_comprobante)
-      : await this.repo.buscarPorSerieNumero(dto.serie as string, dto.numero as number);
-
-    if (!enBD) throw new NotFoundException('Comprobante no encontrado');
-    if (enBD.anulado) throw new BadRequestException('El comprobante ya fue anulado');
-    if (!dto.motivo?.trim()) throw new BadRequestException('Indique el motivo de la anulación');
-
-    // Un comprobante que nunca llegó a NUBEFACT se descarta localmente.
-    if (enBD.estado === 'error' || enBD.estado === 'pendiente') {
-      await this.repo.actualizarRespuesta(enBD.id_comprobante, {
-        anulado: true,
-        estado: 'anulado',
-        motivo_anulacion: dto.motivo,
-      });
-      return { numero: enBD.numero, sunat_description: 'Descartado localmente, nunca llegó a SUNAT' };
-    }
-
-    try {
-      const { data } = await axios.post(
-        nubefactConfig.url,
-        {
-          operacion: 'generar_anulacion',
-          tipo_de_comprobante: tipoComprobanteNubefact(enBD.tipo?.id_tipo ?? TIPO_BOLETA),
-          serie: enBD.serie,
-          numero: enBD.numero,
-          motivo: this.limpiarTexto(dto.motivo),
-          codigo_unico: '',
-        },
-        { headers: this.headers, timeout: TIEMPO_LIMITE_MS },
-      );
-
-      if (data?.errors) {
-        throw new BadRequestException(Array.isArray(data.errors) ? data.errors.join(', ') : String(data.errors));
-      }
-
-      await this.repo.actualizarRespuesta(enBD.id_comprobante, {
-        anulado: true,
-        estado: 'anulado',
-        motivo_anulacion: dto.motivo,
-        sunat_ticket: data.sunat_ticket_numero ?? '',
-      });
-
-      return this.mapAnulacion(data);
-    } catch (error: any) {
-      if (error instanceof BadRequestException) throw error;
-      throw new ServiceUnavailableException(this.extraerMensajeNubefact(error));
-    }
+    void dto;
+    throw new ServiceUnavailableException(
+      'La anulación electrónica directa todavía no está implementada. No se enviará la solicitud a un proveedor externo.',
+    );
   }
 
   async consultarAnulacion(dto: ConsultarComprobanteRequest): Promise<AnulacionResponse> {
-    try {
-      const { data } = await axios.post(
-        nubefactConfig.url,
-        {
-          operacion: 'consultar_anulacion',
-          tipo_de_comprobante: tipoComprobanteNubefact(dto.tipo_de_comprobante),
-          serie: dto.serie,
-          numero: dto.numero,
-        },
-        { headers: this.headers, timeout: TIEMPO_LIMITE_MS },
-      );
-      return this.mapAnulacion(data);
-    } catch (error: any) {
-      throw new ServiceUnavailableException(this.extraerMensajeNubefact(error));
-    }
+    void dto;
+    throw new ServiceUnavailableException(
+      'La consulta de anulaciones aún no está habilitada para SUNAT directo.',
+    );
   }
 
   // ── Listados ─────────────────────────────────────────────────
@@ -765,19 +729,11 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
   async obtenerPdfBuffer(id_comprobante: number): Promise<Buffer> {
     const c = await this.repo.buscarPorId(id_comprobante);
     if (!c) throw new NotFoundException('Comprobante no encontrado');
-    if (!c.enlace_pdf) {
-      throw new NotFoundException('Este comprobante todavía no tiene PDF disponible');
-    }
-
-    try {
-      const resp = await axios.get(c.enlace_pdf, {
-        responseType: 'arraybuffer',
-        timeout: TIEMPO_LIMITE_MS,
-      });
-      return Buffer.from(resp.data);
-    } catch {
-      throw new ServiceUnavailableException('No se pudo descargar el PDF desde NUBEFACT');
-    }
+    throw new NotFoundException(
+      c.proveedor_fiscal === 'sunat_directo' && c.ambiente_fiscal === 'beta'
+        ? 'Este comprobante SUNAT BETA no tiene un PDF disponible.'
+        : 'La descarga remota de PDF no está habilitada para comprobantes históricos.',
+    );
   }
 
   // ── Auxiliares ───────────────────────────────────────────────
@@ -821,10 +777,6 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     return `${serie}-${String(numero).padStart(8, '0')}`;
   }
 
-  /**
-   * Las comillas dobles rompen el JSON de NUBEFACT, por ejemplo en
-   * descripciones como clavos 3" pulgadas.
-   */
   private limpiarTexto(texto: string): string {
     return (texto ?? '')
       .toString()
@@ -834,7 +786,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       .trim();
   }
 
-  /** Fecha de hoy en Perú (dd-mm-yyyy) para NUBEFACT / SUNAT. */
+  /** Fecha de hoy en Perú (dd-mm-yyyy). */
   private fechaHoyLima(): string {
     const partes = new Intl.DateTimeFormat('en-CA', {
       timeZone: 'America/Lima',
@@ -865,17 +817,6 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
     if (c.anulado) return 'anulado';
     if (c.estado === 'error' || c.estado === 'pendiente') return c.estado;
     return c.aceptada_sunat ? 'aceptado' : 'emitido';
-  }
-
-  private extraerMensajeNubefact(error: any): string {
-    const data = error?.response?.data;
-    if (Array.isArray(data?.errors)) return data.errors.join(', ');
-    if (typeof data?.errors === 'string') return data.errors;
-    if (typeof data === 'string' && data.trim()) return data.slice(0, 500);
-    if (typeof data?.message === 'string') return data.message;
-    if (error?.code === 'ECONNABORTED') return 'NUBEFACT no respondió a tiempo. Reintente en unos segundos.';
-    if (typeof error?.message === 'string') return error.message;
-    return 'No se pudo conectar con NUBEFACT';
   }
 
   // ── Mappers ──────────────────────────────────────────────────
@@ -930,6 +871,10 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       codigo_hash: c.codigo_hash,
       anulado: c.anulado,
       estado: this.estadoVisible(c),
+      proveedor_fiscal: c.proveedor_fiscal ?? undefined,
+      ambiente_fiscal: c.ambiente_fiscal ?? undefined,
+      estado_sunat: c.estado_sunat ?? undefined,
+      id_envio_ultimo: c.id_envio_ultimo ?? undefined,
     };
   }
 
@@ -955,7 +900,15 @@ export class ComprobanteBussnies implements IComprobanteBussniees {
       error_mensaje: c.error_mensaje,
       enlace: c.enlace,
       enlace_pdf: c.enlace_pdf,
-      puede_anular: !c.anulado,
+      proveedor_fiscal: c.proveedor_fiscal,
+      ambiente_fiscal: c.ambiente_fiscal,
+      estado_sunat: c.estado_sunat,
+      id_envio_ultimo: c.id_envio_ultimo,
+      puede_reintentar:
+        c.proveedor_fiscal === 'sunat_directo' && c.ambiente_fiscal === 'beta'
+          ? c.estado_sunat === 'ENVIANDO' || c.estado_sunat === 'PENDIENTE_REENVIO'
+          : false,
+      puede_anular: false,
     };
   }
 }

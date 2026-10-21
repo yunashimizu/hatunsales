@@ -137,6 +137,21 @@ export class CertificadoFiscalService {
     return { ...material };
   }
 
+  /** Material BETA exclusivo; el flujo comercial de pruebas nunca hereda el certificado productivo. */
+  async obtenerMaterialFirmaBeta(): Promise<MaterialFirma> {
+    const cargado = await this.materialVigente('beta');
+    if (!cargado) {
+      throw new FiscalConfigError(
+        'FISCAL_CERT_NO_CARGADO',
+        'No hay certificado digital BETA. Suba el certificado de pruebas en el panel antes de activar el POS BETA.',
+      );
+    }
+    if (cargado.material.vigenteHasta.getTime() <= this.reloj.ms()) {
+      throw new FiscalConfigError('FISCAL_CERT_VENCIDO', 'El certificado digital BETA está vencido: suba uno vigente para seguir firmando.');
+    }
+    return { ...cargado.material };
+  }
+
   /** Contrato §12.2: credenciales SOL del ambiente (BETA = RUC+MODDATOS). */
   obtenerCredencialesSol(ambiente: AmbienteFiscal): Promise<CredencialesSol> {
     return this.credencialesSol.obtener(ambiente);

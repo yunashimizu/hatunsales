@@ -25,13 +25,14 @@ export class EnvioBetaRepository {
     doc: DocumentoCpe,
     preparado: EnvioCpePreparado,
     idUsuario: number | null,
+    idComprobante?: number,
   ): Promise<number> {
     return this.bd.transaction(async (tx) => {
       const filas: Array<{ id_envio: number }> = await tx.query(
         `INSERT INTO fiscal_envios
            (tipo_documento, ambiente, proveedor, operacion, intento, estado, nombre_archivo,
-            identificador, id_usuario, fecha_envio, bloqueado_hasta, respuesta_json)
-         VALUES ($1, 'beta', 'sunat_directo', 'emitir', 1, 'ENVIANDO', $2, $3, $4, NOW(), NOW()+INTERVAL '60 seconds', $5::jsonb)
+              identificador, id_usuario, fecha_envio, bloqueado_hasta, respuesta_json, id_comprobante)
+           VALUES ($1, 'beta', 'sunat_directo', 'emitir', 1, 'ENVIANDO', $2, $3, $4, NOW(), NOW()+INTERVAL '60 seconds', $5::jsonb, $6)
          RETURNING id_envio`,
         [
           doc.tipo,
@@ -44,9 +45,23 @@ export class EnvioBetaRepository {
             cadena_qr: preparado.cadenaQr,
             advertencias: preparado.advertencias,
           }),
+          idComprobante ?? null,
         ],
       );
       const id = Number(filas[0].id_envio);
+      if (idComprobante !== undefined) {
+        const actualizadas = await tx.query(
+          `UPDATE comprobantes
+              SET proveedor_fiscal='sunat_directo', ambiente_fiscal='beta',
+                  estado='pendiente', estado_sunat='ENVIANDO', id_envio_ultimo=$2,
+                  error_mensaje=NULL
+            WHERE id_comprobante=$1 RETURNING id_comprobante`,
+          [idComprobante, id],
+        );
+        if (!actualizadas.length) {
+          throw new Error(`No se encontró el comprobante ${idComprobante} para enlazar el envío BETA.`);
+        }
+      }
       await this.guardarArchivo(
         tx,
         id,
@@ -89,7 +104,7 @@ export class EnvioBetaRepository {
                 respuesta_json=COALESCE(respuesta_json, '{}'::jsonb) || $6::jsonb,
                 tiempo_ms=$7, fecha_respuesta=NOW(), actualizado_en=NOW(), bloqueado_hasta=NULL,
                 ultimo_error=CASE WHEN $2::varchar IN ('ACEPTADO','ACEPTADO_OBS') THEN NULL ELSE $4::text END
-          WHERE id_envio=$1 AND ambiente='beta' RETURNING id_envio`,
+          WHERE id_envio=$1 AND ambiente='beta' RETURNING id_envio, id_comprobante`,
         [
           id,
           decision.estado,
@@ -104,6 +119,33 @@ export class EnvioBetaRepository {
         throw new Error(
           'No se encontró el envío BETA para guardar la respuesta.',
         );
+      const idComprobante = Number(filas[0].id_comprobante);
+      if (Number.isInteger(idComprobante) && idComprobante > 0) {
+        const aceptado = decision.estado === 'ACEPTADO' || decision.estado === 'ACEPTADO_OBS';
+        const estado =
+          aceptado ? 'emitido' : decision.estado === 'PENDIENTE_REENVIO' ? 'pendiente' : 'error';
+        await tx.query(
+          `UPDATE comprobantes
+              SET proveedor_fiscal='sunat_directo', ambiente_fiscal='beta',
+                  estado=$2, estado_sunat=$3, id_envio_ultimo=$4,
+                  aceptada_sunat=$5, sunat_description=$6, sunat_responsecode=$7,
+                  sunat_soap_error=$8, sunat_observaciones=$9::jsonb,
+                  emitido_en=CASE WHEN $5 THEN NOW() ELSE NULL END,
+                  error_mensaje=CASE WHEN $5 THEN NULL ELSE $6 END
+            WHERE id_comprobante=$1`,
+          [
+            idComprobante,
+            estado,
+            decision.estado,
+            id,
+            aceptado,
+            respuesta.descripcion,
+            respuesta.codigo,
+            aceptado ? null : respuesta.descripcion,
+            JSON.stringify(respuesta.observaciones),
+          ],
+        );
+      }
       if (cdrXml)
         await this.guardarArchivo(
           tx,
@@ -128,7 +170,7 @@ export class EnvioBetaRepository {
   listar(): Promise<EnvioBetaVista[]> {
     return this.bd.query(
       `SELECT e.id_envio, e.tipo_documento, e.nombre_archivo, e.estado, e.codigo_sunat,
-              e.mensaje_sunat, e.creado_en,
+              e.mensaje_sunat, e.respuesta_json #>> '{clasificacion,accion}' AS accion_sunat, e.creado_en,
               COALESCE((SELECT json_agg(a.tipo_artifacto ORDER BY a.id_artifact)
                           FROM fiscal_artifacts a WHERE a.id_envio=e.id_envio AND a.contenido IS NOT NULL), '[]'::json) AS archivos
          FROM fiscal_envios e WHERE e.ambiente='beta' AND e.proveedor='sunat_directo'
@@ -154,9 +196,9 @@ export class EnvioBetaRepository {
          UPDATE fiscal_envios SET estado='ENVIANDO', intento=intento+1,
                 bloqueado_hasta=NOW()+INTERVAL '60 seconds', fecha_envio=NOW(), actualizado_en=NOW()
           WHERE id_envio=$1 AND ambiente='beta' AND proveedor='sunat_directo'
-            AND estado IN ('ENVIANDO','PENDIENTE_REENVIO')
+            AND estado='PENDIENTE_REENVIO'
+            AND respuesta_json #>> '{clasificacion,accion}' IS DISTINCT FROM 'RECUPERAR_CDR'
             AND (bloqueado_hasta IS NULL OR bloqueado_hasta<NOW())
-            AND (estado<>'ENVIANDO' OR fecha_envio<NOW()-INTERVAL '45 seconds')
             AND EXISTS (SELECT 1 FROM fiscal_artifacts WHERE id_envio=$1 AND tipo_artifacto='zip' AND contenido IS NOT NULL)
           RETURNING id_envio, nombre_archivo, respuesta_json
        ) SELECT t.*, a.contenido AS zip FROM tomado t

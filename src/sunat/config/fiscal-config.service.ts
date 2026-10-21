@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { CacheTtl } from './cache-ttl';
 import type { ResultadoPreparacion } from './checklist-activacion';
@@ -44,10 +44,8 @@ export class FiscalConfigService {
   static readonly TTL_MS = 10_000;
   private static readonly FECHA_REGLAS_2027 = '2027-01-01';
 
-  private readonly logger = new Logger(FiscalConfigService.name);
   private readonly cache: CacheTtl<SnapshotConfigFiscal>;
   private readonly defectos: DefectosEntornoFiscal = defectosDesdeEntorno();
-  private avisoInconsistencia = false;
 
   constructor(
     private readonly repositorio: RepositorioConfigFiscal,
@@ -74,20 +72,9 @@ export class FiscalConfigService {
     this.cache.invalidar();
   }
 
-  /**
-   * Proveedor con el que se emiten las ventas. 'sunat_directo' solo si además el
-   * ambiente es producción: una venta real jamás debe ir a SUNAT BETA.
-   */
+  /** Proveedor fiscal configurado; el POS solo emite si su activación SUNAT BETA está lista. */
   async proveedorActivo(): Promise<ProveedorFiscal> {
-    const snapshot = await this.snapshot();
-    if (snapshot.proveedor === 'sunat_directo' && snapshot.ambiente !== 'produccion') {
-      if (!this.avisoInconsistencia) {
-        this.avisoInconsistencia = true;
-        this.logger.warn('fiscal_proveedor=sunat_directo con ambiente beta: se emite con Nubefact hasta corregirlo en el panel.');
-      }
-      return 'nubefact';
-    }
-    return snapshot.proveedor;
+    return (await this.snapshot()).proveedor;
   }
 
   async ambiente(): Promise<AmbienteFiscal> {

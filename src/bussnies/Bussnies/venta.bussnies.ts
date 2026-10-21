@@ -15,18 +15,44 @@ import {
   calcularComprobante,
   PORCENTAJE_IGV_POR_DEFECTO,
   redondear,
+  ResumenFiscal,
 } from '../../util/fiscal/calculo-fiscal';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { pasarelaConfig } from '../../config/pasarela.config';
 import { CajaSesionBussnies } from './caja-sesion.bussnies';
 import { normalizarRol } from '../../config/roles.config';
 import { resolverPrecioVenta } from '../../util/precios/precio-venta';
+import {
+  CLAVE_RECARGO_TARJETA_PCT,
+  CODIGO_RECARGO_TARJETA,
+  DESCRIPCION_RECARGO_TARJETA,
+  RECARGO_TARJETA_PCT_DEFECTO,
+  UNIDAD_RECARGO_TARJETA,
+  RecargoTarjeta,
+  calcularRecargoTarjeta,
+  esMetodoTarjeta,
+  normalizarPorcentajeRecargo,
+  repartirRecargoPorAfectacion,
+} from '../../util/precios/recargo-tarjeta';
+
+/** Línea del comprobante que cobra el recargo por tarjeta: no es un producto, no mueve stock. */
+interface ItemRecargo {
+  descripcion: string;
+  codigo: string;
+  unidad_de_medida: string;
+  cantidad: number;
+  precio_unitario: number;
+  descuento: number;
+  tipo_de_igv: number;
+}
+
+const SIN_RECARGO: RecargoTarjeta = { aplica: false, porcentaje: 0, base_tarjeta: 0, monto: 0 };
 
 /**
  * Punto de venta de mostrador.
  *
  * La venta y el comprobante son dos pasos separados a propósito: la mercadería
- * ya salió del almacén, así que un rechazo de NUBEFACT no debe deshacer la
+ * ya salió del almacén, así que un rechazo de SUNAT no debe deshacer la
  * venta. Queda registrada con el comprobante pendiente y se puede reintentar.
  */
 @Injectable()
@@ -69,12 +95,15 @@ export class VentaBussnies {
   async contextoPos(): Promise<{
     almacenes: { id_almacen: number; nombre: string; sucursal: string; id_sucursal: number | null }[];
     almacen_default?: number;
+    /** % que se suma a la parte de la venta cobrada con tarjeta (0 = sin recargo). */
+    recargo_tarjeta_pct: number;
   }> {
     const filas = await this.repo.listarAlmacenesPos();
     const def = await this.almacenPorDefecto();
     return {
       almacenes: filas,
       ...(def ? { almacen_default: def } : {}),
+      recargo_tarjeta_pct: await this.porcentajeRecargoTarjeta(),
     };
   }
 
@@ -82,10 +111,24 @@ export class VentaBussnies {
     return this.creditoRepo.metodosConTipo();
   }
 
-  /** Vista previa del comprobante desde el carrito del mostrador. */
+  /**
+   * Vista previa del comprobante desde el carrito del mostrador. Si algún pago es
+   * con tarjeta, ya trae el recargo como línea y dentro del total: lo que ve el
+   * cajero es lo que se cobra, se registra y se envía a SUNAT.
+   */
   async previsualizar(dto: CrearVentaRequest): Promise<PreviewComprobanteResponse> {
-    const { items } = await this.armarLineas(dto);
-    return this.comprobantes.previsualizar(this.aSolicitudComprobante(dto, items));
+    const { items, itemsRecargo, recargo, totalSinRecargo } = await this.armarLineas(dto);
+    const preview = await this.comprobantes.previsualizar(this.aSolicitudComprobante(dto, items, itemsRecargo));
+    if (!recargo.aplica) return preview;
+    return {
+      ...preview,
+      recargo_tarjeta: {
+        porcentaje: recargo.porcentaje,
+        base_tarjeta: recargo.base_tarjeta,
+        monto: recargo.monto,
+        total_sin_recargo: totalSinRecargo,
+      },
+    };
   }
 
   // ── Registrar ────────────────────────────────────────────────
@@ -106,7 +149,7 @@ export class VentaBussnies {
       if (existente) return this.obtener(existente);
     }
 
-    const { items, resumen } = await this.armarLineas(dto);
+    const { items, itemsRecargo, resumen, recargo } = await this.armarLineas(dto);
     const receptor = await this.resolverReceptor(dto);
     const { pagos, credito } = await this.validarPagosYCredito(dto, resumen.total, receptor, usuario);
 
@@ -169,6 +212,7 @@ export class VentaBussnies {
     }
 
     const venta = await this.obtener(idVenta);
+    if (recargo.aplica) venta.recargo_tarjeta = recargo.monto;
 
     // Un reintento idempotente devuelve la venta existente sin volver a llamar
     // al proveedor de comprobantes ni repetir efectos externos.
@@ -179,14 +223,28 @@ export class VentaBussnies {
     try {
       const medio = await this.nombreMedioPago(pagos);
       venta.comprobante = await this.comprobantes.generar({
-        ...this.aSolicitudComprobante(dto, items),
+        ...this.aSolicitudComprobante(dto, items, itemsRecargo),
         id_venta: idVenta,
         id_cliente: receptor.id_cliente,
         id_empresa: receptor.id_empresa,
         documento: receptor.numero_documento,
         medio_de_pago: medio,
         condiciones_de_pago: credito ? 'Crédito' : 'Contado',
+        monto_credito: credito?.monto,
+        fecha_de_vencimiento: credito
+          ? this.fechaLimaMasDias(credito.dias)
+          : undefined,
       } as any);
+      if (
+        venta.comprobante.proveedor_fiscal === 'sunat_directo' &&
+        venta.comprobante.ambiente_fiscal === 'beta' &&
+        !venta.comprobante.aceptada_sunat
+      ) {
+        venta.comprobante_error =
+          venta.comprobante.error ||
+          venta.comprobante.sunat_description ||
+          'SUNAT BETA no confirmó la aceptación. Revise el comprobante en Documentos antes de reintentar.';
+      }
     } catch (error: any) {
       const mensaje = error?.response?.message ?? error?.message ?? 'No se pudo emitir el comprobante';
       this.logger.warn(`Venta ${idVenta} registrada sin comprobante: ${mensaje}`);
@@ -348,22 +406,84 @@ export class VentaBussnies {
       PORCENTAJE_IGV_POR_DEFECTO,
     );
 
-    const resumen = calcularComprobante(
-      items.map((i) => ({
-        cantidad: i.cantidad,
-        precio_unitario: i.precio_unitario,
-        descuento: i.descuento,
-        tipo_de_igv: i.tipo_de_igv,
-      })),
-      porcentajeIgv,
-    );
+    const lineasProductos = items.map((i) => ({
+      cantidad: i.cantidad,
+      precio_unitario: i.precio_unitario,
+      descuento: i.descuento,
+      tipo_de_igv: i.tipo_de_igv,
+    }));
+    const resumenProductos = calcularComprobante(lineasProductos, porcentajeIgv);
 
-    return { items, resumen };
+    // El recargo por tarjeta se calcula sobre el total ya con descuentos y va como línea
+    // aparte AL FINAL: los productos conservan su posición (detalle de la venta y stock).
+    const { recargo, itemsRecargo } = await this.resolverRecargoTarjeta(dto, resumenProductos);
+    const resumen = itemsRecargo.length
+      ? calcularComprobante(
+          [
+            ...lineasProductos,
+            ...itemsRecargo.map((r) => ({
+              cantidad: r.cantidad,
+              precio_unitario: r.precio_unitario,
+              descuento: r.descuento,
+              tipo_de_igv: r.tipo_de_igv,
+            })),
+          ],
+          porcentajeIgv,
+        )
+      : resumenProductos;
+
+    return { items, itemsRecargo, resumen, recargo, totalSinRecargo: resumenProductos.total };
+  }
+
+  /** % vigente del recargo por tarjeta (0 = desactivado); lo lee el POS para el cálculo en vivo. */
+  private async porcentajeRecargoTarjeta(): Promise<number> {
+    return normalizarPorcentajeRecargo(
+      await this.config.obtenerNumero(CLAVE_RECARGO_TARJETA_PCT, RECARGO_TARJETA_PCT_DEFECTO),
+    );
+  }
+
+  /**
+   * Recargo por cobrar con tarjeta. Solo se consulta lo necesario: sin pagos o sin ningún
+   * medio de tarjeta no se lee ni la configuración. Es parte del precio de la venta: sube
+   * el total, los pagos deben cubrirlo y el comprobante lo declara como una línea más.
+   */
+  private async resolverRecargoTarjeta(
+    dto: CrearVentaRequest,
+    resumen: ResumenFiscal,
+  ): Promise<{ recargo: RecargoTarjeta; itemsRecargo: ItemRecargo[] }> {
+    const ninguno = { recargo: SIN_RECARGO, itemsRecargo: [] as ItemRecargo[] };
+    const pagos = dto.pagos ?? [];
+    if (!pagos.length) return ninguno;
+
+    const metodos = await this.creditoRepo.metodosConTipo();
+    const tarjetas = new Set(metodos.filter((m) => esMetodoTarjeta(m)).map((m) => Number(m.id_metodo)));
+    const entradas = pagos.map((p) => ({
+      tarjeta: p.id_metodo != null && tarjetas.has(Number(p.id_metodo)),
+      monto: Number(p.monto) || 0,
+    }));
+    if (!entradas.some((p) => p.tarjeta)) return ninguno;
+
+    const porcentaje = await this.porcentajeRecargoTarjeta();
+    const recargo = calcularRecargoTarjeta(resumen.total, entradas, porcentaje);
+    if (!recargo.aplica) return { recargo, itemsRecargo: [] };
+
+    const etiqueta = `${DESCRIPCION_RECARGO_TARJETA} (${Number(recargo.porcentaje.toFixed(2))}%)`;
+    const itemsRecargo = repartirRecargoPorAfectacion(resumen.lineas, recargo.monto).map((tramo) => ({
+      descripcion: etiqueta,
+      codigo: CODIGO_RECARGO_TARJETA,
+      unidad_de_medida: UNIDAD_RECARGO_TARJETA,
+      cantidad: 1,
+      precio_unitario: tramo.monto,
+      descuento: 0,
+      tipo_de_igv: tramo.tipo_de_igv,
+    }));
+    return { recargo, itemsRecargo };
   }
 
   private aSolicitudComprobante(
     dto: CrearVentaRequest,
     items: { id_producto: number; descripcion: string; codigo: string; unidad_de_medida: string; cantidad: number; precio_unitario: number; descuento: number; tipo_de_igv?: number }[],
+    itemsRecargo: ItemRecargo[] = [],
   ): GenerarComprobanteRequest {
     return {
       documento: dto.documento,
@@ -374,16 +494,27 @@ export class VentaBussnies {
       serie: dto.serie,
       observaciones: dto.observaciones,
       enviar_cliente: dto.enviar_cliente,
-      items: items.map((i) => ({
-        id_producto: i.id_producto,
-        codigo: i.codigo,
-        unidad_de_medida: i.unidad_de_medida,
-        descripcion: i.descripcion,
-        cantidad: i.cantidad,
-        precio_unitario: i.precio_unitario,
-        descuento: i.descuento,
-        tipo_de_igv: i.tipo_de_igv,
-      })),
+      items: [
+        ...items.map((i) => ({
+          id_producto: i.id_producto,
+          codigo: i.codigo,
+          unidad_de_medida: i.unidad_de_medida,
+          descripcion: i.descripcion,
+          cantidad: i.cantidad,
+          precio_unitario: i.precio_unitario,
+          descuento: i.descuento,
+          tipo_de_igv: i.tipo_de_igv,
+        })),
+        ...itemsRecargo.map((r) => ({
+          codigo: r.codigo,
+          unidad_de_medida: r.unidad_de_medida,
+          descripcion: r.descripcion,
+          cantidad: r.cantidad,
+          precio_unitario: r.precio_unitario,
+          descuento: r.descuento,
+          tipo_de_igv: r.tipo_de_igv,
+        })),
+      ],
     } as GenerarComprobanteRequest;
   }
 
@@ -508,7 +639,7 @@ export class VentaBussnies {
       const esYape = tipo === 'billetera' && nombre.includes('yape');
       const esPlin = tipo === 'billetera' && nombre.includes('plin');
       const esTransfer = tipo === 'transferencia' || nombre.includes('transfer');
-      const esTarjeta = tipo === 'tarjeta' || nombre.includes('tarjeta');
+      const esTarjeta = esMetodoTarjeta({ tipo, nombre });
 
       if (esTransfer) {
         if (!p.id_cuenta_bancaria) {
@@ -625,6 +756,20 @@ export class VentaBussnies {
       .map((p) => metodos.find((m) => Number(m.id_metodo) === Number(p.id_metodo))?.nombre)
       .filter(Boolean);
     return nombres.join(' + ') || '';
+  }
+
+  private fechaLimaMasDias(dias: number): string {
+    const partes = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Lima',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    const anio = Number(partes.find((p) => p.type === 'year')?.value);
+    const mes = Number(partes.find((p) => p.type === 'month')?.value);
+    const dia = Number(partes.find((p) => p.type === 'day')?.value);
+    const fecha = new Date(Date.UTC(anio, mes - 1, dia + Math.max(1, Math.trunc(dias))));
+    return `${String(fecha.getUTCDate()).padStart(2, '0')}-${String(fecha.getUTCMonth() + 1).padStart(2, '0')}-${fecha.getUTCFullYear()}`;
   }
 
   private validarPagos(dto: CrearVentaRequest, total: number) {

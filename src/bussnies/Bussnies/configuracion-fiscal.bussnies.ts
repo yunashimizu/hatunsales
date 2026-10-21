@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import {
   CLAVES_EMISOR,
@@ -15,26 +15,26 @@ import {
 } from '../../util/fiscal/nubefact.catalogo';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { whatsappCloudListo } from '../../config/whatsapp.config';
-import { nubefactConfig } from '../../config/nubefact.config';
 import { FiscalConfigService } from '../../sunat/config/fiscal-config.service';
 import { CLAVES_EMISOR_FISCAL } from '../../sunat/config/fiscal-config.tipos';
 import { NotificadorCambiosFiscales } from '../../sunat/config/notificador-cambios-fiscales';
 import { partirUbicacion } from '../../sunat/config/snapshot-config-fiscal';
+import { PosBetaService } from '../../sunat/emision/pos-beta.service';
 
 @Injectable()
 export class ConfiguracionFiscalBussnies {
-  private readonly logger = new Logger(ConfiguracionFiscalBussnies.name);
-
   constructor(
     private readonly config: ConfiguracionRepository,
     private readonly fiscal: FiscalConfigService,
     private readonly cambiosFiscales: NotificadorCambiosFiscales,
+    private readonly posBeta: PosBetaService,
   ) {}
 
   /** Series efectivas para el POS (solo lectura en mostrador). */
   async seriesPos() {
-    const serieBoleta = await this.serieEfectiva(TIPO_BOLETA);
-    const serieFactura = await this.serieEfectiva(TIPO_FACTURA);
+    const betaPos = await this.posBeta.activoEnBeta();
+    const serieBoleta = betaPos ? 'BB01' : await this.serieEfectiva(TIPO_BOLETA);
+    const serieFactura = betaPos ? 'FB01' : await this.serieEfectiva(TIPO_FACTURA);
     return {
       serie_boleta: serieBoleta,
       serie_factura: serieFactura,
@@ -43,7 +43,10 @@ export class ConfiguracionFiscalBussnies {
         [TIPO_FACTURA]: serieFactura,
       },
       editable_en_pos: false,
-      mensaje: 'La serie se asigna sola según boleta o factura. No es editable en el POS.',
+      beta_pos_directo: betaPos,
+      mensaje: betaPos
+        ? 'Prueba SUNAT BETA activa: el POS usará el emisor BETA y las series FB01/BB01. No tiene validez tributaria.'
+        : 'Emisión directa SUNAT BETA desactivada. Las ventas con comprobante no se enviarán a ningún proveedor alternativo.',
     };
   }
 
@@ -100,7 +103,6 @@ export class ConfiguracionFiscalBussnies {
         serie_factura: series.serie_factura,
       },
       estados: {
-        nubefact_configurado: !!(nubefactConfig.url && nubefactConfig.token),
         whatsapp_cloud: whatsappCloudListo(),
         caja_modo: (valores.caja_modo || 'blando').toLowerCase() === 'estricto' ? 'estricto' : 'blando',
         // Facturación electrónica directa (detalle completo en GET /fiscal/configuracion).
@@ -111,19 +113,13 @@ export class ConfiguracionFiscalBussnies {
     };
   }
 
-  /** Nunca rompe esta pantalla: si falta la fase 9 o la BD falla, informa Nubefact y «no listo». */
   private async estadoFiscal(): Promise<{ proveedor: string; ambiente: string; listo: boolean }> {
-    try {
-      const [proveedor, ambiente, preparacion] = await Promise.all([
-        this.fiscal.proveedorActivo(),
-        this.fiscal.ambiente(),
-        this.fiscal.listoParaProduccion(),
-      ]);
-      return { proveedor, ambiente, listo: preparacion.listo };
-    } catch (error: any) {
-      this.logger.warn(`No se pudo leer el estado de SUNAT directo: ${error?.message ?? error}`);
-      return { proveedor: 'nubefact', ambiente: 'beta', listo: false };
-    }
+    const [proveedor, ambiente, preparacion] = await Promise.all([
+      this.fiscal.proveedorActivo(),
+      this.fiscal.ambiente(),
+      this.fiscal.listoParaProduccion(),
+    ]);
+    return { proveedor, ambiente, listo: preparacion.listo };
   }
 
   /** Con SUNAT directo o la GRE electrónica activos, el RUC está atado al certificado. */
@@ -134,7 +130,7 @@ export class ConfiguracionFiscalBussnies {
       throw new ConflictException(
         cuerpoError(
           CodigoError.FISCAL_CONFIG_INVALIDA,
-          'No se puede cambiar el RUC mientras SUNAT directo o la guía electrónica están activos: primero vuelva a Nubefact.',
+          'No se puede cambiar el RUC mientras SUNAT directo o la guía electrónica están activos.',
         ),
       );
     }
@@ -221,7 +217,7 @@ export class ConfiguracionFiscalBussnies {
       throw new BadRequestException(
         cuerpoError(
           CodigoError.SERIE_INVALIDA,
-          'La serie debe tener 4 caracteres (ej. BBB1 o FFF1), igual que en Nubefact.',
+          'La serie debe tener 4 caracteres (por ejemplo, BBB1 o FFF1).',
         ),
       );
     }

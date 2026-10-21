@@ -15,6 +15,19 @@ describe('resolverPrecioVenta', () => {
     expect(resultado.total_linea).toBe(190);
   });
 
+  it('multiplica un descuento decimal por unidad por cada unidad vendida', () => {
+    const resultado = resolverPrecioVenta({
+      precio_lista: 10,
+      descuento_producto: 0.2,
+      cantidad: 2,
+    });
+
+    expect(resultado.descuento_unitario_aplicado).toBe(0.2);
+    expect(resultado.descuento_total_linea).toBe(0.4);
+    expect(resultado.precio_unitario_final).toBe(9.8);
+    expect(resultado.total_linea).toBe(19.6);
+  });
+
   it('mantiene sin descuento cuando la línea llega con cero', () => {
     const resultado = resolverPrecioVenta({
       precio_lista: 100,

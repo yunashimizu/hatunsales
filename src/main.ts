@@ -9,7 +9,6 @@ import cookieParser from 'cookie-parser';
 import { JWT_DEFAULT_DEV } from './config/jwt.config';
 import { booleanoEntorno, esProduccion } from './config/runtime.config';
 import { postgresConfigurado } from './config/database.config';
-import { nubefactConfigurado } from './config/nubefact.config';
 import { opcionesCors, origenesPermitidos } from './util/http/cors.config';
 import { crearMiddlewareCabecerasSeguridad } from './util/http/cabeceras-seguridad.middleware';
 import { crearMiddlewareRegistroPeticiones } from './util/http/registro-peticiones.middleware';
@@ -43,13 +42,6 @@ function validarEntornoProduccion(): void {
       'Bootstrap',
     );
     throw new Error('CORS_ORIGIN obligatorio en producción');
-  }
-
-  if (esProd && !nubefactConfigurado()) {
-    Logger.warn(
-      'NUBEFACT_URL / NUBEFACT_TOKEN no configurados: la emisión de comprobantes fallará hasta definirlos.',
-      'Bootstrap',
-    );
   }
 
   if (esProd && !process.env.SUNAT_TOKEN?.trim() && !process.env.APIPERU_TOKEN?.trim()) {

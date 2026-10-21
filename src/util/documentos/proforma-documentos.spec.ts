@@ -216,7 +216,8 @@ describe('reducirLogo', () => {
     expect(imagenSoportada(reducido)).toBe(true);
     expect(reducido.readUInt32BE(16)).toBe(420);
     expect(reducido.readUInt32BE(20)).toBe(280);
-  });
+    // Genera y reduce casi un millón de píxeles en JS puro: con el CPU ocupado (suite completa) pasa de los 5 s por defecto.
+  }, 30_000);
 
   it('deja intacto un PNG que ya es pequeño y lo que no es PNG', async () => {
     const chico = pngSintetico(200, 100);

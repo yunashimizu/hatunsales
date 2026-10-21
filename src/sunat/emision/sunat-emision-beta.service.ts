@@ -12,6 +12,7 @@ import type {
 } from '../nucleo/documento-fiscal.types';
 import { esErrorNucleoFiscal } from '../nucleo/errores-nucleo';
 import { PreparadorEnvioCpe } from '../nucleo/preparador-envio-cpe';
+import type { EnvioCpePreparado } from '../nucleo/preparador-envio-cpe';
 import { FabricaClienteSoapSunat } from '../nucleo/soap/sunat-soap-client';
 import type {
   ResultadoEmisionBeta,
@@ -35,7 +36,33 @@ export class SunatEmisionBetaService {
     doc: DocumentoCpe,
     material: MaterialFirma,
     idUsuario: number | null,
+    idComprobante?: number,
+    preparadoExistente?: EnvioCpePreparado,
   ): Promise<ResultadoEmisionBeta> {
+    const preparado = preparadoExistente ?? (await this.preparar(doc, material));
+    const cliente = this.clientes.crear({
+      ambiente: 'beta',
+      usuario: `${doc.emisor.ruc}MODDATOS`,
+      clave: 'MODDATOS',
+    });
+    const id = await this.repositorio.registrarPreparado(
+      doc,
+      preparado,
+      idUsuario,
+      idComprobante,
+    );
+    return this.enviarGuardado(
+      id,
+      preparado.nombreBase,
+      preparado.zip.base64,
+      doc,
+      preparado.digestValue,
+      preparado.cadenaQr,
+      cliente,
+    );
+  }
+
+  async preparar(doc: DocumentoCpe, material: MaterialFirma): Promise<EnvioCpePreparado> {
     if (!material.ruc || material.ruc !== doc.emisor?.ruc) {
       throw new FiscalConfigError(
         'FISCAL_CERT_RUC_NO_COINCIDE',
@@ -58,26 +85,7 @@ export class SunatEmisionBetaService {
       }
       throw error;
     }
-    // BETA es explícito: no se lee ningún endpoint ni contraseña SOL de producción del entorno.
-    const cliente = this.clientes.crear({
-      ambiente: 'beta',
-      usuario: `${doc.emisor.ruc}MODDATOS`,
-      clave: 'MODDATOS',
-    });
-    const id = await this.repositorio.registrarPreparado(
-      doc,
-      preparado,
-      idUsuario,
-    );
-    return this.enviarGuardado(
-      id,
-      preparado.nombreBase,
-      preparado.zip.base64,
-      doc,
-      preparado.digestValue,
-      preparado.cadenaQr,
-      cliente,
-    );
+    return preparado;
   }
 
   async reintentar(id: number): Promise<ResultadoEmisionBeta> {
@@ -85,7 +93,7 @@ export class SunatEmisionBetaService {
     if (!envio)
       throw new FiscalConfigError(
         'FISCAL_REENVIO_NO_PERMITIDO',
-        'El envío no está pendiente de reenvío o todavía está en curso. Los aceptados y rechazados no se vuelven a enviar.',
+        'El envío no está disponible para un reintento seguro. Los envíos en curso, aceptados, rechazados o que requieren recuperar su CDR no se vuelven a enviar.',
       );
     const datos = envio.respuesta_json;
     if (!datos.documento?.emisor?.ruc)

@@ -159,7 +159,7 @@ export class ReglaLineas implements ReglaValidacionCpe {
     this.compararFormula(
       bruto.menos(linea.descuentoBase).aNumero(),
       linea.valorVenta,
-      `${etiqueta}: cantidad × valor unitario − descuento (%esperado%) no coincide con el valor de venta (%real%)`,
+      `${etiqueta}: cantidad × valor unitario − descuento (%esperado%) no coincide con el valor de venta (%real%, cbc:LineExtensionAmount)`,
       acumulador,
     );
 

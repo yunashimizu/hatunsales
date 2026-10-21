@@ -18,6 +18,11 @@ export interface ComprobanteResponse {
   anulado?: boolean;
   estado?: string;
   error?: string;
+  proveedor_fiscal?: string;
+  ambiente_fiscal?: string;
+  estado_sunat?: string;
+  id_envio_ultimo?: number;
+  archivos_beta?: string[];
 }
 
 export interface AnulacionResponse {
@@ -52,6 +57,11 @@ export interface ComprobanteListadoResponse {
   error_mensaje?: string;
   enlace?: string;
   enlace_pdf?: string;
+  proveedor_fiscal?: string | null;
+  ambiente_fiscal?: string | null;
+  estado_sunat?: string | null;
+  id_envio_ultimo?: number | null;
+  puede_reintentar?: boolean;
   puede_anular: boolean;
 }
 
@@ -111,6 +121,19 @@ export interface PreviewComprobanteResponse {
   };
   /** Avisos no bloqueantes, por ejemplo un RUC no habido. */
   advertencias: string[];
-  /** Cuerpo exacto que se enviaría a NUBEFACT. Útil para depurar rechazos. */
-  json_nubefact: Record<string, any>;
+  proveedor_fiscal?: 'sunat_directo';
+  ambiente_fiscal?: 'beta' | 'produccion';
+  /**
+   * Presente solo si algún pago es con tarjeta. El recargo ya está en `items` (línea de
+   * servicio) y dentro de `totales.total`; aquí va el desglose para mostrarlo.
+   */
+  recargo_tarjeta?: {
+    porcentaje: number;
+    /** Parte de la venta (con IGV, sin recargo) que se cobra con tarjeta. */
+    base_tarjeta: number;
+    /** Recargo con IGV incluido. */
+    monto: number;
+    /** Total de los productos antes del recargo. */
+    total_sin_recargo: number;
+  };
 }

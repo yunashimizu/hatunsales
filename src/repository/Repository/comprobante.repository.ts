@@ -148,7 +148,7 @@ export class ComprobanteRepository extends CrudRepository<Comprobante> {
    * Reserva el correlativo y deja el comprobante en estado pendiente antes de
    * salir a la red.
    *
-   * Se hace así para que un fallo a mitad del envío deje rastro: si NUBEFACT
+   * Se hace así para que un fallo a mitad del envío deje rastro si SUNAT
    * aceptó el documento pero la respuesta nunca llegó, la fila queda pendiente
    * y se puede reconsultar, en vez de perder el número y emitir otro encima.
    *
