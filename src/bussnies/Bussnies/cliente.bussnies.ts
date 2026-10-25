@@ -36,6 +36,11 @@ export class ClienteBussnies implements IClienteBussniees {
 
   // ── CREATE (manual) ──────────────────────────────────────────
 
+  /**
+   * Alta manual desde el panel. `dto.id_usuario` se ignora: enlazar un cliente a una cuenta
+   * de la tienda solo ocurre al crear esa cuenta (/auth/register, Google). Aceptarlo del
+   * cuerpo permitía colgar un segundo cliente de la cuenta de otra persona.
+   */
   async create(dto: CrearClienteRequest): Promise<ClienteResponse> {
 
     if (dto.dni_sunat) return this.crearDesdeSunatDni(dto.dni_sunat);
@@ -60,7 +65,6 @@ export class ClienteBussnies implements IClienteBussniees {
         telefono:         dto.telefono ?? '',
         email:            dto.email ?? '',
         direccion:        dto.direccion ?? '',
-        usuario:          dto.id_usuario ? { id_usuario: dto.id_usuario } as any : undefined,
       },
       'DNI',
       dto.dni ?? 0,

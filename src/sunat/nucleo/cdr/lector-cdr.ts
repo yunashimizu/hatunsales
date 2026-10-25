@@ -1,5 +1,5 @@
 import type { ObservacionSunat } from '../documento-fiscal.types';
-import { hijos, intentarParsearXml, nombreLocal, ruta, texto } from '../xml/lector-xml';
+import { hijos, intentarParsearXml, nombreLocal, quitarBom, ruta, texto } from '../xml/lector-xml';
 
 /**
  * Estado de una constancia (CDR) según los rangos oficiales del Manual del
@@ -52,7 +52,7 @@ const CDR_ILEGIBLE: CdrLeido = Object.freeze({
  * y las cbc:Note de la raíz (observaciones "código - texto").
  */
 export function leerCdr(xml: string): CdrLeido {
-  const documento = typeof xml === 'string' && xml.includes('ApplicationResponse') ? intentarParsearXml(xml) : null;
+  const documento = typeof xml === 'string' && xml.includes('ApplicationResponse') ? intentarParsearXml(quitarBom(xml)) : null;
   const raiz = documento?.documentElement;
   if (!documento || !raiz || nombreLocal(raiz) !== 'ApplicationResponse') {
     return { ...CDR_ILEGIBLE, observaciones: [...CDR_ILEGIBLE.observaciones] };

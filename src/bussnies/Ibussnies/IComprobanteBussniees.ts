@@ -6,7 +6,8 @@ import {
 import { ComprobanteResponse, AnulacionResponse } from '../../models/model/c-electronico/comprobante.response';
 
 export interface IComprobanteBussniees {
-  generar(dto: GenerarComprobanteRequest): Promise<ComprobanteResponse>;
+  /** Emite factura o boleta en el ambiente vigente; `idUsuario` queda en el comprobante y en su envío. */
+  generar(dto: GenerarComprobanteRequest, idUsuario?: number | null): Promise<ComprobanteResponse>;
   consultar(dto: ConsultarComprobanteRequest): Promise<ComprobanteResponse>;
   anular(dto: AnularComprobanteRequest): Promise<AnulacionResponse>;
   consultarAnulacion(dto: ConsultarComprobanteRequest): Promise<AnulacionResponse>;

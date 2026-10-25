@@ -71,7 +71,7 @@ describe('DTOs de /fiscal/*', () => {
     });
     expect(errores).toEqual(
       expect.arrayContaining([
-        'El proveedor debe ser nubefact o sunat_directo.',
+        'El proveedor debe ser sunat_directo (emisión activa) o nubefact (sin emisión electrónica).',
         'El ambiente debe ser beta o produccion.',
         expect.stringMatching(/ubigeo debe tener 6 dígitos/),
         expect.stringMatching(/código de establecimiento debe tener 4 dígitos/),
@@ -79,6 +79,30 @@ describe('DTOs de /fiscal/*', () => {
         expect.stringMatching(/correlativo inicial de la GRE debe ser al menos 1/),
         expect.stringMatching(/ubigeo del punto de partida/),
       ]),
+    );
+  });
+
+  it('acepta el correlativo inicial por serie, la confirmación del RUC del certificado y las 4 confirmaciones de SOL', () => {
+    const { valor, errores } = validar(ActualizarConfigFiscalDto, {
+      correlativo_inicial: { f001: '120', B001: 1 },
+      cert_ruc_confirmado: 'true',
+      confirmaciones: { emisor_electronico_sol: true, certificado_en_sol: 'false', usuario_sol_secundario: '1', ruc_habido: false },
+    });
+    expect(errores).toEqual([]);
+    expect(valor).toMatchObject({
+      correlativo_inicial: { F001: 120, B001: 1 },
+      cert_ruc_confirmado: true,
+      confirmaciones: { emisor_electronico_sol: true, certificado_en_sol: false, usuario_sol_secundario: true, ruc_habido: false },
+    });
+  });
+
+  it('rechaza un correlativo inicial que no es un mapa de series F/B con enteros de 1 a 99999999', () => {
+    for (const correlativo of [{ T001: 1 }, { F001: 0 }, { F001: 1.5 }, { F001: 100_000_000 }, [1, 2], 'F001=1']) {
+      const { errores } = validar(ActualizarConfigFiscalDto, { correlativo_inicial: correlativo });
+      expect(errores.join(' ')).toMatch(/correlativo_inicial debe ser un objeto/);
+    }
+    expect(validar(ActualizarConfigFiscalDto, { confirmaciones: { ruc_habido: 'quizas' } }).errores.join(' ')).toMatch(
+      /ruc_habido debe ser verdadero o falso/,
     );
   });
 

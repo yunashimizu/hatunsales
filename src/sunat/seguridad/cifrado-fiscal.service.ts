@@ -68,7 +68,7 @@ export class CifradoFiscalService {
       rotacion: this.llaveAnterior !== null,
       problema:
         actual.estado === 'ausente'
-          ? 'FISCAL_SECRET_KEY no está configurada: SUNAT directo queda deshabilitado (Nubefact sigue operando).'
+          ? 'FISCAL_SECRET_KEY no está configurada: la emisión electrónica directa queda deshabilitada.'
           : actual.estado === 'invalida'
             ? actual.motivo
             : anterior.estado === 'invalida'

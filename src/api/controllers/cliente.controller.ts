@@ -10,8 +10,15 @@ export class ClienteController {
 
   constructor(private readonly service: ClienteBussnies) {}
 
-  // ── público — cualquier persona puede registrarse ────────────
+  /**
+   * Antes era pública: cualquiera creaba un cliente enlazado a la cuenta (id_usuario) de
+   * otra persona, enumeraba DNI y correos por el mensaje de duplicado y gastaba la cuota de
+   * ApiPeru. El registro de la tienda va por /auth/register (crea usuario y cliente); esta
+   * ruta queda como alias de POST /cliente, solo para el personal.
+   */
   @Post('registro')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin', 'vendedor')
   registro(@Body() body: CrearClienteRequest) {
     return this.service.create(body);
   }

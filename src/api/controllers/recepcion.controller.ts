@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, Controller, Get, Param, Post, Query,
+  BadRequestException, Body, Controller, Get, Headers, Param, Post, Query,
   UploadedFile, UseGuards, UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -47,8 +47,12 @@ export class RecepcionController {
 
   @Post('confirmar')
   @Roles('admin', 'vendedor', 'caja')
-  confirmar(@Body() body: any, @UsuarioActual() usuario: UsuarioToken) {
-    return this.service.confirmar(body, usuario);
+  confirmar(
+    @Body() body: any,
+    @UsuarioActual() usuario: UsuarioToken,
+    @Headers('idempotency-key') claveCabecera?: string,
+  ) {
+    return this.service.confirmar(body, usuario, claveCabecera);
   }
 
   @Post('observaciones/:id/aprobar')

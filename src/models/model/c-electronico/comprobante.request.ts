@@ -1,8 +1,12 @@
 import {
   IsInt, IsString, IsOptional, IsBoolean,
-  IsNumber, IsArray, ValidateNested, IsIn, Min, MaxLength,
+  IsNumber, IsArray, ValidateNested, IsIn, Min, MaxLength, MinLength,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+
+/** Forma de pago del comprobante (RS 193-2020). Es el dato tipado; `condiciones_de_pago` solo se muestra. */
+export const FORMAS_PAGO_COMPROBANTE = ['Contado', 'Credito'] as const;
+export type FormaPagoComprobante = (typeof FORMAS_PAGO_COMPROBANTE)[number];
 
 export class ItemComprobanteRequest {
 
@@ -99,19 +103,22 @@ export class GenerarComprobanteRequest {
   documento?: string;
 
   // ── Datos del comprobante ─────────────────────────────────────
+  /** Las notas de crédito se emiten desde el comprobante que corrigen, no por aquí. */
   @IsInt()
-  @IsIn([1, 2, 7, 8], { message: '1=Factura 2=Boleta 7=Nota de crédito 8=Nota de débito' })
+  @IsIn([1, 2], { message: '1=Factura 2=Boleta (las notas de crédito se emiten desde el comprobante que corrigen)' })
   id_tipo!: number;
 
+  /** 1 soles (PEN) o 2 dólares (USD). */
   @IsInt()
   @IsOptional()
   id_moneda?: number;
 
+  /** Se ignora: la serie la fija el ambiente de emisión vigente. Se acepta por compatibilidad. */
   @IsString()
   @IsOptional()
   serie?: string;
 
-  /** Si se omite, se toma el siguiente correlativo de la serie. */
+  /** Se ignora: el número lo asigna el sistema al emitir. Se acepta por compatibilidad. */
   @IsInt()
   @IsOptional()
   numero?: number;
@@ -163,7 +170,7 @@ export class GenerarComprobanteRequest {
   @IsOptional()
   total?: number;
 
-  // ── Notas de crédito y débito ─────────────────────────────────
+  // ── Notas (se aceptan por compatibilidad y se ignoran: la nota se emite desde su origen) ──
   @IsString()
   @IsOptional()
   tipo_de_nota_de_credito?: string;
@@ -194,9 +201,15 @@ export class GenerarComprobanteRequest {
   @IsOptional()
   medio_de_pago?: string;
 
+  /** Texto informativo ("Contado", "Crédito"); la forma de pago real va en `forma_pago`. */
   @IsString()
   @IsOptional()
   condiciones_de_pago?: string;
+
+  /** Contado o Credito. Si falta se deduce de `condiciones_de_pago` (con o sin tilde). */
+  @IsOptional()
+  @IsIn(FORMAS_PAGO_COMPROBANTE, { message: 'forma_pago debe ser Contado o Credito' })
+  forma_pago?: FormaPagoComprobante;
 
   /** Campo interno del POS; el backend lo deriva de los pagos validados. */
   @IsNumber()
@@ -257,4 +270,14 @@ export class AnularComprobanteRequest {
   @IsString()
   @MaxLength(250)
   motivo!: string;
+}
+
+/** El administrador verificó en SUNAT Operaciones en Línea que el comprobante fue aceptado. */
+export class ConfirmarAceptadoRequest {
+
+  /** Qué verificó y dónde (queda en la auditoría fiscal). */
+  @IsString()
+  @MinLength(5, { message: 'Explique en la nota qué verificó en SUNAT (mínimo 5 caracteres)' })
+  @MaxLength(500)
+  nota!: string;
 }

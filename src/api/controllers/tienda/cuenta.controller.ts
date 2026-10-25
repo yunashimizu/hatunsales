@@ -4,6 +4,7 @@ import { JwtGuard } from '../../../guards/jwt.guard';
 import { UsuarioActual } from '../../../guards/usuario-actual.decorator';
 import type { UsuarioToken } from '../../../guards/usuario-actual.decorator';
 import { CrearResenaRequest, GuardarDireccionRequest } from '../../../models/model/tienda/cuenta.request';
+import { IdEnteroPipe } from '../../../util/http/pipes/id-entero.pipe';
 
 /** Cuenta del cliente en la tienda: direcciones, favoritos y reseñas. */
 @Controller('tienda/cuenta')
@@ -34,18 +35,18 @@ export class CuentaTiendaController {
 
   @Put('direcciones/:id')
   async actualizarDireccion(
-    @Param('id') id: string,
+    @Param('id', IdEnteroPipe) id: number,
     @Body() body: GuardarDireccionRequest,
     @UsuarioActual() usuario: UsuarioToken,
   ) {
     const idCliente = await this.service.resolverCliente(usuario);
-    return this.service.actualizarDireccion(idCliente, Number(id), body);
+    return this.service.actualizarDireccion(idCliente, id, body);
   }
 
   @Delete('direcciones/:id')
-  async eliminarDireccion(@Param('id') id: string, @UsuarioActual() usuario: UsuarioToken) {
+  async eliminarDireccion(@Param('id', IdEnteroPipe) id: number, @UsuarioActual() usuario: UsuarioToken) {
     const idCliente = await this.service.resolverCliente(usuario);
-    return this.service.eliminarDireccion(idCliente, Number(id));
+    return this.service.eliminarDireccion(idCliente, id);
   }
 
   // -------------------------------------------------------------- favoritos
@@ -63,20 +64,20 @@ export class CuentaTiendaController {
   }
 
   @Post('favoritos/:idProducto')
-  async alternarFavorito(@Param('idProducto') idProducto: string, @UsuarioActual() usuario: UsuarioToken) {
+  async alternarFavorito(@Param('idProducto', IdEnteroPipe) idProducto: number, @UsuarioActual() usuario: UsuarioToken) {
     const idCliente = await this.service.resolverCliente(usuario);
-    return this.service.alternarFavorito(idCliente, Number(idProducto));
+    return this.service.alternarFavorito(idCliente, idProducto);
   }
 
   // ---------------------------------------------------------------- reseñas
 
   @Post('resenas/:idProducto')
   async guardarResena(
-    @Param('idProducto') idProducto: string,
+    @Param('idProducto', IdEnteroPipe) idProducto: number,
     @Body() body: CrearResenaRequest,
     @UsuarioActual() usuario: UsuarioToken,
   ) {
     const idCliente = await this.service.resolverCliente(usuario);
-    return this.service.guardarResena(idCliente, Number(idProducto), body);
+    return this.service.guardarResena(idCliente, idProducto, body);
   }
 }

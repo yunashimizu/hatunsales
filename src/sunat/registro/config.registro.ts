@@ -11,6 +11,7 @@ import { FiscalEsquemaService } from '../config/fiscal-esquema.service';
 import { EVALUADOR_PREPARACION_FISCAL, GESTOR_CONFIG_FISCAL } from '../config/fiscal-tokens';
 import { GestorConfigFiscalService } from '../config/gestor-config-fiscal.service';
 import { GestorCredencialesFiscalesService } from '../config/gestor-credenciales-fiscales.service';
+import { InterruptorEmisionFiscal } from '../config/interruptor-emision.service';
 import { NotificadorCambiosFiscales } from '../config/notificador-cambios-fiscales';
 import { PreparacionFiscalService } from '../config/preparacion-fiscal.service';
 import { PruebaConexionFiscalService } from '../config/prueba-conexion-fiscal.service';
@@ -32,7 +33,8 @@ import { RepositorioSecretosFiscales, SecretosFiscalesRepository } from '../segu
  * FiscalConfigService, CertificadoFiscalService (obtenerMaterialFirma,
  * obtenerCredencialesSol, obtenerCredencialesGre), CredencialesSolService,
  * CredencialesGreService, FiscalAuditoriaRepository, FiscalEsquemaService,
- * TransaccionesFiscales, RelojFiscal y NotificadorCambiosFiscales.
+ * TransaccionesFiscales, RelojFiscal, NotificadorCambiosFiscales e
+ * InterruptorEmisionFiscal (interruptor de emisión por ambiente, D5.4).
  */
 export const REGISTRO_SUNAT_CONFIG: RegistroModulo = {
   entidades: [],
@@ -57,6 +59,7 @@ export const REGISTRO_SUNAT_CONFIG: RegistroModulo = {
 
     // Configuración y certificado
     FiscalConfigService,
+    InterruptorEmisionFiscal,
     CertificadoFiscalService,
     PreparacionFiscalService,
     { provide: EVALUADOR_PREPARACION_FISCAL, useExisting: PreparacionFiscalService },

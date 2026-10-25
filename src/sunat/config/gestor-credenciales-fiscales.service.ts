@@ -114,7 +114,7 @@ export class GestorCredencialesFiscalesService {
     if (enUso(snapshot)) {
       throw new FiscalConfigError(
         'FISCAL_CREDENCIALES_EN_USO',
-        `No se pueden eliminar ${que} mientras SUNAT directo o la GRE electrónica están activos. Primero vuelva a Nubefact o desactive la GRE; para cambiarlas, simplemente regístrelas de nuevo.`,
+        `No se pueden eliminar ${que} mientras SUNAT directo o la GRE electrónica están activos. Primero desactive la emisión electrónica de producción o la GRE; para cambiarlas, simplemente regístrelas de nuevo.`,
       );
     }
   }

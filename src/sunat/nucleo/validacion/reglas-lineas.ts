@@ -88,12 +88,12 @@ export class ReglaLineas implements ReglaValidacionCpe {
     const afectacion = textoLimpio(linea.afectacion);
     if (esAfectacionGratuita(afectacion)) {
       acumulador.error(
-        `${etiqueta}: la afectación ${afectacion} (${CATALOGO_07_AFECTACION_IGV[afectacion]}) es una operación gratuita y el emisor directo aún no la soporta; emita ese comprobante por Nubefact.`,
+        `${etiqueta}: la afectación ${afectacion} (${CATALOGO_07_AFECTACION_IGV[afectacion]}) es una operación gratuita; esta operación todavía no se puede emitir desde el sistema.`,
       );
       return false;
     }
     if (afectacion === '40') {
-      acumulador.error(`${etiqueta}: la exportación (afectación 40) no está soportada por el emisor directo.`);
+      acumulador.error(`${etiqueta}: la afectación 40 es una exportación; esta operación todavía no se puede emitir desde el sistema.`);
       return false;
     }
     if (!esAfectacionOnerosa(afectacion)) {

@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { VentaRepository } from '../../repository/Repository/venta.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { ComprobanteBussnies } from './comprobante.bussnies';
@@ -265,5 +265,362 @@ describe('VentaBussnies: recargo por pago con tarjeta', () => {
 
     const apagado = crearServicio(0);
     expect(await apagado.servicio.contextoPos()).toMatchObject({ recargo_tarjeta_pct: 0 });
+  });
+});
+
+describe('VentaBussnies: comprobante de la venta (emisión directa)', () => {
+  const EFECTIVO = 1;
+  const TARJETA = 2;
+  const PRODUCTO = {
+    id_producto: 7,
+    nombre: 'CEMENTO',
+    precio_venta: 10,
+    descuento: 0,
+    sku: 'CEM-01',
+    codigo_barras: '',
+    unidad_medida: 'NIU',
+    stock_disponible: 10,
+    reglas_mayoristas: [],
+    codigo_sunat: '30111601',
+  };
+  const CABECERA = {
+    id_venta: 9,
+    fecha: new Date('2026-10-21T15:00:00Z'),
+    origen: 'mostrador',
+    subtotal: 17.11,
+    igv: 3.08,
+    total: 20.19,
+    items: [],
+    pagos: [],
+  };
+
+  /** Venta 9 guardada: 2 cementos a S/ 10 con S/ 0.40 de descuento, cobrada con tarjeta (+ S/ 0.59). */
+  function ventaGuardada(parcial: Record<string, unknown> = {}) {
+    return {
+      id_venta: 9,
+      estado: 'activa',
+      origen: 'mostrador',
+      total: 20.19,
+      id_cliente: 17,
+      id_empresa: null,
+      lineas: [
+        {
+          id_producto: 7,
+          descripcion: 'CEMENTO',
+          codigo: 'CEM-01',
+          unidad_de_medida: 'NIU',
+          codigo_sunat: '30111601',
+          cantidad: 2,
+          precio: 10,
+          precio_lista_unitario: 10,
+          descuento_total_linea: 0.4,
+          subtotal: 16.61,
+          igv: 2.99,
+          total: 19.6,
+        },
+      ],
+      pagos: [{ id_metodo: TARJETA, monto: 20.19, metodo: 'Tarjeta', tipo: 'tarjeta' }],
+      credito: null,
+      ...parcial,
+    };
+  }
+
+  function crear() {
+    const repo = {
+      cargarProductos: jest.fn().mockResolvedValue(new Map([[7, PRODUCTO]])),
+      registrar: jest.fn().mockResolvedValue({ id_venta: 9, existente: false }),
+      obtener: jest.fn().mockResolvedValue(CABECERA),
+      buscarPorClaveIdempotencia: jest.fn().mockResolvedValue(null),
+      obtenerParaComprobante: jest.fn().mockResolvedValue(ventaGuardada()),
+    };
+    const config = {
+      obtenerNumero: jest.fn(async (clave: string, defecto: number) => (clave === 'pos_recargo_tarjeta_pct' ? 3 : clave === 'tienda_igv_porcentaje' ? 18 : defecto)),
+      obtener: jest.fn().mockResolvedValue(null),
+    };
+    const comprobantes = {
+      generar: jest.fn().mockResolvedValue({ id_comprobante: 5, tipo_de_comprobante: 2, aceptada_sunat: true, estado: 'emitido' }),
+      listarPorVenta: jest.fn().mockResolvedValue([]),
+    };
+    const receptor = {
+      consumidorFinal: jest.fn().mockResolvedValue({ origen: 'generico', tipo_documento: 1, numero_documento: '00000000', denominacion: 'CLIENTES VARIOS' }),
+      buscarPorDocumento: jest.fn().mockResolvedValue({ origen: 'base', id_empresa: 31, tipo_documento: 6, numero_documento: '20123456789', denominacion: 'FERRETERIA EL MARTILLO S.A.C.' }),
+      porIdCliente: jest.fn().mockResolvedValue({ origen: 'base', id_cliente: 17, tipo_documento: 1, numero_documento: '45678912', denominacion: 'JUAN PEREZ' }),
+      porIdEmpresa: jest.fn(),
+    };
+    const creditoRepo = {
+      metodosConTipo: jest.fn().mockResolvedValue([
+        { id_metodo: EFECTIVO, nombre: 'Efectivo', tipo: 'efectivo' },
+        { id_metodo: TARJETA, nombre: 'Tarjeta', tipo: 'tarjeta' },
+      ]),
+      idMetodoCredito: jest.fn().mockResolvedValue(null),
+    };
+    const cajaSesion = { configEstricto: jest.fn().mockResolvedValue({ modo: 'blando', bypassAdmin: false }) };
+    const servicio = new VentaBussnies(
+      repo as unknown as VentaRepository,
+      config as unknown as ConfiguracionRepository,
+      comprobantes as unknown as ComprobanteBussnies,
+      receptor as never,
+      creditoRepo as never,
+      {} as never,
+      {} as never,
+      cajaSesion as never,
+    );
+    return { servicio, repo, comprobantes, receptor };
+  }
+
+  const USUARIO = { id_usuario: 4, rol: 'caja' } as never;
+
+  describe('registrar', () => {
+    it('pasa el usuario a generar, la forma de pago tipada y el código SUNAT del producto', async () => {
+      const { servicio, comprobantes } = crear();
+
+      await servicio.registrar(
+        { id_tipo: 2, items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+
+      const [solicitud, idUsuario] = comprobantes.generar.mock.calls[0];
+      expect(idUsuario).toBe(4);
+      expect(solicitud).toMatchObject({ forma_pago: 'Contado', id_venta: 9 });
+      expect(solicitud.items[0]).toMatchObject({ id_producto: 7, codigo_producto_sunat: '30111601' });
+      // Consumidor final: no se manda el 00000000 como si fuera un DNI.
+      expect(solicitud.documento).toBeUndefined();
+    });
+
+    it('reintento con la clave ya usada y la venta sin comprobante: lo informa para ofrecer emitirlo', async () => {
+      const { servicio, repo, comprobantes } = crear();
+      repo.buscarPorClaveIdempotencia.mockResolvedValue(9);
+
+      const venta = await servicio.registrar(
+        { id_tipo: 2, clave_idempotencia: 'abc-1', items: [{ id_producto: 7, cantidad: 1 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+
+      expect(venta.comprobante_pendiente).toBe(true);
+      expect(venta.comprobante_error).toContain('Emitir comprobante');
+      expect(repo.registrar).not.toHaveBeenCalled();
+      expect(comprobantes.generar).not.toHaveBeenCalled();
+    });
+
+    it('reintento con un comprobante vigente o en curso, o sin pedir comprobante: no marca nada', async () => {
+      const enCurso = crear();
+      enCurso.repo.buscarPorClaveIdempotencia.mockResolvedValue(9);
+      enCurso.comprobantes.listarPorVenta.mockResolvedValue([{ id_comprobante: 5, tipo_de_comprobante: 2, estado: 'pendiente', anulado: false }]);
+      const conComprobante = await enCurso.servicio.registrar({ id_tipo: 2, clave_idempotencia: 'abc-1', items: [{ id_producto: 7, cantidad: 1 }] } as CrearVentaRequest, USUARIO);
+      expect(conComprobante.comprobante_pendiente).toBeUndefined();
+
+      const sinPedir = crear();
+      sinPedir.repo.buscarPorClaveIdempotencia.mockResolvedValue(9);
+      const venta = await sinPedir.servicio.registrar(
+        { id_tipo: 2, clave_idempotencia: 'abc-1', emitir_comprobante: false, items: [{ id_producto: 7, cantidad: 1 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+      expect(venta.comprobante_pendiente).toBeUndefined();
+    });
+
+    it('la carrera de idempotencia resuelta en el repositorio (existente) también informa el pendiente', async () => {
+      const { servicio, repo, comprobantes } = crear();
+      repo.registrar.mockResolvedValue({ id_venta: 9, existente: true });
+      comprobantes.listarPorVenta.mockResolvedValue([{ id_comprobante: 5, tipo_de_comprobante: 2, estado: 'error', anulado: false }]);
+
+      const venta = await servicio.registrar(
+        { id_tipo: 2, clave_idempotencia: 'abc-1', items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+
+      expect(venta.comprobante_pendiente).toBe(true);
+      expect(comprobantes.generar).not.toHaveBeenCalled();
+    });
+
+    it('un comprobante no aceptado por SUNAT (en cualquier ambiente) llega como comprobante_error', async () => {
+      const { servicio, comprobantes } = crear();
+      comprobantes.generar.mockResolvedValue({
+        id_comprobante: 5, aceptada_sunat: false, estado: 'pendiente', ambiente_fiscal: 'produccion', error: 'SUNAT no respondió; se reintentará',
+      });
+
+      const venta = await servicio.registrar(
+        { id_tipo: 2, items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+
+      expect(venta.comprobante_error).toBe('SUNAT no respondió; se reintentará');
+      // Con el envío en curso el comprobante sigue siendo el de la venta: no se ofrece otro.
+      expect(venta.comprobante_pendiente).toBeUndefined();
+    });
+
+    it('si no se pudo emitir o SUNAT lo rechazó, la venta queda con el comprobante pendiente de emitir', async () => {
+      const inactiva = crear();
+      inactiva.comprobantes.generar.mockRejectedValue(new ServiceUnavailableException('la emisión electrónica no está activa'));
+      const sinComprobante = await inactiva.servicio.registrar(
+        { id_tipo: 2, items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+      expect(sinComprobante).toMatchObject({ comprobante_pendiente: true, comprobante_error: 'la emisión electrónica no está activa' });
+
+      const rechazada = crear();
+      rechazada.comprobantes.generar.mockResolvedValue({
+        id_comprobante: 5, aceptada_sunat: false, estado: 'error', estado_sunat: 'RECHAZADO', error: 'El RUC del receptor no existe',
+      });
+      const conRechazo = await rechazada.servicio.registrar(
+        { id_tipo: 2, items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+      expect(conRechazo).toMatchObject({ comprobante_pendiente: true, comprobante_error: 'El RUC del receptor no existe' });
+    });
+  });
+
+  describe('emitirComprobanteDeVenta', () => {
+    it('usa las líneas guardadas tal como se cobraron, agrega el recargo por tarjeta y exige el total exacto', async () => {
+      const { servicio, comprobantes } = crear();
+
+      const venta = await servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO);
+
+      const [solicitud, idUsuario, opciones] = comprobantes.generar.mock.calls[0];
+      expect(idUsuario).toBe(4);
+      expect(opciones).toEqual({ totalExigido: 20.19 });
+      expect(solicitud).toMatchObject({ id_tipo: 2, id_venta: 9, forma_pago: 'Contado', medio_de_pago: 'Tarjeta' });
+      expect(solicitud.items).toEqual([
+        expect.objectContaining({ id_producto: 7, cantidad: 2, precio_unitario: 10, descuento: 0.4, codigo_producto_sunat: '30111601' }),
+        expect.objectContaining({ unidad_de_medida: 'ZZ', cantidad: 1, precio_unitario: 0.59, codigo: 'RECARGO-TARJETA' }),
+      ]);
+      expect(calcularComprobante(solicitud.items).total).toBe(20.19);
+      expect(venta.comprobante).toMatchObject({ id_comprobante: 5 });
+    });
+
+    it('no usa precios del catálogo: una venta antigua sin columnas de descuento se reconstruye desde su total', async () => {
+      const { servicio, repo, comprobantes } = crear();
+      repo.obtenerParaComprobante.mockResolvedValue(ventaGuardada({
+        total: 19.6,
+        pagos: [{ id_metodo: EFECTIVO, monto: 19.6, metodo: 'Efectivo', tipo: 'efectivo' }],
+        lineas: [{ ...ventaGuardada().lineas[0], precio_lista_unitario: null, descuento_total_linea: null }],
+      }));
+
+      await servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO);
+
+      const solicitud = comprobantes.generar.mock.calls[0][0];
+      expect(solicitud.items).toHaveLength(1);
+      expect(solicitud.items[0]).toMatchObject({ precio_unitario: 10, descuento: 0.4 });
+      expect(repo.obtenerParaComprobante).toHaveBeenCalledWith(9);
+    });
+
+    it('409 si la venta ya tiene un comprobante vigente o en curso', async () => {
+      const { servicio, comprobantes } = crear();
+      comprobantes.listarPorVenta.mockResolvedValue([{ id_comprobante: 5, tipo_de_comprobante: 2, estado: 'pendiente', anulado: false, numero_formateado: 'B001-00000005' }]);
+
+      await expect(servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO)).rejects.toMatchObject({
+        status: 409,
+        response: { id_comprobante: 5 },
+      });
+      expect(comprobantes.generar).not.toHaveBeenCalled();
+    });
+
+    it('404 si no existe y 409 si está anulada', async () => {
+      const { servicio, repo } = crear();
+      repo.obtenerParaComprobante.mockResolvedValueOnce(null);
+      await expect(servicio.emitirComprobanteDeVenta(99, { id_tipo: 2 } as never, USUARIO)).rejects.toBeInstanceOf(NotFoundException);
+
+      repo.obtenerParaComprobante.mockResolvedValueOnce(ventaGuardada({ estado: 'anulada' }));
+      await expect(servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO)).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('una diferencia que no es recargo por tarjeta no se inventa: el motor responde 400 y se propaga', async () => {
+      const { servicio, repo, comprobantes } = crear();
+      repo.obtenerParaComprobante.mockResolvedValue(ventaGuardada({ total: 25, pagos: [{ id_metodo: EFECTIVO, monto: 25, metodo: 'Efectivo', tipo: 'efectivo' }] }));
+      comprobantes.generar.mockRejectedValue(new BadRequestException('El comprobante sumaría S/ 19.60 y la venta se cobró por S/ 25.00'));
+
+      await expect(servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO)).rejects.toBeInstanceOf(BadRequestException);
+      const [solicitud, , opciones] = comprobantes.generar.mock.calls[0];
+      expect(solicitud.items).toHaveLength(1);
+      expect(opciones).toEqual({ totalExigido: 25 });
+    });
+
+    it('con la emisión inactiva responde la venta con el motivo y el pendiente (no es un error de la acción)', async () => {
+      const { servicio, comprobantes } = crear();
+      comprobantes.generar.mockRejectedValue(new ServiceUnavailableException('No se emitió el comprobante: la emisión electrónica no está activa (POS BETA apagado).'));
+
+      const venta = await servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO);
+
+      expect(venta.comprobante).toBeUndefined();
+      expect(venta.comprobante_error).toContain('no está activa');
+      expect(venta.comprobante_pendiente).toBe(true);
+    });
+
+    it('receptor: el indicado en la acción o, si no, el cliente de la venta', async () => {
+      const conDocumento = crear();
+      await conDocumento.servicio.emitirComprobanteDeVenta(9, { id_tipo: 1, documento: '20123456789' } as never, USUARIO);
+      expect(conDocumento.receptor.buscarPorDocumento).toHaveBeenCalledWith('20123456789', true);
+      expect(conDocumento.comprobantes.generar.mock.calls[0][0]).toMatchObject({ id_tipo: 1, documento: '20123456789', id_empresa: 31 });
+
+      const delCliente = crear();
+      await delCliente.servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO);
+      expect(delCliente.receptor.porIdCliente).toHaveBeenCalledWith(17);
+      expect(delCliente.comprobantes.generar.mock.calls[0][0]).toMatchObject({ documento: '45678912', id_cliente: 17 });
+    });
+
+    it('al crédito declara lo que todavía se debe con el vencimiento de la cuenta por cobrar', async () => {
+      const { servicio, repo, comprobantes } = crear();
+      repo.obtenerParaComprobante.mockResolvedValue(ventaGuardada({
+        total: 19.6,
+        pagos: [{ id_metodo: 3, monto: 19.6, metodo: 'Crédito', tipo: 'credito' }],
+        credito: { monto_total: 19.6, saldo: 12.5, fecha_vencimiento: '2099-12-31', estado: 'parcial' },
+      }));
+
+      await servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO);
+
+      expect(comprobantes.generar.mock.calls[0][0]).toMatchObject({
+        forma_pago: 'Credito',
+        monto_credito: 12.5,
+        fecha_de_vencimiento: '2099-12-31',
+      });
+    });
+
+    it('un saldo al crédito ya vencido no se puede declarar como cuota futura: 400 sin emitir', async () => {
+      const { servicio, repo, comprobantes } = crear();
+      repo.obtenerParaComprobante.mockResolvedValue(ventaGuardada({
+        total: 19.6,
+        pagos: [{ id_metodo: 3, monto: 19.6, metodo: 'Crédito', tipo: 'credito' }],
+        credito: { monto_total: 19.6, saldo: 19.6, fecha_vencimiento: '2020-01-01', estado: 'vencido' },
+      }));
+
+      await expect(servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO)).rejects.toBeInstanceOf(BadRequestException);
+      expect(comprobantes.generar).not.toHaveBeenCalled();
+    });
+
+    it('una línea cobrada sin IGV no se adivina (exonerada o inafecta): 400 sin emitir', async () => {
+      const { servicio, repo, comprobantes } = crear();
+      repo.obtenerParaComprobante.mockResolvedValue(ventaGuardada({
+        total: 19.6,
+        pagos: [{ id_metodo: EFECTIVO, monto: 19.6, metodo: 'Efectivo', tipo: 'efectivo' }],
+        lineas: [{ ...ventaGuardada().lineas[0], subtotal: 19.6, igv: 0 }],
+      }));
+
+      await expect(servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO)).rejects.toThrow('exonerada o inafecta');
+      expect(comprobantes.generar).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('VentaBussnies: anular venta (D9, la resuelve el negocio de notas de crédito)', () => {
+  function crear(notasCredito?: unknown) {
+    return new VentaBussnies(
+      {} as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never, notasCredito as never,
+    );
+  }
+
+  it('delega con el motivo, la verificación en SOL y el usuario del token (sin token, null)', async () => {
+    const notas = { anularVenta: jest.fn().mockResolvedValue({ estado: 'anulacion_en_curso', id_venta: 9 }) };
+    const dto = { motivo: 'El cliente desiste', confirmar_verificado_sol: true, existe_en_sunat: false, nota: 'No figura en SOL' };
+
+    expect(await crear(notas).anular(9, dto, { id_usuario: 4, rol: 'admin' } as never)).toEqual({ estado: 'anulacion_en_curso', id_venta: 9 });
+    await crear(notas).anular(9);
+
+    expect(notas.anularVenta).toHaveBeenNthCalledWith(1, 9, dto, 4);
+    expect(notas.anularVenta).toHaveBeenNthCalledWith(2, 9, {}, null);
+  });
+
+  it('sin el negocio de notas responde 503 con un mensaje claro y no toca nada', async () => {
+    const error = await crear().anular(9).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ServiceUnavailableException);
+    expect((error as Error).message).toContain('no está disponible');
   });
 });

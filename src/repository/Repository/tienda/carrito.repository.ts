@@ -5,6 +5,14 @@ import { Carrito } from '../../../models/DBModel/tienda/carrito.entity';
 import { CarritoItem } from '../../../models/DBModel/tienda/carrito-item.entity';
 import { Cliente } from '../../../models/DBModel/cliente.entity';
 import { Producto } from '../../../models/DBModel/producto.entity';
+import { StockTiendaRepository } from './stock-tienda.repository';
+import { filasDe } from '../../../caja/bd/resultado-consulta';
+
+/** Precio nuevo de una línea del carrito. */
+export interface PrecioActualizado {
+  id_item: number;
+  precio: number;
+}
 
 @Injectable()
 export class CarritoRepository {
@@ -15,6 +23,8 @@ export class CarritoRepository {
 
     @InjectRepository(CarritoItem, 'pgConnection')
     private readonly itemRepo: Repository<CarritoItem>,
+
+    private readonly stockRepo: StockTiendaRepository,
   ) {}
 
   async buscarPorCliente(idCliente: number): Promise<Carrito | null> {
@@ -67,82 +77,87 @@ export class CarritoRepository {
     });
   }
 
-  /** Devuelve las líneas del carrito ya enriquecidas con datos del producto y su stock. */
-  async listarItems(idCarrito: number): Promise<any[]> {
-    const politica = await this.politicaStockWeb();
+  /**
+   * Pasa las líneas del carrito de invitado al del cliente (sumando cantidades si
+   * el producto ya estaba) y cierra el de invitado, en una sola transacción: si
+   * algo falla no queda nada a medias y el navegador puede reintentar sin
+   * duplicar cantidades. Devuelve false si otra pestaña ya lo había fusionado.
+   */
+  async fusionarEn(idOrigen: number, idDestino: number): Promise<boolean> {
+    return this.carritoRepo.manager.transaction(async (manager) => {
+      const [origen] = filasDe(await manager.query(
+        `UPDATE carritos SET estado = 'convertido', actualizado_en = NOW()
+          WHERE id_carrito = $1 AND estado = 'activo'
+          RETURNING id_carrito`,
+        [idOrigen],
+      ));
+      if (!origen) return false;
 
-    // Fase 6: en exclusivo mostramos solo el stock del almacén de despacho web.
-    if (politica.exclusivo && politica.idAlmacen) {
-      return this.carritoRepo.manager.query(
-        `SELECT ci.id_item,
-                ci.cantidad,
-                ci.precio_unitario,
-                p.id_producto,
-                p.nombre,
-                m.nombre AS marca,
-                COALESCE(i.stock, 0)::INTEGER AS stock_disponible,
-                (
-                  SELECT pi.url FROM productos_imagenes pi
-                  WHERE pi.id_producto = p.id_producto
-                  ORDER BY pi.is_primary DESC NULLS LAST, COALESCE(pi.orden, 0) ASC, pi.id_imagen ASC
-                  LIMIT 1
-                ) AS imagen
-         FROM carrito_items ci
-         JOIN productos p ON p.id_producto = ci.id_producto
-         LEFT JOIN marcas m ON m.id_marca = p.id_marca
-         LEFT JOIN inventario i ON i.id_producto = p.id_producto AND i.id_almacen = $2
-         WHERE ci.id_carrito = $1
-         ORDER BY ci.id_item ASC`,
-        [idCarrito, politica.idAlmacen],
+      await manager.query(
+        `INSERT INTO carrito_items (id_carrito, id_producto, cantidad, precio_unitario)
+         SELECT $2, ci.id_producto, ci.cantidad, ci.precio_unitario
+           FROM carrito_items ci
+          WHERE ci.id_carrito = $1
+         ON CONFLICT (id_carrito, id_producto)
+         DO UPDATE SET cantidad = carrito_items.cantidad + EXCLUDED.cantidad`,
+        [idOrigen, idDestino],
       );
-    }
+      await manager.query('UPDATE carritos SET actualizado_en = NOW() WHERE id_carrito = $1', [idDestino]);
+      return true;
+    });
+  }
+
+  /**
+   * Líneas del carrito con el precio VIGENTE del catálogo (el mismo `precio_final`
+   * de la tienda), si el producto sigue activo y su stock según la política web
+   * (en exclusivo, solo el almacén de despacho). `precio_unitario` es el que tenía
+   * al agregarse: sirve para avisar si cambió.
+   */
+  async listarItems(idCarrito: number): Promise<any[]> {
+    const politica = await this.stockRepo.politicaStock();
+    const almacenWeb = politica.exclusivo && politica.idAlmacen ? politica.idAlmacen : null;
 
     return this.carritoRepo.manager.query(
       `SELECT ci.id_item,
               ci.cantidad,
               ci.precio_unitario,
+              round(p.precio_venta - COALESCE(p.descuento, 0::numeric), 2) AS precio_vigente,
+              COALESCE(p.estado, TRUE) AS activo,
               p.id_producto,
               p.nombre,
               m.nombre AS marca,
-              COALESCE(st.stock_total, 0)::INTEGER AS stock_disponible,
+              COALESCE(st.stock, 0)::INTEGER AS stock_disponible,
               (
                 SELECT pi.url FROM productos_imagenes pi
                 WHERE pi.id_producto = p.id_producto
                 ORDER BY pi.is_primary DESC NULLS LAST, COALESCE(pi.orden, 0) ASC, pi.id_imagen ASC
                 LIMIT 1
               ) AS imagen
-       FROM carrito_items ci
-       JOIN productos p ON p.id_producto = ci.id_producto
-       LEFT JOIN marcas m ON m.id_marca = p.id_marca
-       LEFT JOIN vw_producto_stock st ON st.id_producto = p.id_producto
-       WHERE ci.id_carrito = $1
-       ORDER BY ci.id_item ASC`,
-      [idCarrito],
+         FROM carrito_items ci
+         JOIN productos p ON p.id_producto = ci.id_producto
+         LEFT JOIN marcas m ON m.id_marca = p.id_marca
+         LEFT JOIN LATERAL (
+           SELECT SUM(i.stock) AS stock
+             FROM inventario i
+            WHERE i.id_producto = p.id_producto
+              AND ($2::integer IS NULL OR i.id_almacen = $2::integer)
+         ) st ON TRUE
+        WHERE ci.id_carrito = $1
+        ORDER BY ci.id_item ASC`,
+      [idCarrito, almacenWeb],
     );
   }
 
-  /** Misma política que la reserva de pedidos (Fase 6 / D2). */
-  private async politicaStockWeb(): Promise<{
-    exclusivo: boolean;
-    idAlmacen?: number;
-  }> {
-    const filas = await this.carritoRepo.manager.query(
-      `SELECT clave, valor FROM configuraciones
-        WHERE clave IN ('tienda_stock_modo', 'tienda_id_almacen')`,
+  /** Deja guardado el precio vigente para no volver a avisar el mismo cambio. */
+  async actualizarPrecios(cambios: PrecioActualizado[]): Promise<void> {
+    if (!cambios.length) return;
+    await this.itemRepo.manager.query(
+      `UPDATE carrito_items ci
+          SET precio_unitario = v.precio
+         FROM unnest($1::integer[], $2::numeric[]) AS v(id_item, precio)
+        WHERE ci.id_item = v.id_item`,
+      [cambios.map((c) => c.id_item), cambios.map((c) => c.precio)],
     );
-    const mapa = new Map<string, string>();
-    for (const f of filas ?? []) {
-      if (f.valor !== undefined && f.valor !== null && String(f.valor).trim() !== '') {
-        mapa.set(String(f.clave), String(f.valor));
-      }
-    }
-    const modo = (mapa.get('tienda_stock_modo') ?? 'exclusivo').toLowerCase();
-    const idAlmacen = Number(mapa.get('tienda_id_almacen'));
-    const almacenOk = Number.isFinite(idAlmacen) && idAlmacen > 0 ? idAlmacen : undefined;
-    return {
-      exclusivo: modo !== 'spillover' && almacenOk != null,
-      idAlmacen: almacenOk,
-    };
   }
 
   async buscarItem(idCarrito: number, idProducto: number): Promise<CarritoItem | null> {

@@ -62,6 +62,36 @@ export interface ResultadoRegistroVenta {
   existente: boolean;
 }
 
+/** Venta guardada con lo necesario para emitirle el comprobante después del cobro. */
+export interface VentaParaComprobante {
+  id_venta: number;
+  /** 'activa' | 'anulada'. */
+  estado: string;
+  origen: string;
+  total: number;
+  id_cliente: number | null;
+  id_empresa: number | null;
+  lineas: {
+    id_producto: number | null;
+    descripcion: string;
+    codigo: string;
+    unidad_de_medida: string;
+    codigo_sunat: string | null;
+    cantidad: number;
+    /** Precio unitario con IGV que se cobró (antes del descuento de la línea). */
+    precio: number;
+    precio_lista_unitario: number | null;
+    /** Descuento de toda la línea, con IGV. Null en ventas anteriores a esa columna. */
+    descuento_total_linea: number | null;
+    subtotal: number | null;
+    igv: number | null;
+    total: number | null;
+  }[];
+  pagos: { id_metodo: number | null; monto: number; metodo: string; tipo: string }[];
+  /** Cuenta por cobrar de la venta (si fue al crédito y no se anuló). */
+  credito: { monto_total: number; saldo: number; fecha_vencimiento: string | null; estado: string } | null;
+}
+
 /** Filtro ya validado por la capa bussnies: desde/hasta son 'YYYY-MM-DD' (días de Lima). */
 export interface FiltroVentas {
   texto?: string;
@@ -106,6 +136,31 @@ const SQL_LINEA_CREDITO = {
     noEncontrado: 'El cliente de la venta a crédito ya no existe',
   },
 } as const;
+
+/** Cantidades de stock (NUMERIC(12,3)) en milésimas enteras: se suman y restan sin errores de coma flotante. */
+function milesimas(valor: unknown): number {
+  const numero = Number(valor ?? 0);
+  return Number.isFinite(numero) ? Math.round(numero * 1000) : 0;
+}
+
+function desdeMilesimas(valor: number): number {
+  return valor / 1000;
+}
+
+/** Suma por (producto, almacén) y ordena igual que se bloquea el inventario (id_producto, id_almacen). */
+function agruparPorAlmacen(
+  lineas: { id_producto: number; id_almacen: number; cantidad: number }[],
+): { id_producto: number; id_almacen: number; cantidad: number }[] {
+  const suma = new Map<string, { id_producto: number; id_almacen: number; cantidad: number }>();
+  for (const linea of lineas) {
+    if (!(linea.cantidad > 0)) continue;
+    const clave = `${linea.id_producto}:${linea.id_almacen}`;
+    const actual = suma.get(clave);
+    if (actual) actual.cantidad = desdeMilesimas(milesimas(actual.cantidad) + milesimas(linea.cantidad));
+    else suma.set(clave, { id_producto: linea.id_producto, id_almacen: linea.id_almacen, cantidad: linea.cantidad });
+  }
+  return [...suma.values()].sort((a, b) => a.id_producto - b.id_producto || a.id_almacen - b.id_almacen);
+}
 
 /**
  * Acceso a `ventas`, `detalle_venta` y `venta_pago`.
@@ -313,7 +368,10 @@ export class VentaRepository {
     return filas[0] ? this.mapProducto(filas[0]) : null;
   }
 
-  /** Trae los datos oficiales de los productos que se van a vender. */
+  /**
+   * Trae los datos oficiales de los productos que se van a vender, con su código SUNAT
+   * (catálogo 25). Se lee del registro como JSON para no fallar si falta la columna (fase 9).
+   */
   async cargarProductos(ids: number[]): Promise<Map<number, ProductoVentaResponse>> {
     if (!ids.length) return new Map();
 
@@ -333,7 +391,8 @@ export class VentaRepository {
                 FROM producto_descuento_mayorista r
                WHERE r.id_producto = p.id_producto AND r.activo = TRUE), '[]'::json) AS reglas_mayoristas,
               COALESCE(inv.stock, 0)         AS stock_disponible,
-              ''                             AS imagen_url
+              ''                             AS imagen_url,
+              NULLIF(TRIM(to_jsonb(p) ->> 'codigo_sunat'), '') AS codigo_sunat
          FROM productos p
          LEFT JOIN LATERAL (
                 SELECT SUM(i.stock) AS stock FROM inventario i WHERE i.id_producto = p.id_producto
@@ -342,7 +401,120 @@ export class VentaRepository {
       [ids],
     );
 
-    return new Map(filas.map((f: any) => [Number(f.id_producto), this.mapProducto(f)]));
+    return new Map(
+      filas.map((f: any) => [
+        Number(f.id_producto),
+        { ...this.mapProducto(f), codigo_sunat: f.codigo_sunat ? String(f.codigo_sunat) : null },
+      ]),
+    );
+  }
+
+  /**
+   * Venta guardada tal como se cobró, para emitirle su comprobante después: cabecera, líneas
+   * de detalle_venta (precio y descuento de ese momento, nunca los del catálogo actual), pagos
+   * con su medio y la cuenta por cobrar si fue al crédito. null si la venta no existe.
+   */
+  async obtenerParaComprobante(idVenta: number): Promise<VentaParaComprobante | null> {
+    const esquema = await this.esquema.snapshot();
+    const conEstado = esquema.tieneColumna('ventas', 'estado');
+    const conEmpresa = esquema.tieneColumna('ventas', 'id_empresa');
+
+    const cabeceras = await this.dataSource.query(
+      `SELECT v.id_venta, v.total, v.id_cliente,
+              ${conEmpresa ? 'v.id_empresa' : 'NULL::int AS id_empresa'},
+              COALESCE(v.origen, 'mostrador') AS origen,
+              ${conEstado ? "COALESCE(v.estado, 'activa')" : "'activa'"} AS estado
+         FROM ventas v
+        WHERE v.id_venta = $1`,
+      [idVenta],
+    );
+    const cabecera = cabeceras[0];
+    if (!cabecera) return null;
+
+    // Columnas de precios y descuentos como JSON: las ventas anteriores a esas columnas también se leen.
+    const lineas = await this.dataSource.query(
+      `SELECT d.id_producto,
+              d.cantidad,
+              d.precio,
+              x.j ->> 'precio_lista_unitario'  AS precio_lista_unitario,
+              x.j ->> 'descuento_total_linea'  AS descuento_total_linea,
+              x.j ->> 'subtotal'               AS subtotal,
+              x.j ->> 'igv'                    AS igv,
+              x.j ->> 'total'                  AS total,
+              COALESCE(p.nombre, 'Producto')   AS descripcion,
+              COALESCE(NULLIF(p.sku, ''), NULLIF(p.codigo_barras, ''), d.id_producto::text, '') AS codigo,
+              COALESCE(NULLIF(p.unidad_medida, ''), 'NIU') AS unidad_medida,
+              NULLIF(TRIM(to_jsonb(p) ->> 'codigo_sunat'), '') AS codigo_sunat
+         FROM detalle_venta d
+        CROSS JOIN LATERAL (SELECT to_jsonb(d) AS j) x
+         LEFT JOIN productos p ON p.id_producto = d.id_producto
+        WHERE d.id_venta = $1
+        ORDER BY d.id_detalle`,
+      [idVenta],
+    );
+
+    const pagos = await this.dataSource.query(
+      `SELECT vp.id_metodo, vp.monto, COALESCE(mp.nombre, '') AS metodo, COALESCE(mp.tipo, '') AS tipo
+         FROM venta_pago vp
+         LEFT JOIN metodos_pago mp ON mp.id_metodo = vp.id_metodo
+        WHERE vp.id_venta = $1
+        ORDER BY vp.id_metodo`,
+      [idVenta],
+    );
+
+    let credito: VentaParaComprobante['credito'] = null;
+    if (await this.esquema.tiene('credito')) {
+      const cuentas = await this.dataSource.query(
+        `SELECT monto_total, saldo, to_char(fecha_vencimiento, 'YYYY-MM-DD') AS fecha_vencimiento, estado
+           FROM cuentas_por_cobrar
+          WHERE id_venta = $1 AND COALESCE(estado, '') <> 'anulado'
+          ORDER BY id_cxc DESC
+          LIMIT 1`,
+        [idVenta],
+      );
+      const cuenta = cuentas[0];
+      if (cuenta) {
+        credito = {
+          monto_total: Number(cuenta.monto_total ?? 0),
+          saldo: Number(cuenta.saldo ?? 0),
+          fecha_vencimiento: cuenta.fecha_vencimiento ?? null,
+          estado: String(cuenta.estado ?? ''),
+        };
+      }
+    }
+
+    const numero = (valor: unknown): number | null =>
+      valor === null || valor === undefined || valor === '' || !Number.isFinite(Number(valor)) ? null : Number(valor);
+
+    return {
+      id_venta: Number(cabecera.id_venta),
+      estado: String(cabecera.estado ?? 'activa'),
+      origen: String(cabecera.origen ?? 'mostrador'),
+      total: Number(cabecera.total ?? 0),
+      id_cliente: cabecera.id_cliente != null ? Number(cabecera.id_cliente) : null,
+      id_empresa: cabecera.id_empresa != null ? Number(cabecera.id_empresa) : null,
+      lineas: lineas.map((l: any) => ({
+        id_producto: l.id_producto != null ? Number(l.id_producto) : null,
+        descripcion: String(l.descripcion ?? 'Producto'),
+        codigo: String(l.codigo ?? ''),
+        unidad_de_medida: String(l.unidad_medida ?? 'NIU'),
+        codigo_sunat: l.codigo_sunat ? String(l.codigo_sunat) : null,
+        cantidad: Number(l.cantidad ?? 0),
+        precio: Number(l.precio ?? 0),
+        precio_lista_unitario: numero(l.precio_lista_unitario),
+        descuento_total_linea: numero(l.descuento_total_linea),
+        subtotal: numero(l.subtotal),
+        igv: numero(l.igv),
+        total: numero(l.total),
+      })),
+      pagos: pagos.map((p: any) => ({
+        id_metodo: p.id_metodo != null ? Number(p.id_metodo) : null,
+        monto: Number(p.monto ?? 0),
+        metodo: String(p.metodo ?? ''),
+        tipo: String(p.tipo ?? ''),
+      })),
+      credito,
+    };
   }
 
   private mapProducto(f: any): ProductoVentaResponse {
@@ -975,17 +1147,27 @@ export class VentaRepository {
     return { datos, total: totales[0]?.total ?? 0, pagina, por_pagina: porPagina };
   }
 
-  /** Devuelve al inventario lo que salió por una venta anulada (mismo almacén) y cierra CxC. */
-  async anularVentaCompleta(idVenta: number): Promise<{
+  /**
+   * Anula la venta: devuelve a su almacén de salida lo que todavía no se devolvió (cantidad -
+   * cantidad_devuelta; luego cantidad_devuelta = cantidad, así una nota de crédito previa no se
+   * reingresa dos veces), cierra las cuentas por cobrar y marca la venta 'anulada'. Con `consultor`
+   * corre dentro de la transacción de quien llama (los efectos de la nota que anula la venta, D8/D9).
+   * Candados en orden fijo: venta → salidas de stock → inventario → cuentas por cobrar.
+   */
+  async anularVentaCompleta(
+    idVenta: number,
+    opciones: { consultor?: Consultor; descripcion?: string } = {},
+  ): Promise<{
     stock_devuelto: boolean;
     cxc_cerradas: number;
     ya_anulada: boolean;
   }> {
     await this.esquema.exigir('ventaEstado');
     const conStockSalida = await this.esquema.tiene('ventaStockSalida');
+    const conDevuelto = conStockSalida && (await this.esquema.tiene('ventaStockDevuelto'));
     const conCredito = await this.esquema.tiene('credito');
 
-    return this.dataSource.transaction(async (manager) => {
+    const anular = async (manager: Consultor) => {
       const cab = await manager.query(
         `SELECT id_venta, COALESCE(estado, 'activa') AS estado FROM ventas WHERE id_venta = $1 FOR UPDATE`,
         [idVenta],
@@ -995,24 +1177,31 @@ export class VentaRepository {
         return { stock_devuelto: false, cxc_cerradas: 0, ya_anulada: true };
       }
 
-      const salidas: { id_producto: number; id_almacen: number; cantidad: number }[] = conStockSalida
+      const salidas: { id_producto: number; id_almacen: number; pendiente: number }[] = conStockSalida
         ? (await manager.query(
-            `SELECT id_producto, id_almacen, cantidad
+            `SELECT id_producto, id_almacen, cantidad${conDevuelto ? ', cantidad_devuelta' : ''}
                FROM venta_stock_salida WHERE id_venta = $1
-              ORDER BY id_producto, id_almacen, id`,
+              ORDER BY id_producto, id_almacen, id
+                FOR UPDATE`,
             [idVenta],
           )).map((s: any) => ({
             id_producto: Number(s.id_producto),
             id_almacen: Number(s.id_almacen),
-            cantidad: Number(s.cantidad),
+            pendiente: desdeMilesimas(milesimas(s.cantidad) - milesimas(s.cantidad_devuelta)),
           }))
         : [];
 
       const devueltas: { id_producto: number; id_almacen: number; cantidad: number }[] = [];
       if (salidas.length > 0) {
-        for (const s of salidas) {
+        for (const s of agruparPorAlmacen(salidas.map((x) => ({ ...x, cantidad: x.pendiente })))) {
           await this.devolverAAlmacen(manager, s.id_producto, s.id_almacen, s.cantidad);
           devueltas.push(s);
+        }
+        if (conDevuelto) {
+          await manager.query(
+            'UPDATE venta_stock_salida SET cantidad_devuelta = cantidad WHERE id_venta = $1 AND cantidad_devuelta < cantidad',
+            [idVenta],
+          );
         }
       } else {
         // Ventas anteriores a Fase 4: al almacén con más stock de cada producto.
@@ -1041,7 +1230,7 @@ export class VentaRepository {
           }
         }
       }
-      await this.registrarMovimientos(manager, devueltas, 'entrada', 'Devolución por venta anulada');
+      await this.registrarMovimientos(manager, devueltas, 'entrada', opciones.descripcion ?? 'Devolución por venta anulada');
 
       const cxc = conCredito
         ? filasDe(await manager.query(
@@ -1060,16 +1249,138 @@ export class VentaRepository {
       );
 
       return {
-        stock_devuelto: true,
+        stock_devuelto: devueltas.length > 0,
         cxc_cerradas: (cxc ?? []).length,
         ya_anulada: false,
       };
-    });
+    };
+
+    return opciones.consultor ? anular(opciones.consultor) : this.dataSource.transaction(anular);
   }
 
-  /** @deprecated Usar anularVentaCompleta */
-  async devolverStock(idVenta: number): Promise<void> {
-    await this.anularVentaCompleta(idVenta);
+  /**
+   * Candado de la venta: el primero del orden fijo (venta → salidas de stock → inventario → cuentas
+   * por cobrar) que comparten la anulación y los efectos de las notas de crédito. null si no existe.
+   */
+  async bloquearVenta(consultor: Consultor, idVenta: number): Promise<{ estado: string } | null> {
+    const conEstado = await this.esquema.tiene('ventaEstado');
+    const filas = await consultor.query(
+      `SELECT ${conEstado ? "COALESCE(estado, 'activa')" : "'activa'"} AS estado FROM ventas WHERE id_venta = $1 FOR UPDATE`,
+      [idVenta],
+    );
+    return filas[0] ? { estado: String(filas[0].estado) } : null;
+  }
+
+  /**
+   * Devolución parcial por una nota de crédito aceptada (D8). Reparte lo acreditado de cada producto
+   * entre las salidas de stock de la venta que aún no se devolvieron (orden fijo id_producto,
+   * id_almacen, id; FOR UPDATE) y suma cantidad_devuelta, que nunca pasa de lo que salió. Con
+   * `reingresar` esas unidades vuelven a su almacén (+ movimientos 'entrada' con la referencia de la
+   * nota); sin él solo quedan marcadas como resueltas, para que una anulación posterior de la venta no
+   * reingrese lo que el cliente devolvió y no volvió al almacén. Requiere fase14. Devuelve lo reingresado.
+   */
+  async devolverStockParcial(
+    consultor: Consultor,
+    idVenta: number,
+    acreditado: { id_producto: number; cantidad: number }[],
+    opciones: { reingresar: boolean; descripcion: string },
+  ): Promise<{ id_producto: number; id_almacen: number; cantidad: number }[]> {
+    const porProducto = new Map<number, number>();
+    for (const linea of acreditado) {
+      const cantidad = milesimas(linea.cantidad);
+      if (cantidad > 0) porProducto.set(linea.id_producto, (porProducto.get(linea.id_producto) ?? 0) + cantidad);
+    }
+    if (!porProducto.size) return [];
+
+    const salidas: { id: number; id_producto: number; id_almacen: number; libre: number }[] = (
+      await consultor.query(
+        `SELECT id, id_producto, id_almacen, cantidad, cantidad_devuelta
+           FROM venta_stock_salida
+          WHERE id_venta = $1 AND id_producto = ANY($2::int[])
+          ORDER BY id_producto, id_almacen, id
+            FOR UPDATE`,
+        [idVenta, [...porProducto.keys()]],
+      )
+    ).map((s: any) => ({
+      id: Number(s.id),
+      id_producto: Number(s.id_producto),
+      id_almacen: Number(s.id_almacen),
+      libre: milesimas(s.cantidad) - milesimas(s.cantidad_devuelta),
+    }));
+
+    const marcadas: { id: number; id_producto: number; id_almacen: number; cantidad: number }[] = [];
+    for (const salida of salidas) {
+      const pendiente = porProducto.get(salida.id_producto) ?? 0;
+      const devuelta = Math.min(pendiente, salida.libre);
+      if (devuelta <= 0) continue;
+      porProducto.set(salida.id_producto, pendiente - devuelta);
+      marcadas.push({ id: salida.id, id_producto: salida.id_producto, id_almacen: salida.id_almacen, cantidad: desdeMilesimas(devuelta) });
+    }
+    if (!marcadas.length) return [];
+
+    await consultor.query(
+      `UPDATE venta_stock_salida AS s
+          SET cantidad_devuelta = s.cantidad_devuelta + d.cantidad
+         FROM unnest($1::int[], $2::numeric[]) AS d(id, cantidad)
+        WHERE s.id = d.id`,
+      [marcadas.map((m) => m.id), marcadas.map((m) => m.cantidad)],
+    );
+    if (!opciones.reingresar) return [];
+
+    const reingresadas = agruparPorAlmacen(marcadas);
+    for (const r of reingresadas) {
+      await this.devolverAAlmacen(consultor, r.id_producto, r.id_almacen, r.cantidad);
+    }
+    await this.registrarMovimientos(consultor, reingresadas, 'entrada', opciones.descripcion);
+    return reingresadas;
+  }
+
+  /**
+   * Baja la deuda de la venta por una nota de crédito aceptada (D8): hasta `monto`, empezando por la
+   * cuenta más antigua; la que llega a cero se cierra ('pagado' si tuvo abonos, 'anulado' si no). No
+   * registra un abono: la nota no es un cobro y no debe aparecer en la caja. Devuelve cuánto bajó.
+   */
+  async ajustarCxcPorNota(
+    consultor: Consultor,
+    idVenta: number,
+    monto: number,
+  ): Promise<{ descontado: number; cerradas: number }> {
+    let restante = Dinero.desdeNumeroRedondeado(monto);
+    if (!restante.esPositivo() || !(await this.esquema.tiene('credito'))) return { descontado: 0, cerradas: 0 };
+
+    const cuentas: { id_cxc: number; saldo: Dinero }[] = (
+      await consultor.query(
+        `SELECT id_cxc, saldo::text AS saldo
+           FROM cuentas_por_cobrar
+          WHERE id_venta = $1 AND estado IN ('pendiente', 'parcial', 'vencido') AND saldo > 0
+          ORDER BY id_cxc
+            FOR UPDATE`,
+        [idVenta],
+      )
+    ).map((c: any) => ({ id_cxc: Number(c.id_cxc), saldo: Dinero.desdeBd(c.saldo) }));
+
+    let descontado = Dinero.cero();
+    let cerradas = 0;
+    for (const cuenta of cuentas) {
+      if (!restante.esPositivo()) break;
+      const baja = restante.centimos < cuenta.saldo.centimos ? restante : cuenta.saldo;
+      const nuevo = cuenta.saldo.restar(baja);
+      await consultor.query(
+        `UPDATE cuentas_por_cobrar c
+            SET saldo = $2::numeric,
+                estado = CASE
+                  WHEN $2::numeric > 0 THEN c.estado
+                  WHEN EXISTS (SELECT 1 FROM abonos_credito a WHERE a.id_cxc = c.id_cxc) THEN 'pagado'
+                  ELSE 'anulado'
+                END
+          WHERE c.id_cxc = $1`,
+        [cuenta.id_cxc, nuevo.aTexto()],
+      );
+      restante = restante.restar(baja);
+      descontado = descontado.sumar(baja);
+      if (nuevo.esCero()) cerradas += 1;
+    }
+    return { descontado: descontado.centimos / 100, cerradas };
   }
 
   private async devolverAAlmacen(

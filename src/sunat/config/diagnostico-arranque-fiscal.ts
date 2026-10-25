@@ -25,7 +25,7 @@ export class DiagnosticoArranqueFiscal implements OnApplicationBootstrap {
   private revisarLlave(): void {
     const diagnostico = this.cifrado.diagnostico();
     if (!diagnostico.disponible) {
-      const mensaje = `${diagnostico.problema ?? 'FISCAL_SECRET_KEY no es válida.'} SUNAT directo deshabilitado; Nubefact sigue operando.`;
+      const mensaje = `${diagnostico.problema ?? 'FISCAL_SECRET_KEY no es válida.'} La emisión electrónica directa queda deshabilitada (las ventas se registran sin comprobante).`;
       if (esProduccion() || diagnostico.configurada) this.logger.warn(mensaje);
       else this.logger.log(mensaje);
       return;

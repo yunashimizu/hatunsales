@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
+import { filasDe } from '../../caja/bd/resultado-consulta';
 
 export interface LineaRecepcionInput {
   id_producto: number;
@@ -12,10 +13,44 @@ export interface LineaRecepcionInput {
   precio_compra?: number | null;
 }
 
+/** Cabecera y líneas de una recepción nueva. */
+export interface NuevaRecepcion {
+  id_proveedor: number;
+  id_almacen: number;
+  nro_guia: string;
+  nro_documento: string;
+  observaciones: string;
+  id_usuario?: number;
+  items: LineaRecepcionInput[];
+}
+
+export interface ObservacionCreada {
+  id_observacion: number;
+  id_producto: number;
+  id_item: number;
+}
+
+export interface RecepcionRegistrada {
+  id_recepcion: number;
+  observaciones: ObservacionCreada[];
+  /** true si la clave de idempotencia ya tenía una recepción: no se volvió a registrar nada. */
+  repetida: boolean;
+}
+
+export type ResultadoRevision =
+  | { resultado: 'revisada'; observacion: any }
+  | { resultado: 'no_existe' }
+  | { resultado: 'ya_revisada'; estado: string };
+
+/** Releer el catálogo cada minuto mientras falte la columna (detecta fase16 sin reiniciar). */
+const RELECTURA_ESQUEMA_MS = 60_000;
+
 @Injectable()
 export class RecepcionRepository {
   private readonly logger = new Logger(RecepcionRepository.name);
   private schemaListo = false;
+  private claveIdempotencia: { existe: boolean; leidoEn: number } | null = null;
+  private avisoSinClave = false;
 
   constructor(
     @InjectDataSource('pgConnection')
@@ -119,7 +154,8 @@ export class RecepcionRepository {
         data.direccion?.trim() || null,
       ],
     );
-    return filas[0] ?? null;
+    // UPDATE devuelve [filas, afectadas]: filas[0] era el arreglo, nunca la fila.
+    return filasDe(filas)[0] ?? null;
   }
 
   async eliminarProveedor(id: number): Promise<boolean> {
@@ -134,82 +170,185 @@ export class RecepcionRepository {
       `DELETE FROM proveedores WHERE id_proveedor = $1 RETURNING id_proveedor`,
       [id],
     );
-    return !!r[0];
+    return filasDe(r).length > 0;
   }
 
-  async crearRecepcion(params: {
-    id_proveedor: number;
-    id_almacen: number;
-    nro_guia: string;
-    nro_documento: string;
-    observaciones: string;
-    id_usuario?: number;
-    items: LineaRecepcionInput[];
-  }) {
+  /** Ids de la lista que existen en productos, en una sola consulta. */
+  async productosExistentes(ids: number[]): Promise<Set<number>> {
+    const unicos = [...new Set(ids)];
+    if (!unicos.length) return new Set();
+    const filas = await this.dataSource.query(
+      `SELECT id_producto FROM productos WHERE id_producto = ANY($1::int[])`,
+      [unicos],
+    );
+    return new Set(filas.map((f: any) => Number(f.id_producto)));
+  }
+
+  /**
+   * ¿Existe recepciones.clave_idempotencia (sql/fase16_correcciones_operacion.sql)? Sin la
+   * columna la recepción se registra igual, solo que un reintento podría duplicarla.
+   */
+  async admiteClaveIdempotencia(): Promise<boolean> {
+    const cache = this.claveIdempotencia;
+    if (cache && (cache.existe || Date.now() - cache.leidoEn < RELECTURA_ESQUEMA_MS)) return cache.existe;
+    const filas = await this.dataSource.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'recepciones' AND column_name = 'clave_idempotencia'`,
+    );
+    const existe = filas.length > 0;
+    if (!existe && !this.avisoSinClave) {
+      this.avisoSinClave = true;
+      this.logger.warn(
+        'Falta recepciones.clave_idempotencia: aplique sql/fase16_correcciones_operacion.sql para que un reintento no duplique la recepción.',
+      );
+    }
+    this.claveIdempotencia = { existe, leidoEn: Date.now() };
+    return existe;
+  }
+
+  /** Recepción ya registrada con esa clave y sus observaciones (para responder un reintento). */
+  async buscarPorClave(clave: string, manager?: EntityManager): Promise<RecepcionRegistrada | null> {
+    const q = manager ?? this.dataSource;
+    const cab = await q.query(
+      `SELECT id_recepcion FROM recepciones WHERE clave_idempotencia = $1 LIMIT 1`,
+      [clave],
+    );
+    if (!cab[0]) return null;
+    const idRecepcion = Number(cab[0].id_recepcion);
+    const obs = await q.query(
+      `SELECT id_observacion, id_producto, id_item
+         FROM recepcion_observaciones
+        WHERE id_recepcion = $1
+        ORDER BY id_observacion`,
+      [idRecepcion],
+    );
+    return {
+      id_recepcion: idRecepcion,
+      observaciones: obs.map((o: any) => ({
+        id_observacion: Number(o.id_observacion),
+        id_producto: Number(o.id_producto),
+        id_item: Number(o.id_item),
+      })),
+      repetida: true,
+    };
+  }
+
+  /**
+   * Registra la recepción completa en UNA transacción: cabecera, líneas, observaciones y
+   * lo que haga `aplicarStock` (sumar lo OK al inventario, precio de compra) con el mismo
+   * manager. Si algo falla no queda nada a medias: ni recepción sin stock ni stock sin
+   * recepción.
+   *
+   * Con `clave` (y la columna de fase16) un reintento de la misma confirmación devuelve
+   * la recepción ya registrada sin volver a sumar stock. El candado consultivo por clave
+   * ordena dos envíos simultáneos; el índice único es la última defensa.
+   */
+  async registrarRecepcion(
+    params: NuevaRecepcion & { clave?: string | null },
+    aplicarStock: (manager: EntityManager, creada: { id_recepcion: number }) => Promise<void>,
+  ): Promise<RecepcionRegistrada> {
     await this.asegurarSchema();
-    return this.dataSource.transaction(async (manager) => {
-      const cab = await manager.query(
-        `INSERT INTO recepciones
-           (id_proveedor, id_almacen, nro_guia, nro_documento, observaciones, estado, id_usuario)
-         VALUES ($1,$2,$3,$4,$5,'confirmada',$6)
-         RETURNING id_recepcion`,
+    const clave = params.clave && (await this.admiteClaveIdempotencia()) ? params.clave : null;
+
+    try {
+      return await this.dataSource.transaction(async (manager): Promise<RecepcionRegistrada> => {
+        if (clave) {
+          await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`recepcion:${clave}`]);
+          const previa = await this.buscarPorClave(clave, manager);
+          if (previa) return previa;
+        }
+        const creada = await this.insertarRecepcion(manager, params, clave);
+        await aplicarStock(manager, { id_recepcion: creada.id_recepcion });
+        return creada;
+      });
+    } catch (error: any) {
+      // Otro proceso registró la misma clave entre medias (sin pasar por el candado).
+      if (clave && String(error?.code ?? error?.driverError?.code ?? '') === '23505') {
+        const previa = await this.buscarPorClave(clave);
+        if (previa) return previa;
+      }
+      throw error;
+    }
+  }
+
+  private async insertarRecepcion(
+    manager: EntityManager,
+    params: NuevaRecepcion,
+    clave: string | null,
+  ): Promise<RecepcionRegistrada> {
+    const columnas = ['id_proveedor', 'id_almacen', 'nro_guia', 'nro_documento', 'observaciones', 'estado', 'id_usuario'];
+    const valores: unknown[] = [
+      params.id_proveedor,
+      params.id_almacen,
+      params.nro_guia,
+      params.nro_documento,
+      params.observaciones,
+      'confirmada',
+      params.id_usuario ?? null,
+    ];
+    if (clave) {
+      columnas.push('clave_idempotencia');
+      valores.push(clave);
+    }
+    const cab = await manager.query(
+      `INSERT INTO recepciones (${columnas.join(', ')})
+       VALUES (${valores.map((_, i) => `$${i + 1}`).join(', ')})
+       RETURNING id_recepcion`,
+      valores,
+    );
+    const idRecepcion = Number(cab[0].id_recepcion);
+    const observacionesCreadas: ObservacionCreada[] = [];
+
+    for (const item of params.items) {
+      const filasItem = await manager.query(
+        `INSERT INTO recepcion_items
+           (id_recepcion, id_producto, cantidad_ok, cantidad_observada, nota)
+         VALUES ($1,$2,$3,$4,$5)
+         RETURNING id_item`,
         [
-          params.id_proveedor,
-          params.id_almacen,
-          params.nro_guia,
-          params.nro_documento,
-          params.observaciones,
-          params.id_usuario ?? null,
+          idRecepcion,
+          item.id_producto,
+          item.cantidad_ok || 0,
+          item.cantidad_observada || 0,
+          item.nota?.trim() || '',
         ],
       );
-      const idRecepcion = Number(cab[0].id_recepcion);
-      const observacionesCreadas: { id_observacion: number; id_producto: number; id_item: number }[] = [];
+      const idItem = Number(filasItem[0].id_item);
 
-      for (const item of params.items) {
-        const filasItem = await manager.query(
-          `INSERT INTO recepcion_items
-             (id_recepcion, id_producto, cantidad_ok, cantidad_observada, nota)
-           VALUES ($1,$2,$3,$4,$5)
-           RETURNING id_item`,
+      if (Number(item.cantidad_observada) > 0) {
+        const obs = await manager.query(
+          `INSERT INTO recepcion_observaciones
+             (id_recepcion, id_item, id_producto, id_almacen, id_proveedor, nro_guia,
+              cantidad, motivo, estado, id_usuario_crea)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pendiente',$9)
+           RETURNING id_observacion`,
           [
             idRecepcion,
+            idItem,
             item.id_producto,
-            item.cantidad_ok || 0,
-            item.cantidad_observada || 0,
-            item.nota?.trim() || '',
+            params.id_almacen,
+            params.id_proveedor,
+            params.nro_guia,
+            item.cantidad_observada,
+            (item.motivo_observacion || item.nota || 'Producto en observación').trim(),
+            params.id_usuario ?? null,
           ],
         );
-        const idItem = Number(filasItem[0].id_item);
-
-        if (Number(item.cantidad_observada) > 0) {
-          const obs = await manager.query(
-            `INSERT INTO recepcion_observaciones
-               (id_recepcion, id_item, id_producto, id_almacen, id_proveedor, nro_guia,
-                cantidad, motivo, estado, id_usuario_crea)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pendiente',$9)
-             RETURNING id_observacion`,
-            [
-              idRecepcion,
-              idItem,
-              item.id_producto,
-              params.id_almacen,
-              params.id_proveedor,
-              params.nro_guia,
-              item.cantidad_observada,
-              (item.motivo_observacion || item.nota || 'Producto en observación').trim(),
-              params.id_usuario ?? null,
-            ],
-          );
-          observacionesCreadas.push({
-            id_observacion: Number(obs[0].id_observacion),
-            id_producto: item.id_producto,
-            id_item: idItem,
-          });
-        }
+        observacionesCreadas.push({
+          id_observacion: Number(obs[0].id_observacion),
+          id_producto: item.id_producto,
+          id_item: idItem,
+        });
       }
+    }
 
-      return { id_recepcion: idRecepcion, observaciones: observacionesCreadas };
-    });
+    return { id_recepcion: idRecepcion, observaciones: observacionesCreadas, repetida: false };
+  }
+
+  /** Precio de compra de la recepción, dentro de su transacción. */
+  async actualizarPrecioCompra(manager: EntityManager, idProducto: number, precio: number): Promise<void> {
+    await manager.query('UPDATE productos SET precio_compra = $2 WHERE id_producto = $1', [idProducto, precio]);
   }
 
   async listarRecepciones(limite = 50, idProveedor?: number) {
@@ -301,24 +440,47 @@ export class RecepcionRepository {
     return filas[0] ?? null;
   }
 
-  async marcarObservacion(
+  /**
+   * Aprueba o rechaza una observación pendiente en UNA transacción. El UPDATE condicional
+   * (estado = 'pendiente') va primero: toma el candado de la fila, así una segunda revisión
+   * simultánea (doble clic, otro usuario) espera y luego no encuentra nada que cambiar.
+   * `alRevisar` (sumar el stock al aprobar) corre con el mismo manager: si falla, la
+   * observación sigue pendiente y no entra stock.
+   */
+  async revisarObservacion(
     id: number,
     estado: 'aprobado' | 'rechazado',
-    idUsuario?: number,
-    comentario?: string,
-  ) {
+    idUsuario: number | undefined,
+    comentario: string | undefined,
+    alRevisar?: (manager: EntityManager, observacion: any) => Promise<void>,
+  ): Promise<ResultadoRevision> {
     await this.asegurarSchema();
-    const filas = await this.dataSource.query(
-      `UPDATE recepcion_observaciones
-          SET estado = $2,
-              id_usuario_revision = $3,
-              comentario_revision = $4,
-              revisado_en = NOW()
-        WHERE id_observacion = $1 AND estado = 'pendiente'
-        RETURNING *`,
-      [id, estado, idUsuario ?? null, comentario?.trim() || ''],
-    );
-    return filas[0] ?? null;
+    return this.dataSource.transaction(async (manager): Promise<ResultadoRevision> => {
+      const actualizadas = filasDe(
+        await manager.query(
+          `UPDATE recepcion_observaciones
+              SET estado = $2,
+                  id_usuario_revision = $3,
+                  comentario_revision = $4,
+                  revisado_en = NOW()
+            WHERE id_observacion = $1 AND estado = 'pendiente'
+            RETURNING *`,
+          [id, estado, idUsuario ?? null, comentario?.trim() || ''],
+        ),
+      );
+      const observacion = actualizadas[0];
+      if (!observacion) {
+        const actual = await manager.query(
+          `SELECT estado FROM recepcion_observaciones WHERE id_observacion = $1`,
+          [id],
+        );
+        return actual[0]
+          ? { resultado: 'ya_revisada', estado: String(actual[0].estado) }
+          : { resultado: 'no_existe' };
+      }
+      if (alRevisar) await alRevisar(manager, observacion);
+      return { resultado: 'revisada', observacion };
+    });
   }
 
   async agregarAdjunto(idObservacion: number, url: string, mime: string) {

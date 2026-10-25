@@ -10,8 +10,8 @@ import { RelojFiscal } from './reloj-fiscal';
  *
  * Al arrancar informa en el log qué falta. Mientras falte algo, SUNAT directo
  * queda en «migración pendiente» (los endpoints responden 503 con un mensaje
- * claro) y Nubefact sigue igual. Si el dueño ejecuta el script con la API
- * encendida, se detecta solo en ≤ 30 s, sin reiniciar.
+ * claro) y las ventas se registran sin comprobante electrónico. Si el dueño
+ * ejecuta el script con la API encendida, se detecta solo en ≤ 30 s, sin reiniciar.
  */
 
 export type GrupoEsquemaFiscal = 'secretos' | 'auditoria' | 'emision' | 'catalogo';
@@ -192,7 +192,7 @@ export class FiscalEsquemaService implements OnApplicationBootstrap {
     } else {
       this.logger.warn(
         `SUNAT directo en «migración pendiente»: ${estado.mensaje} Faltan: ${estado.faltantes.join(', ')}. `
-          + 'Nubefact sigue operando con normalidad.',
+          + 'Las ventas se registran sin comprobante electrónico hasta aplicarlo.',
       );
     }
   }

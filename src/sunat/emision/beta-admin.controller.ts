@@ -19,18 +19,22 @@ import { Roles } from '../../guards/roles.decorator';
 import { RolesGuard } from '../../guards/roles.guard';
 import { UsuarioActual } from '../../guards/usuario-actual.decorator';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
+import { actorDe } from '../admin/actor-fiscal';
 import { ErroresFiscalesInterceptor } from '../admin/errores-fiscales.interceptor';
 import { FiscalEsquemaService } from '../config/fiscal-esquema.service';
-import { FiscalConfigError } from '../config/fiscal-errores';
+import { descargaDeEnvio } from './descarga-envio';
+import { EmisionDirectaService } from './emision-directa.service';
 import { EmisorBetaDto } from './emisor-beta.dto';
 import { EmisorBetaService } from './emisor-beta.service';
-import { TIPOS_ARCHIVO_BETA } from './emision-beta.types';
-import type { TipoArchivoBeta } from './emision-beta.types';
-import { EnvioBetaRepository } from './envio-beta.repository';
-import { SunatEmisionBetaService } from './sunat-emision-beta.service';
-import { PosBetaService } from './pos-beta.service';
 import { PosBetaDto } from './pos-beta.dto';
 
+/** Últimos envíos de prueba que muestra el panel de SUNAT BETA. */
+const ENVIOS_BETA_EN_PANEL = 30;
+
+/**
+ * Pruebas en SUNAT BETA (alias de /fiscal/envios para el panel actual): interruptor de la emisión de
+ * prueba del POS, emisor de pruebas, últimos envíos BETA, reintento y descargas.
+ */
 @Controller('fiscal/beta')
 @UseGuards(JwtGuard, RolesGuard)
 @Roles('admin')
@@ -38,29 +42,19 @@ import { PosBetaDto } from './pos-beta.dto';
 export class BetaAdminController {
   constructor(
     private readonly emisor: EmisorBetaService,
-    private readonly envios: EnvioBetaRepository,
     private readonly esquema: FiscalEsquemaService,
-    private readonly emision: SunatEmisionBetaService,
-    private readonly posBeta: PosBetaService,
+    private readonly emision: EmisionDirectaService,
   ) {}
 
   @Get('pos')
   @Header('Cache-Control', 'no-store')
   estadoPosBeta() {
-    return this.posBeta.estado();
+    return this.emision.estado();
   }
 
   @Put('pos')
-  cambiarEstadoPosBeta(
-    @Body() dto: PosBetaDto,
-    @UsuarioActual() usuario: UsuarioToken,
-    @Req() req: Request,
-  ) {
-    return this.posBeta.cambiarEstado(dto.activo, {
-      id_usuario: usuario.id_usuario,
-      nombre: usuario.nombre ?? null,
-      ip: req.ip ?? null,
-    });
+  cambiarEstadoPosBeta(@Body() dto: PosBetaDto, @UsuarioActual() usuario: UsuarioToken | undefined, @Req() req: Request) {
+    return this.emision.cambiarEstado(dto.activo, actorDe(usuario, req));
   }
 
   @Get('emisor')
@@ -70,23 +64,16 @@ export class BetaAdminController {
   }
 
   @Put('emisor')
-  guardarEmisor(
-    @Body() dto: EmisorBetaDto,
-    @UsuarioActual() usuario: UsuarioToken,
-    @Req() req: Request,
-  ) {
-    return this.emisor.guardar(dto, {
-      id_usuario: usuario.id_usuario,
-      nombre: usuario.nombre ?? null,
-      ip: req.ip ?? null,
-    });
+  guardarEmisor(@Body() dto: EmisorBetaDto, @UsuarioActual() usuario: UsuarioToken | undefined, @Req() req: Request) {
+    return this.emisor.guardar(dto, actorDe(usuario, req));
   }
 
   @Get('envios')
   @Header('Cache-Control', 'no-store')
   async listar() {
     await this.esquema.exigir('emision');
-    return { items: await this.envios.listar() };
+    const { datos } = await this.emision.listarEnvios({ ambiente: 'beta', pagina: 1, por_pagina: ENVIOS_BETA_EN_PANEL });
+    return { items: datos };
   }
 
   @Post('envios/:id/reintentar')
@@ -97,28 +84,11 @@ export class BetaAdminController {
   }
 
   @Get('envios/:id/archivos/:tipo')
-  @Header('Cache-Control', 'no-store')
+  @Header('Cache-Control', 'private, no-store')
+  @Header('X-Content-Type-Options', 'nosniff')
   @Header('Access-Control-Expose-Headers', 'Content-Disposition')
-  async archivo(
-    @Param('id', ParseIntPipe) id: number,
-    @Param('tipo') tipo: string,
-  ) {
-    if (!(TIPOS_ARCHIVO_BETA as readonly string[]).includes(tipo))
-      throw new FiscalConfigError(
-        'FISCAL_CONFIG_INVALIDA',
-        'Tipo de archivo de prueba no válido.',
-      );
+  async archivo(@Param('id', ParseIntPipe) id: number, @Param('tipo') tipo: string): Promise<StreamableFile> {
     await this.esquema.exigir('emision');
-    const archivo = await this.envios.archivo(id, tipo as TipoArchivoBeta);
-    if (!archivo)
-      throw new FiscalConfigError(
-        'FISCAL_XML_NO_DISPONIBLE',
-        'El archivo no está disponible en ese envío BETA.',
-      );
-    return new StreamableFile(archivo.contenido, {
-      type: archivo.mime,
-      disposition: `attachment; filename="${archivo.nombre.replace(/[^\w.-]/g, '_')}"`,
-      length: archivo.contenido.length,
-    });
+    return descargaDeEnvio(this.emision, id, tipo);
   }
 }

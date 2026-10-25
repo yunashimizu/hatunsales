@@ -28,6 +28,8 @@ const TABLAS = [
   'empresas',
   'caja_arqueos',
   'caja_arqueo_denominaciones',
+  'comprobantes',
+  'comprobante_items',
 ] as const;
 
 export type TablaCaja = (typeof TABLAS)[number];
@@ -61,6 +63,14 @@ const REQUISITOS = {
     caja_arqueo_denominaciones: ['id', 'id_arqueo', 'tipo', 'denominacion', 'cantidad', 'subtotal'],
     movimientos_caja: ['id_apertura', 'id_usuario'],
   },
+  /** fase14: lo ya devuelto de cada salida de stock, para no reingresarlo dos veces. */
+  ventaStockDevuelto: { venta_stock_salida: ['cantidad_devuelta'] },
+  /** fase14: notas de crédito enlazadas por ítem y con efectos al aceptarse (D8). */
+  notasCredito: {
+    comprobantes: ['id_comprobante_modificado', 'nota_motivo', 'efecto_nota', 'reingresar_stock', 'efectos_aplicados', 'efectos_aplicados_en'],
+    comprobante_items: ['id_item_origen'],
+    venta_stock_salida: ['cantidad_devuelta'],
+  },
 } satisfies Record<string, Partial<Record<TablaCaja, string[]>>>;
 
 export type CapacidadCaja = keyof typeof REQUISITOS;
@@ -77,6 +87,14 @@ const EFECTO_SI_FALTA: Record<CapacidadCaja, string> = {
   credito: 'el crédito y las cuentas por cobrar no están disponibles',
   movimientosPorTurno: 'los ingresos y egresos de efectivo no están disponibles',
   arqueo: 'el arqueo de caja no está disponible (responde 503)',
+  ventaStockDevuelto: 'anular una venta devuelve al almacén todo lo que salió, sin descontar devoluciones previas',
+  notasCredito: 'las notas de crédito responden 503 y una venta con comprobante aceptado no se puede anular',
+};
+
+/** Script que crea lo que falta, cuando no es el de caja (fase 11). */
+const SCRIPT_POR_CAPACIDAD: Partial<Record<CapacidadCaja, string>> = {
+  ventaStockDevuelto: 'sql/fase14_notas_credito_enlace.sql',
+  notasCredito: 'sql/fase14_notas_credito_enlace.sql',
 };
 
 const RELECTURA_SI_FALTA_MS = 60_000;
@@ -195,7 +213,7 @@ export class EsquemaCajaService implements OnApplicationBootstrap {
     if (this.avisados.has(capacidad)) return;
     this.avisados.add(capacidad);
     this.log.warn(
-      `${mensajeScriptPendiente()}: falta ${s.faltantes(capacidad).join(', ')}. Mientras tanto ${EFECTO_SI_FALTA[capacidad]}.`,
+      `${mensajeScriptPendiente(SCRIPT_POR_CAPACIDAD[capacidad])}: falta ${s.faltantes(capacidad).join(', ')}. Mientras tanto ${EFECTO_SI_FALTA[capacidad]}.`,
     );
   }
 

@@ -122,12 +122,17 @@ describe('validarDocumentoCpe', () => {
       expect(contiene(lista, 'caracteres de control')).toBe(true);
     });
 
-    it('rechaza operaciones gratuitas y exportación con un mensaje claro', () => {
+    it('rechaza operaciones gratuitas y exportación con un mensaje claro y sin nombrar proveedores', () => {
       const doc = facturaPrueba();
       doc.lineas = [{ ...doc.lineas[0], afectacion: '11' as never }];
-      expect(contiene(errores(doc), 'operación gratuita')).toBe(true);
+      const gratuita = errores(doc);
+      expect(contiene(gratuita, 'operación gratuita')).toBe(true);
+      expect(contiene(gratuita, 'esta operación todavía no se puede emitir desde el sistema')).toBe(true);
       doc.lineas = [{ ...doc.lineas[0], afectacion: '40' as never }];
-      expect(contiene(errores(doc), 'exportación')).toBe(true);
+      const exportacion = errores(doc);
+      expect(contiene(exportacion, 'exportación')).toBe(true);
+      expect(contiene(exportacion, 'esta operación todavía no se puede emitir desde el sistema')).toBe(true);
+      expect([...gratuita, ...exportacion].join(' ')).not.toMatch(/nubefact|emisor directo/i);
     });
 
     it('detecta IGV que no corresponde a la tasa (doble IGV) y totales que no cuadran', () => {
@@ -215,14 +220,54 @@ describe('validarDocumentoCpe', () => {
     });
   });
 
-  describe('reglas RS 000048-2026 (desde el 01/01/2027)', () => {
+  describe('reglas RS 000048-2026 (obligatorias desde el 01/01/2027, RS 000143-2026)', () => {
+    const CODIGO_OBLIGATORIO = 'código de producto SUNAT de 8 dígitos';
+
     it('en auto se activan por la fecha de emisión: el código de producto pasa a ser obligatorio', () => {
       const antes = facturaPrueba();
       expect(errores(antes, { aplicarReglas2027: 'auto' })).toEqual([]);
       const despues = facturaPrueba(undefined, { fechaEmision: '2027-01-02' });
-      expect(contiene(errores(despues, { hoy: '2027-01-02' }), 'código de producto SUNAT de 8 dígitos')).toBe(true);
+      expect(contiene(errores(despues, { hoy: '2027-01-02' }), CODIGO_OBLIGATORIO)).toBe(true);
       expect(errores(antes, { aplicarReglas2027: true }).length).toBeGreaterThan(0);
-      expect(errores(despues, { hoy: '2027-01-02', aplicarReglas2027: false })).toEqual([]);
+    });
+
+    it.each([
+      ['2026-12-31', false, false],
+      ['2026-12-31', 'auto', false],
+      ['2026-12-31', undefined, false],
+      ['2026-12-31', true, true],
+      ['2027-01-01', false, true],
+      ['2027-01-01', 'auto', true],
+      ['2027-01-01', undefined, true],
+      ['2027-01-01', true, true],
+    ] as const)('frontera: emisión %s con aplicarReglas2027=%s → reglas aplicadas: %s', (fechaEmision, opcion, aplican) => {
+      const doc = facturaPrueba(undefined, { fechaEmision });
+      const ajustes = { hoy: '2027-01-01', aplicarReglas2027: opcion };
+      expect(new ContextoValidacionCpe(doc, ajustes).aplicarReglas2027).toBe(aplican);
+      expect(contiene(errores(doc, ajustes), CODIGO_OBLIGATORIO)).toBe(aplican);
+    });
+
+    it("'false' ya no apaga las reglas de un documento de 2027 (solo evita adelantarlas)", () => {
+      const doc = facturaPrueba(undefined, { fechaEmision: '2027-01-02' });
+      expect(contiene(errores(doc, { hoy: '2027-01-02', aplicarReglas2027: false }), CODIGO_OBLIGATORIO)).toBe(true);
+      const conCodigo = facturaPrueba([{ descripcion: 'CEMENTO', cantidad: 1, precio: 10, codigoSunat: '30111601' }], { fechaEmision: '2027-01-02' });
+      expect(errores(conCodigo, { hoy: '2027-01-02', aplicarReglas2027: false })).toEqual([]);
+    });
+
+    it('si la fecha de emisión no es válida decide la fecha de referencia (hoy)', () => {
+      const doc = facturaPrueba(undefined, { fechaEmision: 'no-es-fecha' });
+      expect(new ContextoValidacionCpe(doc, { hoy: '2026-12-31', aplicarReglas2027: false }).aplicarReglas2027).toBe(false);
+      expect(new ContextoValidacionCpe(doc, { hoy: '2027-01-01', aplicarReglas2027: false }).aplicarReglas2027).toBe(true);
+    });
+
+    it('ND motivo 13 de 2027 con la opción en false: ya rige y exige inafecta o exonerada', () => {
+      const gravada = notaDebitoPrueba([{ descripcion: 'PENALIDAD', cantidad: 1, precio: 50, codigoSunat: '80161500' }], {
+        fechaEmision: '2027-01-01',
+        referencia: { tipoDoc: '01', serie: 'FFF1', numero: 7, motivo: '13', sustento: 'PENALIDAD' },
+      });
+      const lista = errores(gravada, { hoy: '2027-01-01', aplicarReglas2027: false });
+      expect(contiene(lista, 'rige desde el 01/01/2027')).toBe(false);
+      expect(contiene(lista, 'debe ser inafecta o exonerada')).toBe(true);
     });
 
     it('ND motivo 13: solo desde 2027 y solo inafecta o exonerada', () => {

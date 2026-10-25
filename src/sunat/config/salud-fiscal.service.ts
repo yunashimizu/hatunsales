@@ -6,7 +6,7 @@ import { CifradoFiscalService } from '../seguridad/cifrado-fiscal.service';
 import { CacheTtl } from './cache-ttl';
 import { DIAS_AVISO_VENCIMIENTO } from './checklist-activacion';
 import { FiscalConfigService } from './fiscal-config.service';
-import { AmbienteFiscal, ProveedorFiscal } from './fiscal-config.tipos';
+import { AmbienteFiscal, BloqueoEmision, ProveedorFiscal } from './fiscal-config.tipos';
 import { FiscalEsquemaService } from './fiscal-esquema.service';
 import { EstadoOperativoFiscal, FUENTE_ESTADO_OPERATIVO_FISCAL, FuenteEstadoOperativoFiscal } from './fiscal-tokens';
 import { NotificadorCambiosFiscales } from './notificador-cambios-fiscales';
@@ -28,6 +28,8 @@ export interface EstadoFiscalVista {
   certificado: {
     cargado: boolean;
     ambiente: AmbienteFiscal | null;
+    /** Días que le quedan al certificado del ambiente vigente (igual que vence_en_dias). */
+    dias_para_vencer: number | null;
     vence_en_dias: number | null;
     vencido: boolean;
     autofirmado: boolean | null;
@@ -36,8 +38,13 @@ export interface EstadoFiscalVista {
   gre: { activa: boolean; activa_efectiva: boolean; listo: boolean; faltantes: string[] };
   esquema: { listo: boolean; mensaje: string | null };
   cifrado_disponible: boolean;
-  /** Lo aporta el módulo de documentos/tareas; null mientras no esté registrado. */
+  /** ¿Se emite ahora en el ambiente vigente? (lo aporta el módulo de emisión; null si no está registrado). */
+  emision: { activa: boolean; ambiente: AmbienteFiscal; codigo?: string; motivo?: string } | null;
+  /** Interruptor abierto del ambiente vigente: SUNAT rechazó la credencial SOL o el certificado. */
+  bloqueo: BloqueoEmision | null;
+  /** {pendientes, inciertos} de la cola de envíos del ambiente vigente; null mientras no esté registrado. */
   cola: Record<string, number> | null;
+  /** {vencen_hoy, vencidos}: comprobantes no aceptados según su fecha límite de envío. */
   plazos: Record<string, number> | null;
   ultimo_envio_ok: string | null;
   ultimo_error: { codigo: string; mensaje: string; en: string } | null;
@@ -94,12 +101,18 @@ export class SaludFiscalService {
           : null;
 
     const gre = preparacion.checklist.gre;
+    const bloqueo = snapshot.bloqueos[snapshot.ambiente];
     const errorConfig = Number(operativo?.cola?.error_config ?? 0);
     const vencidos = Number(operativo?.plazos?.vencidos ?? 0);
+    const porAtender = Number(operativo?.plazos?.vencen_hoy ?? 0) + Number(operativo?.cola?.inciertos ?? 0);
     const semaforo: Semaforo =
-      (proveedorEfectivo === 'sunat_directo' && !preparacion.listo) || (greEfectiva && !gre.listo) || errorConfig > 0
+      (proveedorEfectivo === 'sunat_directo' && !preparacion.listo) || (greEfectiva && !gre.listo) || errorConfig > 0 || bloqueo !== null
         ? 'rojo'
-        : preparacion.advertencias.length > 0 || vencidos > 0 || alerta !== null || snapshot.proveedor !== proveedorEfectivo
+        : preparacion.advertencias.length > 0 ||
+            vencidos > 0 ||
+            porAtender > 0 ||
+            alerta !== null ||
+            snapshot.proveedor !== proveedorEfectivo
           ? 'amarillo'
           : 'verde';
 
@@ -114,6 +127,7 @@ export class SaludFiscalService {
       certificado: {
         cargado: !!cert,
         ambiente: cert?.ambiente ?? null,
+        dias_para_vencer: cert?.dias_para_vencer ?? null,
         vence_en_dias: cert?.dias_para_vencer ?? null,
         vencido: cert?.vencido ?? false,
         autofirmado: cert ? cert.autofirmado : null,
@@ -122,6 +136,8 @@ export class SaludFiscalService {
       gre: { activa: snapshot.gre.activa, activa_efectiva: greEfectiva, listo: gre.listo, faltantes: [...gre.faltantes] },
       esquema: { listo: esquema.listo, mensaje: esquema.mensaje },
       cifrado_disponible: this.cifrado.disponible(),
+      emision: operativo?.emision ?? null,
+      bloqueo: bloqueo ? { ...bloqueo } : null,
       cola: operativo?.cola ?? null,
       plazos: operativo?.plazos ?? null,
       ultimo_envio_ok: operativo?.ultimo_envio_ok ?? null,
@@ -131,7 +147,7 @@ export class SaludFiscalService {
     };
   }
 
-  /** En producción importa el de producción; en BETA el de pruebas o, si no hay, el de producción. */
+  /** En producción importa el de producción; en BETA el de pruebas o, si no hay, el de producción (el que se mostraría). */
   private certificadoRelevante(
     ambiente: AmbienteFiscal,
     certificados: Record<AmbienteFiscal, CertificadoInfoVista | null>,

@@ -44,6 +44,26 @@ describe('leerXmlDeZip', () => {
     expect(leerXmlDeZip(buffer.toString('base64'))?.xml).toBe('<ApplicationResponse/>');
   });
 
+  it('salta la carpeta dummy/ que SUNAT agrega al ZIP de la constancia', () => {
+    const zip = new AdmZip();
+    zip.addFile('dummy/', Buffer.alloc(0));
+    zip.addFile('R-20614736420-03-BB01-00000002.xml', Buffer.from('<ar:ApplicationResponse xmlns:ar="a"/>', 'utf8'));
+    expect(leerXmlDeZip(zip.toBuffer())).toEqual({ nombre: 'R-20614736420-03-BB01-00000002.xml', xml: '<ar:ApplicationResponse xmlns:ar="a"/>' });
+  });
+
+  it('respeta la codificación declarada (UTF-8 por omisión, ISO-8859-1 si lo dice) y quita el BOM', () => {
+    const utf8 = '<?xml version="1.0" encoding="UTF-8"?><ApplicationResponse>La Nota de Crédito ÑANDÚ</ApplicationResponse>';
+    const latin1 = '<?xml version="1.0" encoding="ISO-8859-1" standalone="no" ?><ApplicationResponse>La Nota de Crédito ÑANDÚ</ApplicationResponse>';
+    const zip = (contenido: Buffer) => {
+      const archivo = new AdmZip();
+      archivo.addFile('R-20610206337-07-FC01-00000001.xml', contenido);
+      return archivo.toBuffer();
+    };
+    expect(leerXmlDeZip(zip(Buffer.from(utf8, 'utf8')))?.xml).toBe(utf8);
+    expect(leerXmlDeZip(zip(Buffer.from(latin1, 'latin1')))?.xml).toBe(latin1);
+    expect(leerXmlDeZip(zip(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(utf8, 'utf8')])))?.xml).toBe(utf8);
+  });
+
   it('devuelve null si el ZIP es ilegible, está vacío o no trae XML', () => {
     expect(leerXmlDeZip('no-es-base64-de-un-zip')).toBeNull();
     expect(leerXmlDeZip(Buffer.alloc(0))).toBeNull();

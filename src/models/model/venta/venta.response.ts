@@ -13,6 +13,8 @@ export interface ProductoVentaResponse {
   reglas_mayoristas?: { id_regla: number; cantidad_minima: number; descuento_unitario: number }[];
   stock_disponible: number;
   imagen_url: string;
+  /** Código de producto SUNAT (catálogo 25, 8 dígitos). Solo lo trae la carga de productos de una venta. */
+  codigo_sunat?: string | null;
 }
 
 export interface ItemVentaResponse {
@@ -43,6 +45,11 @@ export interface VentaResponse {
   comprobante?: ComprobanteResponse;
   /** Motivo por el que el comprobante no pudo emitirse, para reintentarlo. */
   comprobante_error?: string;
+  /**
+   * La venta quedó sin comprobante principal (ni uno en curso): el mostrador ofrece
+   * «Emitir comprobante». Lo informa el reintento idempotente de una venta ya registrada.
+   */
+  comprobante_pendiente?: boolean;
   /** Recargo por pago con tarjeta (con IGV) que ya está dentro de `total`. */
   recargo_tarjeta?: number;
 }

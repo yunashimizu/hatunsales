@@ -107,8 +107,9 @@ export class CrearVentaRequest {
   cliente_direccion?: string;
 
   // ── Comprobante ───────────────────────────────────────────────
+  /** Una venta solo emite factura o boleta; las notas se emiten después desde ese comprobante. */
   @IsInt()
-  @IsIn([1, 2, 7, 8], { message: '1=Factura 2=Boleta 7=Nota de crédito 8=Nota de débito' })
+  @IsIn([1, 2], { message: '1=Factura 2=Boleta' })
   id_tipo!: number;
 
   @IsString()
@@ -170,4 +171,46 @@ export class CrearVentaRequest {
   @ValidateNested({ each: true })
   @Type(() => PagoVentaRequest)
   pagos?: PagoVentaRequest[];
+}
+
+/**
+ * Emitir el comprobante de una venta que quedó sin él (emisión inactiva, SUNAT caída,
+ * datos del cliente incompletos…). Las líneas y montos salen de la venta guardada;
+ * aquí solo se elige el tipo y, si hace falta, otro receptor.
+ */
+export class EmitirComprobanteVentaRequest {
+
+  @IsInt()
+  @IsIn([1, 2], { message: '1=Factura 2=Boleta' })
+  id_tipo!: number;
+
+  /** DNI o RUC del receptor. Si se omite, se usa el cliente o la empresa de la venta. */
+  @IsString()
+  @IsOptional()
+  @MaxLength(15)
+  documento?: string;
+
+  @IsInt()
+  @IsOptional()
+  id_cliente?: number;
+
+  @IsInt()
+  @IsOptional()
+  id_empresa?: number;
+
+  /** Nombre a mano cuando la consulta del documento no está disponible. */
+  @IsString()
+  @IsOptional()
+  @MaxLength(200)
+  cliente_denominacion?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(255)
+  cliente_direccion?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(1000)
+  observaciones?: string;
 }

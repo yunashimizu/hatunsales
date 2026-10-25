@@ -408,6 +408,10 @@ export class CajaSesionRepository {
   /**
    * Resumen informativo del turno: ventas de la caja desde la apertura (no bloquea; solo
    * informa al cerrar). Total y desglose por método en paralelo.
+   *
+   * Solo ventas de mostrador: una venta web (origen 'tienda') puede quedar asignada a la
+   * caja abierta, pero se cobra fuera de la gaveta. El arqueo (sqlEsperadoTurno) ya la deja
+   * aparte; si el resumen la sumaba, el total del turno no cuadraba con el arqueo.
    */
   async resumenTurno(apertura: AperturaSesion): Promise<ResumenTurno> {
     const m = await this.metaSesion();
@@ -418,9 +422,13 @@ export class CajaSesionRepository {
     const sinAnuladas = m.snapshot.tieneColumna('ventas', 'estado')
       ? `AND COALESCE(v.estado, 'activa') <> 'anulada'`
       : '';
+    const soloMostrador = m.snapshot.tieneColumna('ventas', 'origen')
+      ? `AND COALESCE(v.origen, 'mostrador') = 'mostrador'`
+      : '';
     const ventana = `v.id_caja = a.id_caja
             AND v.fecha >= a.${m.apertura.colFecha}
-            ${sinAnuladas}`;
+            ${sinAnuladas}
+            ${soloMostrador}`;
 
     const [totales, filas] = await Promise.all([
       this.dataSource.query(

@@ -13,6 +13,27 @@ import {
 const LIMITE_POR_DEFECTO = 12;
 const LIMITE_MAXIMO = 60;
 
+/** Portada y buscador rápido: listas cortas, sin paginar. */
+const LIMITE_CORTO_POR_DEFECTO = 8;
+const LIMITE_CORTO_MAXIMO = 24;
+const LARGO_MAXIMO_BUSQUEDA = 100;
+
+/**
+ * `limite` que llega por la URL de un endpoint público: entero entre 1 y el
+ * máximo, o el valor por defecto si no es un número (antes `?limite=100000`
+ * devolvía todo el catálogo y `?limite=abc` terminaba en `LIMIT NaN`).
+ */
+export function limiteSeguro(valor: unknown, porDefecto = LIMITE_CORTO_POR_DEFECTO, maximo = LIMITE_CORTO_MAXIMO): number {
+  const numero = Number(valor);
+  if (valor === undefined || valor === null || valor === '' || !Number.isFinite(numero)) return porDefecto;
+  return Math.min(maximo, Math.max(1, Math.trunc(numero)));
+}
+
+/** Texto de búsqueda de la URL: solo texto, sin espacios sobrantes y con un largo razonable. */
+function textoBusqueda(valor: unknown): string {
+  return typeof valor === 'string' ? valor.trim().slice(0, LARGO_MAXIMO_BUSQUEDA).trim() : '';
+}
+
 @Injectable()
 export class CatalogoBussnies {
 
@@ -20,7 +41,7 @@ export class CatalogoBussnies {
 
   async listar(query: CatalogoQueryRequest): Promise<PaginaResponse<ProductoTiendaResponse>> {
     const filtros = this.normalizarFiltros(query);
-    const { rows, total } = await this.repo.buscar(filtros);
+    const { rows, total = 0 } = await this.repo.buscar(filtros);
 
     return {
       items: rows.map((row) => this.mapProducto(row)),
@@ -31,31 +52,28 @@ export class CatalogoBussnies {
     };
   }
 
-  async destacados(limite = 8): Promise<ProductoTiendaResponse[]> {
-    const { rows } = await this.repo.buscar({
-      solo_destacado: true,
-      orden: 'relevancia',
-      pagina: 1,
-      limite,
-    });
+  async destacados(limitePedido?: number): Promise<ProductoTiendaResponse[]> {
+    const limite = limiteSeguro(limitePedido);
+    const { rows } = await this.repo.buscar(
+      { solo_destacado: true, orden: 'relevancia', pagina: 1, limite },
+      { conTotal: false },
+    );
 
     // Si nadie marcó productos como destacados, mostramos los más recientes
     // para que la portada nunca se vea vacía.
     if (rows.length === 0) {
-      const recientes = await this.repo.buscar({ orden: 'nuevo', pagina: 1, limite });
+      const recientes = await this.repo.buscar({ orden: 'nuevo', pagina: 1, limite }, { conTotal: false });
       return recientes.rows.map((row) => this.mapProducto(row));
     }
 
     return rows.map((row) => this.mapProducto(row));
   }
 
-  async ofertas(limite = 8): Promise<ProductoTiendaResponse[]> {
-    const { rows } = await this.repo.buscar({
-      solo_oferta: true,
-      orden: 'relevancia',
-      pagina: 1,
-      limite,
-    });
+  async ofertas(limitePedido?: number): Promise<ProductoTiendaResponse[]> {
+    const { rows } = await this.repo.buscar(
+      { solo_oferta: true, orden: 'relevancia', pagina: 1, limite: limiteSeguro(limitePedido) },
+      { conTotal: false },
+    );
     return rows.map((row) => this.mapProducto(row));
   }
 
@@ -123,9 +141,10 @@ export class CatalogoBussnies {
     return this.repo.obtenerBanners();
   }
 
-  async buscarRapido(texto: string, limite = 8): Promise<ProductoTiendaResponse[]> {
-    if (!texto || texto.trim().length < 2) return [];
-    const { rows } = await this.repo.buscar({ q: texto.trim(), pagina: 1, limite });
+  async buscarRapido(texto: unknown, limitePedido?: number): Promise<ProductoTiendaResponse[]> {
+    const q = textoBusqueda(texto);
+    if (q.length < 2) return [];
+    const { rows } = await this.repo.buscar({ q, pagina: 1, limite: limiteSeguro(limitePedido) }, { conTotal: false });
     return rows.map((row) => this.mapProducto(row));
   }
 
@@ -164,7 +183,7 @@ export class CatalogoBussnies {
     const limite = Math.min(Number(query.limite ?? LIMITE_POR_DEFECTO), LIMITE_MAXIMO);
 
     return {
-      q: query.q?.trim() || undefined,
+      q: textoBusqueda(query.q) || undefined,
       id_categoria: query.id_categoria ? Number(query.id_categoria) : undefined,
       id_marca: query.id_marca ? Number(query.id_marca) : undefined,
       precio_min: query.precio_min !== undefined ? Number(query.precio_min) : undefined,

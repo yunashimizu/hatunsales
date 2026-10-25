@@ -61,11 +61,11 @@ async function main() {
     PruebaConexionFiscalService,
   } = require('../src/sunat/config/prueba-conexion-fiscal.service');
   const {
-    SunatEmisionBetaService,
-  } = require('../src/sunat/emision/sunat-emision-beta.service');
+    SunatEmisionService,
+  } = require('../src/sunat/emision/sunat-emision.service');
   const {
-    EnvioBetaRepository,
-  } = require('../src/sunat/emision/envio-beta.repository');
+    EnvioFiscalRepository,
+  } = require('../src/sunat/emision/envio-fiscal.repository');
   const buffer = fs.readFileSync(path.resolve(ruta));
   const leido = leerPkcs12(buffer, clave);
   const fuente = new DataSource({
@@ -159,7 +159,7 @@ async function main() {
         );
       for (const id of ids) {
         const resultado = await modulo
-          .get(SunatEmisionBetaService)
+          .get(SunatEmisionService)
           .reintentar(id);
         console.log(JSON.stringify(resultado, null, 2));
         if (!resultado.aceptado) {
@@ -169,8 +169,14 @@ async function main() {
       }
     }
     if (process.argv.includes('--exportar')) {
-      const repo = modulo.get(EnvioBetaRepository);
-      const envios = await repo.listar();
+      const repo = modulo.get(EnvioFiscalRepository);
+      // El listado va paginado (máximo 100 por página): se recorren todas las páginas de BETA.
+      const envios = [];
+      for (let pagina = 1; ; pagina++) {
+        const lote = await repo.listar({ ambiente: 'beta', pagina, por_pagina: 100 });
+        envios.push(...lote.datos);
+        if (envios.length >= lote.total || !lote.datos.length) break;
+      }
       const destino = path.join(raiz, '.tmp/sunat-beta');
       fs.mkdirSync(destino, { recursive: true });
       for (const envio of envios) {

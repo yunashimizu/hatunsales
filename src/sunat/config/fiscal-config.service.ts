@@ -7,7 +7,6 @@ import type { ActualizarConfigFiscalDto } from './fiscal-config.dto';
 import {
   ActorFiscal,
   AmbienteFiscal,
-  CLAVES_CONFIG_FISCAL,
   CLAVES_SNAPSHOT_FISCAL,
   ConfigGreFiscal,
   EmisorFiscal,
@@ -72,7 +71,7 @@ export class FiscalConfigService {
     this.cache.invalidar();
   }
 
-  /** Proveedor fiscal configurado; el POS solo emite si su activación SUNAT BETA está lista. */
+  /** 'sunat_directo' = emisión de producción activa; 'nubefact' = sin emisión electrónica (valor histórico). */
   async proveedorActivo(): Promise<ProveedorFiscal> {
     return (await this.snapshot()).proveedor;
   }
@@ -148,11 +147,6 @@ export class FiscalConfigService {
     if (modo === 'true') return true;
     if (modo === 'false') return false;
     return this.reloj.fechaLima() >= FiscalConfigService.FECHA_REGLAS_2027;
-  }
-
-  /** Numeración propia de las pruebas BETA: nunca consume correlativos reales. */
-  siguienteCorrelativoBeta(): Promise<number> {
-    return this.repositorio.incrementarContador(CLAVES_CONFIG_FISCAL.betaCorrelativo);
   }
 
   // ── Contrato §12.2 del diseño: se delega en los servicios especializados ──

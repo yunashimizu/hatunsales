@@ -34,6 +34,7 @@ import { Moneda } from './models/DBModel/c-electronico/moneda.entity';
 import { ComprobanteController } from './api/controllers/comprobante.controller';
 import { ComprobanteRepository } from './repository/Repository/comprobante.repository';
 import { ComprobanteBussnies } from './bussnies/Bussnies/comprobante.bussnies';
+import { EmisorNotasCredito } from './bussnies/Bussnies/nota-credito.contrato';
 import { Producto } from './models/DBModel/producto.entity';
 import { Inventario } from './models/DBModel/inventario.entity';
 import { GuiaRemision } from './models/DBModel/guia-remision.entity';
@@ -143,9 +144,6 @@ import { CuentaTiendaController } from './api/controllers/tienda/cuenta.controll
 import { ConfiguracionRepository } from './repository/Repository/configuracion.repository';
 import { ConfiguracionFiscalBussnies } from './bussnies/Bussnies/configuracion-fiscal.bussnies';
 import { ConfiguracionController } from './api/controllers/configuracion.controller';
-import { FiscalProviderService } from './sunat/fiscal/fiscal-provider.service';
-import { FiscalEnvioRepository } from './sunat/repository/fiscal-envio.repository';
-import { FacturaBetaAdminController } from './sunat/factura/factura-beta-admin.controller';
 import { ReceptorRepository } from './repository/Repository/receptor.repository';
 import { ReceptorBussnies } from './bussnies/Bussnies/receptor.bussnies';
 import { ReceptorController } from './api/controllers/receptor.controller';
@@ -189,10 +187,11 @@ import { REGISTROS } from './registro/registros';
   PedidoController, PedidoAdminController, CuentaTiendaController,
   ReceptorController, VentaController, ArchivoController, CreditoController, CajaPagosController,
   CajaSesionController,
-  ProveedorController, RecepcionController, ConfiguracionController, FacturaBetaAdminController,
+  ProveedorController, RecepcionController, ConfiguracionController,
   ...REGISTROS.controladores],
   providers: [AppService, UserService, SunatRepository, SunatBussnies, HatunsalesRepository,
   LogRepository, AuthBussnies, AdminBussnies, RolBussnies, JwtStrategy, ComprobanteRepository, ComprobanteBussnies,
+  { provide: EmisorNotasCredito, useExisting: ComprobanteBussnies },
   ClienteBussnies, ClienteRepository, ProductoRepository, ProductoBussnies,
   InventarioRepository, InventarioBussnies, GuiaRemisionRepository, GuiaRemisionBussnies,
   ProformaRepository, ProformaBussnies, ReportesRepository, ReportesBussnies,
@@ -202,7 +201,7 @@ import { REGISTROS } from './registro/registros';
    StockTiendaRepository, VentaTiendaRepository,
    CatalogoBussnies, CarritoBussnies, PedidoBussnies, CuentaTiendaBussnies, CheckoutBussnies, PagoBussnies,
    CulqiPasarela, PasarelaSimulada, pasarelaProvider, WhatsappPasarela,
-   ConfiguracionRepository, ConfiguracionFiscalBussnies, FiscalProviderService, FiscalEnvioRepository,
+   ConfiguracionRepository, ConfiguracionFiscalBussnies,
    ReceptorRepository, ReceptorBussnies, ConsultaDocumentoService,
    VentaRepository, VentaBussnies, CreditoRepository, CreditoBussnies, CajaPagosRepository, CajaPagosBussnies,
    CajaSesionRepository, CajaSesionBussnies,

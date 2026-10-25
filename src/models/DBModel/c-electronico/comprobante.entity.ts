@@ -91,7 +91,7 @@ export class Comprobante {
   @Column({ default: false })
   enviar_cliente!: boolean;
 
-  // respuesta nubefact
+  // Enlaces y respuesta del proveedor anterior (solo filas históricas; la emisión directa no los usa).
   @Column({ nullable: true })
   enlace!: string;
 

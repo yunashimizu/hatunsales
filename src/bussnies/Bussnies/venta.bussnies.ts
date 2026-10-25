@@ -1,15 +1,22 @@
-import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { VentaRepository, FiltroVentas, LineaVentaPersistida } from '../../repository/Repository/venta.repository';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import {
+  VentaRepository,
+  FiltroVentas,
+  LineaVentaPersistida,
+  VentaParaComprobante,
+} from '../../repository/Repository/venta.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { CreditoRepository } from '../../repository/Repository/credito.repository';
 import { CajaPagosRepository } from '../../repository/Repository/caja-pagos.repository';
 import { ComprobanteBussnies } from './comprobante.bussnies';
 import { ReceptorBussnies } from './receptor.bussnies';
 import { CreditoBussnies } from './credito.bussnies';
-import { CrearVentaRequest, ItemVentaRequest } from '../../models/model/venta/venta.request';
+import { CrearVentaRequest, EmitirComprobanteVentaRequest, ItemVentaRequest } from '../../models/model/venta/venta.request';
 import { VentaResponse } from '../../models/model/venta/venta.response';
 import { GenerarComprobanteRequest } from '../../models/model/c-electronico/comprobante.request';
-import { PreviewComprobanteResponse } from '../../models/model/c-electronico/comprobante.response';
+import { ComprobanteResponse, PreviewComprobanteResponse } from '../../models/model/c-electronico/comprobante.response';
+import { esComprobantePrincipal } from '../../util/fiscal/tipos-comprobante';
+import { hoyLima } from '../../util/fecha-lima';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import {
   calcularComprobante,
@@ -20,6 +27,9 @@ import {
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { pasarelaConfig } from '../../config/pasarela.config';
 import { CajaSesionBussnies } from './caja-sesion.bussnies';
+import { NotaCreditoBussnies } from './nota-credito.bussnies';
+import type { AnularVentaRequest } from '../../models/model/venta/anular-venta.request';
+import type { AnulacionVentaResponse } from '../../models/model/c-electronico/nota-credito.response';
 import { normalizarRol } from '../../config/roles.config';
 import { resolverPrecioVenta } from '../../util/precios/precio-venta';
 import {
@@ -69,6 +79,7 @@ export class VentaBussnies {
     private readonly credito: CreditoBussnies,
     private readonly cajaPagosRepo: CajaPagosRepository,
     private readonly cajaSesion: CajaSesionBussnies,
+    private readonly notasCredito?: NotaCreditoBussnies,
   ) {}
 
   // ── Apoyo al mostrador ───────────────────────────────────────
@@ -146,7 +157,7 @@ export class VentaBussnies {
     const claveIdempotencia = dto.clave_idempotencia?.trim() || undefined;
     if (claveIdempotencia) {
       const existente = await this.repo.buscarPorClaveIdempotencia(claveIdempotencia);
-      if (existente) return this.obtener(existente);
+      if (existente) return this.ventaYaRegistrada(existente, dto);
     }
 
     const { items, itemsRecargo, resumen, recargo } = await this.armarLineas(dto);
@@ -206,52 +217,100 @@ export class VentaBussnies {
       // Carrera de idempotencia: el índice único ganó en otra petición.
       if (claveIdempotencia && this.esViolacionUnica(error)) {
         const existente = await this.repo.buscarPorClaveIdempotencia(claveIdempotencia);
-        if (existente) return this.obtener(existente);
+        if (existente) return this.ventaYaRegistrada(existente, dto);
       }
       throw this.traducirErrorDeStock(error, items);
     }
 
-    const venta = await this.obtener(idVenta);
+    // Un reintento idempotente devuelve la venta existente sin volver a emitir ni repetir
+    // efectos externos; si quedó sin comprobante, lo dice para que el mostrador ofrezca emitirlo.
+    const venta = ventaExistente ? await this.ventaYaRegistrada(idVenta, dto) : await this.obtener(idVenta);
     if (recargo.aplica) venta.recargo_tarjeta = recargo.monto;
-
-    // Un reintento idempotente devuelve la venta existente sin volver a llamar
-    // al proveedor de comprobantes ni repetir efectos externos.
     if (ventaExistente) return venta;
 
     if (dto.emitir_comprobante === false) return venta;
 
     try {
       const medio = await this.nombreMedioPago(pagos);
-      venta.comprobante = await this.comprobantes.generar({
-        ...this.aSolicitudComprobante(dto, items, itemsRecargo),
-        id_venta: idVenta,
-        id_cliente: receptor.id_cliente,
-        id_empresa: receptor.id_empresa,
-        documento: receptor.numero_documento,
-        medio_de_pago: medio,
-        condiciones_de_pago: credito ? 'Crédito' : 'Contado',
-        monto_credito: credito?.monto,
-        fecha_de_vencimiento: credito
-          ? this.fechaLimaMasDias(credito.dias)
-          : undefined,
-      } as any);
-      if (
-        venta.comprobante.proveedor_fiscal === 'sunat_directo' &&
-        venta.comprobante.ambiente_fiscal === 'beta' &&
-        !venta.comprobante.aceptada_sunat
-      ) {
-        venta.comprobante_error =
-          venta.comprobante.error ||
-          venta.comprobante.sunat_description ||
-          'SUNAT BETA no confirmó la aceptación. Revise el comprobante en Documentos antes de reintentar.';
-      }
+      const anonimo = receptor.origen === 'generico' || /^0*$/.test(String(receptor.numero_documento ?? ''));
+      venta.comprobante = await this.comprobantes.generar(
+        {
+          ...this.aSolicitudComprobante(dto, items, itemsRecargo),
+          id_venta: idVenta,
+          id_cliente: receptor.id_cliente,
+          id_empresa: receptor.id_empresa,
+          documento: anonimo ? undefined : receptor.numero_documento,
+          medio_de_pago: medio,
+          forma_pago: credito ? 'Credito' : 'Contado',
+          condiciones_de_pago: credito ? 'Crédito' : 'Contado',
+          monto_credito: credito?.monto,
+          fecha_de_vencimiento: credito
+            ? this.fechaLimaMasDias(credito.dias)
+            : undefined,
+        },
+        usuario?.id_usuario ?? null,
+      );
+      this.avisarSiNoAceptado(venta);
     } catch (error: any) {
       const mensaje = error?.response?.message ?? error?.message ?? 'No se pudo emitir el comprobante';
       this.logger.warn(`Venta ${idVenta} registrada sin comprobante: ${mensaje}`);
       venta.comprobante_error = String(mensaje);
+      // generar() solo falla antes de guardar nada: la venta quedó sin comprobante y se puede emitir después.
+      venta.comprobante_pendiente = true;
     }
 
     return venta;
+  }
+
+  /**
+   * Emite la factura o boleta de una venta que quedó sin comprobante (emisión inactiva, SUNAT
+   * caída, datos del cliente incompletos…). Las líneas salen de la venta guardada tal como se
+   * cobró (precios, descuentos y el recargo por tarjeta) y el comprobante debe sumar EXACTAMENTE
+   * el total cobrado: nunca se recalcula con los precios actuales del catálogo.
+   */
+  async emitirComprobanteDeVenta(
+    idVenta: number,
+    dto: EmitirComprobanteVentaRequest,
+    usuario?: UsuarioToken,
+  ): Promise<VentaResponse> {
+    const venta = await this.repo.obtenerParaComprobante(idVenta);
+    if (!venta) throw new NotFoundException(`No existe la venta ${idVenta}`);
+    if (venta.estado.trim().toLowerCase() === 'anulada') {
+      throw new ConflictException(
+        cuerpoError(CodigoError.COMPROBANTE_EMISION_FALLIDA, `La venta ${idVenta} está anulada: no se le emite comprobante.`),
+      );
+    }
+
+    const vigente = this.comprobantePrincipalVigente(await this.comprobantes.listarPorVenta(idVenta));
+    if (vigente) {
+      throw new ConflictException({
+        message: `La venta ${idVenta} ya tiene el comprobante ${vigente.numero_formateado}. No se emite otro para no duplicarlo.`,
+        codigo: 'VENTA_CON_COMPROBANTE',
+        id_comprobante: vigente.id_comprobante,
+      });
+    }
+    if (!venta.lineas.length) {
+      throw new BadRequestException(
+        cuerpoError(CodigoError.COMPROBANTE_EMISION_FALLIDA, `La venta ${idVenta} no tiene productos registrados para emitir su comprobante.`),
+      );
+    }
+
+    const solicitud = await this.solicitudDesdeVentaGuardada(venta, dto);
+    const respuesta = await this.obtener(idVenta);
+    try {
+      respuesta.comprobante = await this.comprobantes.generar(solicitud, usuario?.id_usuario ?? null, {
+        totalExigido: venta.total,
+      });
+      this.avisarSiNoAceptado(respuesta);
+    } catch (error: any) {
+      // Otro comprobante ganó la carrera o el total no cuadra: son errores de la acción, no de SUNAT.
+      if (error instanceof ConflictException || error instanceof BadRequestException) throw error;
+      const mensaje = error?.response?.message ?? error?.message ?? 'No se pudo emitir el comprobante';
+      this.logger.warn(`Venta ${idVenta}: no se pudo emitir su comprobante: ${mensaje}`);
+      respuesta.comprobante_error = String(mensaje);
+      respuesta.comprobante_pendiente = true;
+    }
+    return respuesta;
   }
 
   // ── Consultas ────────────────────────────────────────────────
@@ -300,59 +359,139 @@ export class VentaBussnies {
     return this.repo.listar(filtro);
   }
 
-  /** Anula la venta: stock al almacén de salida, cierra CxC. El CPE se anula aparte en Documentos. */
-  async anular(idVenta: number): Promise<{
-    anulada: boolean;
-    ya_anulada?: boolean;
-    cxc_cerradas: number;
-    stock_devuelto: boolean;
-    comprobante_aviso?: string;
-  }> {
-    const venta = await this.repo.obtener(idVenta);
-    if (!venta) throw new NotFoundException(`No existe la venta ${idVenta}`);
-
-    let resultado: { stock_devuelto: boolean; cxc_cerradas: number; ya_anulada: boolean };
-    try {
-      resultado = await this.repo.anularVentaCompleta(idVenta);
-    } catch (error: any) {
-      if (String(error?.message) === 'VENTA_NO_ENCONTRADA') {
-        throw new NotFoundException(`No existe la venta ${idVenta}`);
-      }
-      throw error;
+  /**
+   * Anula la venta según D9 (lo resuelve el negocio de notas de crédito): sin comprobante válido se
+   * anula en el sistema (stock al almacén de salida, cuentas por cobrar cerradas); con comprobante
+   * aceptado por SUNAT se emite la nota de crédito y la venta se anula cuando SUNAT la acepte.
+   */
+  async anular(idVenta: number, dto: AnularVentaRequest = {}, usuario?: UsuarioToken): Promise<AnulacionVentaResponse> {
+    if (!this.notasCredito) {
+      throw new ServiceUnavailableException('La anulación de ventas no está disponible en este momento. Intente de nuevo en unos minutos.');
     }
-
-    if (resultado.ya_anulada) {
-      return {
-        anulada: true,
-        ya_anulada: true,
-        cxc_cerradas: 0,
-        stock_devuelto: false,
-      };
-    }
-
-    const comprobantes = await this.comprobantes.listarPorVenta(idVenta);
-    const emitidos = (comprobantes ?? []).filter(
-      (c: any) => !c.anulado && (c.estado === 'aceptado' || c.estado === 'enviado' || c.pdf_url || c.numero),
-    );
-
-    let comprobante_aviso: string | undefined;
-    if (emitidos.length > 0) {
-      comprobante_aviso =
-        'La venta se anuló en el sistema (stock y crédito). Si el comprobante ya fue aceptado por SUNAT, emita una nota de crédito o anúlelo desde Documentos.';
-    } else if ((comprobantes ?? []).length > 0) {
-      comprobante_aviso =
-        'La venta se anuló. Había un comprobante pendiente/error: revíselo en Documentos si hace falta.';
-    }
-
-    return {
-      anulada: true,
-      cxc_cerradas: resultado.cxc_cerradas,
-      stock_devuelto: resultado.stock_devuelto,
-      ...(comprobante_aviso ? { comprobante_aviso } : {}),
-    };
+    return this.notasCredito.anularVenta(idVenta, dto, usuario?.id_usuario ?? null);
   }
 
   // ── Interno ──────────────────────────────────────────────────
+
+  /**
+   * Venta que ya estaba registrada (reintento con la misma clave de idempotencia). Si se pidió
+   * comprobante y no tiene uno principal vigente ni en curso, lo informa con `comprobante_pendiente`.
+   */
+  private async ventaYaRegistrada(idVenta: number, dto: CrearVentaRequest): Promise<VentaResponse> {
+    const venta = await this.obtener(idVenta);
+    if (dto.emitir_comprobante === false) return venta;
+    // obtener() trae primero el comprobante principal vigente, si lo hay.
+    if (this.comprobantePrincipalVigente(venta.comprobante ? [venta.comprobante] : [])) return venta;
+    venta.comprobante_pendiente = true;
+    venta.comprobante_error ??=
+      'La venta ya estaba registrada y no tiene comprobante electrónico: emítalo desde Ventas («Emitir comprobante»).';
+    return venta;
+  }
+
+  /** Factura o boleta de la venta que no está anulada ni en error (emitida o con su envío en curso). */
+  private comprobantePrincipalVigente(lista: ComprobanteResponse[]): ComprobanteResponse | undefined {
+    return lista.find((c) => esComprobantePrincipal(c.tipo_de_comprobante) && !c.anulado && c.estado !== 'error');
+  }
+
+  /** El comprobante quedó guardado pero SUNAT no lo aceptó (todavía): el mostrador debe verlo. */
+  private avisarSiNoAceptado(venta: VentaResponse): void {
+    const comprobante = venta.comprobante;
+    if (!comprobante || comprobante.aceptada_sunat) return;
+    venta.comprobante_error =
+      comprobante.error ||
+      comprobante.sunat_description ||
+      'SUNAT no confirmó la aceptación del comprobante. Revíselo en Documentos antes de reintentar.';
+    // Rechazado o con error ya no cuenta como el comprobante de la venta: se puede emitir otro.
+    if (comprobante.estado === 'error') venta.comprobante_pendiente = true;
+  }
+
+  /**
+   * Solicitud de comprobante con las líneas tal como se cobraron. El recargo por tarjeta no se
+   * guarda en detalle_venta: es la diferencia entre el total cobrado y los productos, y solo se
+   * acepta si se pagó con tarjeta; se reparte por afectación igual que al cobrar.
+   */
+  private async solicitudDesdeVentaGuardada(
+    venta: VentaParaComprobante,
+    dto: EmitirComprobanteVentaRequest,
+  ): Promise<GenerarComprobanteRequest> {
+    const porcentajeIgv = await this.config.obtenerNumero('tienda_igv_porcentaje', PORCENTAJE_IGV_POR_DEFECTO);
+
+    const items = venta.lineas.map((linea, indice) => {
+      const precio = redondear(linea.precio > 0 ? linea.precio : linea.precio_lista_unitario ?? 0);
+      const bruto = redondear(precio * linea.cantidad);
+      const descuento = linea.descuento_total_linea
+        ?? (linea.total !== null ? Math.max(0, redondear(bruto - linea.total)) : 0);
+      // Una línea con importe y sin IGV fue exonerada o inafecta, y la venta no guarda cuál de las dos.
+      if (porcentajeIgv > 0 && linea.igv === 0 && (linea.total ?? 0) > 0) {
+        throw new BadRequestException(
+          cuerpoError(
+            CodigoError.COMPROBANTE_EMISION_FALLIDA,
+            `La línea ${indice + 1} (${linea.descripcion}) se vendió sin IGV y la venta no indica si fue exonerada o inafecta: no se puede declarar a SUNAT con certeza.`,
+          ),
+        );
+      }
+      return {
+        id_producto: linea.id_producto ?? undefined,
+        codigo: linea.codigo,
+        codigo_producto_sunat: linea.codigo_sunat ?? undefined,
+        unidad_de_medida: linea.unidad_de_medida,
+        descripcion: linea.descripcion,
+        cantidad: linea.cantidad,
+        precio_unitario: precio,
+        descuento: redondear(descuento),
+        tipo_de_igv: 1,
+      };
+    });
+
+    const productos = calcularComprobante(items, porcentajeIgv);
+    const diferencia = redondear(venta.total - productos.total);
+    const conTarjeta = venta.pagos.some((pago) => esMetodoTarjeta({ tipo: pago.tipo, nombre: pago.metodo }));
+    const itemsRecargo = diferencia > 0 && conTarjeta
+      ? repartirRecargoPorAfectacion(productos.lineas, diferencia).map((tramo) => ({
+          codigo: CODIGO_RECARGO_TARJETA,
+          unidad_de_medida: UNIDAD_RECARGO_TARJETA,
+          descripcion: DESCRIPCION_RECARGO_TARJETA,
+          cantidad: 1,
+          precio_unitario: tramo.monto,
+          descuento: 0,
+          tipo_de_igv: tramo.tipo_de_igv,
+        }))
+      : [];
+
+    // Receptor del pedido; si no se indicó ninguno, el cliente o la empresa de la venta.
+    const propio = !!(dto.documento?.trim() || dto.id_empresa || dto.id_cliente);
+    const receptor = await this.resolverReceptor(
+      propio ? dto : { id_empresa: venta.id_empresa ?? undefined, id_cliente: venta.id_cliente ?? undefined },
+    );
+    const anonimo = receptor.origen === 'generico' || /^0*$/.test(String(receptor.numero_documento ?? ''));
+
+    // Crédito: lo que todavía se debe. Ya pagado del todo, el comprobante sale al contado.
+    const credito = venta.credito && venta.credito.saldo > 0 ? venta.credito : null;
+    if (credito && (!credito.fecha_vencimiento || credito.fecha_vencimiento <= hoyLima())) {
+      throw new BadRequestException(
+        cuerpoError(
+          CodigoError.COMPROBANTE_EMISION_FALLIDA,
+          `La venta tiene S/ ${credito.saldo.toFixed(2)} al crédito con vencimiento ${credito.fecha_vencimiento ?? 'sin fecha'}: SUNAT exige que la cuota venza después de la emisión. Registre el cobro en Cuentas por cobrar y vuelva a intentarlo.`,
+        ),
+      );
+    }
+
+    return {
+      id_tipo: dto.id_tipo,
+      id_moneda: 1,
+      id_venta: venta.id_venta,
+      id_cliente: receptor.id_cliente,
+      id_empresa: receptor.id_empresa,
+      documento: anonimo ? undefined : receptor.numero_documento,
+      observaciones: dto.observaciones,
+      medio_de_pago: venta.pagos.map((pago) => pago.metodo).filter(Boolean).join(' + ') || undefined,
+      forma_pago: credito ? 'Credito' : 'Contado',
+      condiciones_de_pago: credito ? 'Crédito' : 'Contado',
+      monto_credito: credito ? credito.saldo : undefined,
+      fecha_de_vencimiento: credito?.fecha_vencimiento ?? undefined,
+      items: [...items, ...itemsRecargo],
+    };
+  }
 
   /**
    * Los precios se toman del producto en base de datos, no de lo que envía el
@@ -398,6 +537,7 @@ export class VentaBussnies {
         id_regla_mayorista: precio.id_regla_mayorista,
         tipo_de_igv: item.tipo_de_igv,
         stock_disponible: producto.stock_disponible,
+        codigo_sunat: producto.codigo_sunat ?? null,
       };
     });
 
@@ -480,9 +620,20 @@ export class VentaBussnies {
     return { recargo, itemsRecargo };
   }
 
+  /** Solicitud del comprobante desde el carrito. Lleva el código SUNAT de cada producto (catálogo 25), si lo tiene. */
   private aSolicitudComprobante(
     dto: CrearVentaRequest,
-    items: { id_producto: number; descripcion: string; codigo: string; unidad_de_medida: string; cantidad: number; precio_unitario: number; descuento: number; tipo_de_igv?: number }[],
+    items: {
+      id_producto: number;
+      descripcion: string;
+      codigo: string;
+      unidad_de_medida: string;
+      cantidad: number;
+      precio_unitario: number;
+      descuento: number;
+      tipo_de_igv?: number;
+      codigo_sunat?: string | null;
+    }[],
     itemsRecargo: ItemRecargo[] = [],
   ): GenerarComprobanteRequest {
     return {
@@ -498,6 +649,7 @@ export class VentaBussnies {
         ...items.map((i) => ({
           id_producto: i.id_producto,
           codigo: i.codigo,
+          ...(i.codigo_sunat ? { codigo_producto_sunat: i.codigo_sunat } : {}),
           unidad_de_medida: i.unidad_de_medida,
           descripcion: i.descripcion,
           cantidad: i.cantidad,
@@ -518,7 +670,9 @@ export class VentaBussnies {
     } as GenerarComprobanteRequest;
   }
 
-  private async resolverReceptor(dto: CrearVentaRequest) {
+  private async resolverReceptor(
+    dto: Pick<CrearVentaRequest, 'documento' | 'cliente_denominacion' | 'cliente_direccion' | 'id_empresa' | 'id_cliente'>,
+  ) {
     const documento = (dto.documento ?? '').replace(/\D/g, '');
     const nombre = dto.cliente_denominacion?.trim();
     const direccion = dto.cliente_direccion?.trim();

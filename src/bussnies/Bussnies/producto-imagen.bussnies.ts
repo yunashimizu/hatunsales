@@ -101,12 +101,14 @@ export class ProductoImagenBussnies {
       throw new NotFoundException('Imagen no encontrada');
     }
 
+    await this.repo.eliminar(id_imagen);
+    await this.repo.asegurarPrincipal(id_producto);
+
+    // Después de quitar la fila: el archivo puede estar compartido (misma foto en otro
+    // producto o en una recepción) y el almacén solo lo borra si ya nadie lo usa.
     if (imagen.clave_almacen) {
       await this.almacen.eliminar(imagen.clave_almacen);
     }
-
-    await this.repo.eliminar(id_imagen);
-    await this.repo.asegurarPrincipal(id_producto);
 
     return this.repo.findByProducto(id_producto);
   }

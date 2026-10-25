@@ -1,103 +1,142 @@
+import { imagenSoportada } from './logo-emisor';
+import { PALETA } from './proforma-documento';
 import { textoPdf } from './proforma-pdf';
+import { generarQrPng } from './qr';
 
-// pdfkit no trae tipos en este proyecto.
+// pdfkit no trae tipos en este proyecto (mismo uso que en proformas, arqueos y comprobantes).
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const PDFDocument = require('pdfkit');
+
+/**
+ * Representación impresa (A4) de la Guía de Remisión Electrónica Remitente. Generador puro: no lee la base
+ * de datos ni la red; el negocio arma `DatosGuiaRemisionPdf` (con el emisor de la configuración fiscal o el
+ * con que se firmó la guía). El QR (enlace de la constancia de SUNAT) solo se imprime con la guía aceptada;
+ * en cualquier otro estado la hoja lleva la marca de su estado, en el encabezado y de fondo.
+ */
 
 export interface DatosGuiaRemisionPdf {
   emisor: {
     ruc: string;
-    razon_social: string;
+    razonSocial: string;
+    nombreComercial?: string | null;
     direccion?: string | null;
     ubicacion?: string | null;
     logo?: Buffer | null;
   };
-  codigo: string;
+  /** Estado de la guía: legacy, borrador, pendiente, enviado, aceptado, rechazado o anulado. */
   estado: string;
-  fecha_emision?: string | null;
-  fecha_inicio_traslado?: string | null;
-  motivo_traslado?: string | null;
-  modalidad_traslado?: string | null;
-  peso_bruto_total?: number | null;
-  unidad_peso?: string | null;
-  numero_bultos?: number | null;
-  direccion_origen: string;
-  direccion_destino: string;
-  origen_ubigeo?: string | null;
-  destino_ubigeo?: string | null;
-  destinatario: {
-    tipo_documento: string;
-    numero_documento: string;
-    denominacion: string;
-    direccion: string;
-  };
-  transporte: {
-    placa_principal: string;
-    conductor_nombre: string;
-    conductor_tipo_doc: string;
-    conductor_numero_doc: string;
-    conductor_licencia: string;
-  };
-  comprobante?: { serie: string; numero: number };
-  items: Array<{
-    codigo: string;
-    descripcion: string;
-    cantidad: number;
-    unidad_medida: string;
-  }>;
+  /** «T001-00000001»; null mientras es borrador. */
+  numero: string | null;
+  idGuia: number;
+  fechaEmision: string | null;
+  horaEmision: string | null;
+  fechaInicioTraslado: string | null;
+  fechaEntregaTransportista: string | null;
+  motivo: { codigo: string; nombre: string } | null;
+  descripcionMotivo: string | null;
+  modalidad: { codigo: string; nombre: string } | null;
+  pesoBrutoTotal: number | null;
+  unidadPeso: string | null;
+  numeroBultos: number | null;
+  destinatario: { tipoDoc: string | null; tipoDocTexto: string | null; numDoc: string | null; nombre: string | null };
+  partida: PuntoPdfGuia;
+  llegada: PuntoPdfGuia;
+  transportista: { ruc: string | null; razonSocial: string | null; registroMtc: string | null } | null;
+  vehiculo: { placa: string | null; tarjetaCirculacion: string | null; marca: string | null } | null;
+  conductor: { tipoDocTexto: string | null; numDoc: string | null; nombre: string | null; licencia: string | null } | null;
+  documentoRelacionado: { tipo: string; numero: string } | null;
+  items: Array<{ codigo: string | null; descripcion: string; unidad: string; cantidad: number }>;
+  observaciones: string | null;
+  /** Enlace del QR que devuelve SUNAT en la constancia. Solo se usa con la guía aceptada. */
+  cadenaQr: string | null;
+}
+
+export interface PuntoPdfGuia {
+  direccion: string | null;
+  /** «150119 - LURIN - LIMA - LIMA». */
+  ubigeo: string | null;
+  codigoEstablecimiento: string | null;
+}
+
+export interface OpcionesPdfGuia {
+  /** false solo en pruebas (para leer el texto del PDF). */
+  comprimir?: boolean;
+}
+
+export const LEYENDA_GRE_REMITENTE = 'Representación impresa de la Guía de Remisión Electrónica Remitente';
+
+const MARCAS_ESTADO: Readonly<Record<string, string>> = {
+  borrador: 'BORRADOR - SIN VALIDEZ',
+  pendiente: 'PENDIENTE DE SUNAT',
+  enviado: 'PENDIENTE DE SUNAT',
+  rechazado: 'RECHAZADA',
+  anulado: 'ANULADA',
+  legacy: 'SIN VALIDEZ ELECTRÓNICA',
+};
+
+/** Marca que lleva la hoja según el estado; null solo con la guía aceptada por SUNAT. */
+export function marcaEstadoGuia(estado: string): string | null {
+  return estado === 'aceptado' ? null : (MARCAS_ESTADO[estado] ?? 'SIN VALIDEZ');
 }
 
 const MARGEN = 36;
+const LADO_QR = 92;
+const ALTO_PIE = 18;
 const COLOR = {
-  texto: '#202124',
-  gris: '#5f6368',
-  borde: '#8b8b8b',
-  suave: '#f7f3f5',
-  blanco: '#ffffff',
-  peligro: '#9d1c1c',
+  texto: PALETA.texto,
+  gris: PALETA.gris,
+  linea: PALETA.linea,
+  fondo: PALETA.fondo,
+  cebra: PALETA.cebra,
+  marca: PALETA.grafito,
+  peligro: PALETA.peligro,
+  blanco: PALETA.blanco,
 };
 
-function fecha(valor?: string | null): string {
-  const texto = String(valor ?? '').trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(texto)) {
-    const [anio, mes, dia] = texto.split('-');
-    return `${dia}/${mes}/${anio}`;
-  }
-  return texto;
+type Fila = [string, string | null | undefined];
+
+function fecha(valor: string | null | undefined): string {
+  const t = String(valor ?? '').trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : t;
 }
 
-function numero(valor: unknown, decimales = 0): string {
+/** Hasta 3 decimales, sin ceros de más y con separador de miles: 1250.5 → «1,250.5». */
+function cantidad(valor: number | null | undefined): string {
   const n = Number(valor);
-  if (!Number.isFinite(n)) return '0';
-  return n.toFixed(decimales).replace(/\.00$/, '');
+  if (valor === null || valor === undefined || !Number.isFinite(n)) return '';
+  return n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
 }
 
-function texto(valor: unknown): string {
-  return textoPdf(valor) || '—';
+function t(valor: unknown): string {
+  return textoPdf(valor);
 }
 
-export function generarGuiaRemisionPdf(datos: DatosGuiaRemisionPdf): Promise<Buffer> {
+export async function generarGuiaRemisionPdf(datos: DatosGuiaRemisionPdf, opciones: OpcionesPdfGuia = {}): Promise<Buffer> {
+  const cadena = datos.estado === 'aceptado' ? String(datos.cadenaQr ?? '').trim() : '';
+  const qr = cadena ? await generarQrPng(cadena, { tamanoPx: 360, correccion: 'M' }) : null;
   return new Promise<Buffer>((resolve, reject) => {
     try {
       const documento = new PDFDocument({
         size: 'A4',
         margins: { top: MARGEN, bottom: MARGEN, left: MARGEN, right: MARGEN },
         bufferPages: true,
+        compress: opciones.comprimir !== false,
         info: {
-          Title: `Guía de remisión ${texto(datos.codigo)}`,
-          Author: texto(datos.emisor.razon_social),
-          Subject: 'Borrador de guía de remisión remitente',
+          Title: `Guía de remisión remitente ${t(datos.numero ?? `borrador ${datos.idGuia}`)}`,
+          Author: t(datos.emisor.razonSocial),
+          Subject: LEYENDA_GRE_REMITENTE,
           Creator: 'HatunSales',
         },
       });
       const partes: Buffer[] = [];
       documento.on('data', (parte: Buffer) => partes.push(parte));
       documento.on('end', () => resolve(Buffer.concat(partes)));
-      documento.on('error', (error: unknown) => reject(error));
-      new DibujoGuia(documento, datos).dibujar();
+      documento.on('error', (error: unknown) => reject(error instanceof Error ? error : new Error(String(error))));
+      new DibujoGuia(documento, datos, qr).dibujar();
       documento.end();
     } catch (error) {
-      reject(error);
+      reject(error instanceof Error ? error : new Error(`No se pudo generar la representación impresa: ${String(error)}`));
     }
   });
 }
@@ -105,139 +144,269 @@ export function generarGuiaRemisionPdf(datos: DatosGuiaRemisionPdf): Promise<Buf
 class DibujoGuia {
   private y = MARGEN;
   private readonly ancho: number;
+  private readonly marca: string | null;
 
-  constructor(private readonly documento: any, private readonly datos: DatosGuiaRemisionPdf) {
-    this.ancho = documento.page.width - MARGEN * 2;
+  constructor(
+    private readonly doc: any,
+    private readonly d: DatosGuiaRemisionPdf,
+    private readonly qr: Buffer | null,
+  ) {
+    this.ancho = doc.page.width - MARGEN * 2;
+    this.marca = marcaEstadoGuia(d.estado);
   }
 
   dibujar(): void {
     this.cabecera();
+    if (this.marca) this.banner(this.marca);
+    this.bloque('DATOS DEL TRASLADO', this.filasTraslado());
     this.bloque('DESTINATARIO', [
-      ['RAZÓN SOCIAL', this.datos.destinatario.denominacion],
-      [this.datos.destinatario.tipo_documento === '6' ? 'RUC' : 'DNI', this.datos.destinatario.numero_documento],
-      ['DIRECCIÓN', this.datos.destinatario.direccion],
+      ['Nombre o razón social', this.d.destinatario.nombre],
+      ['Documento', [this.d.destinatario.tipoDocTexto, this.d.destinatario.numDoc].filter(Boolean).join(' ')],
     ]);
-    this.bloque('ENVÍO', [
-      ['F. EMISIÓN', fecha(this.datos.fecha_emision)],
-      ['F. INICIO TRASLADO', fecha(this.datos.fecha_inicio_traslado)],
-      ['MOTIVO TRASLADO', this.datos.motivo_traslado || 'Venta'],
-      ['MOD. TRANSPORTE', this.datos.modalidad_traslado === '02' ? 'Transporte público' : 'Transporte privado'],
-      ['PESO BRUTO TOTAL', `${numero(this.datos.peso_bruto_total, 3)} ${texto(this.datos.unidad_peso || 'KGM')}`],
-      ['N° BULTOS', numero(this.datos.numero_bultos)],
-      ['P. PARTIDA', this.datos.direccion_origen],
-      ['P. LLEGADA', this.datos.direccion_destino],
-    ]);
-    this.bloque('TRANSPORTE', [
-      ['PLACA PRINCIPAL', this.datos.transporte.placa_principal],
-      ['CONDUCTOR', this.datos.transporte.conductor_nombre],
-      ['DOCUMENTO', this.datos.transporte.conductor_numero_doc],
-      ['LICENCIA', this.datos.transporte.conductor_licencia],
-    ]);
+    this.bloque('PUNTO DE PARTIDA', this.filasPunto(this.d.partida));
+    this.bloque('PUNTO DE LLEGADA', this.filasPunto(this.d.llegada));
+    const transporte = this.filasTransporte();
+    if (transporte.length) this.bloque('TRANSPORTE', transporte);
     this.tablaItems();
-    if (this.datos.comprobante) {
-      this.bloque('FACTURA ELECTRÓNICA', [
-        ['COMPROBANTE', `${this.datos.comprobante.serie}-${this.datos.comprobante.numero}`],
-      ]);
+    if (this.d.observaciones) this.bloque('OBSERVACIONES', [['Observaciones', this.d.observaciones]]);
+    this.cierre();
+    this.paginas();
+  }
+
+  private filasTraslado(): Fila[] {
+    const d = this.d;
+    const filas: Fila[] = [
+      ['Fecha de emisión', [fecha(d.fechaEmision), d.horaEmision].filter(Boolean).join(' ') || 'Se asigna al emitir'],
+      ['Inicio del traslado', fecha(d.fechaInicioTraslado)],
+    ];
+    if (d.modalidad?.codigo === '01' && d.fechaEntregaTransportista) filas.push(['Entrega al transportista', fecha(d.fechaEntregaTransportista)]);
+    filas.push(['Motivo del traslado', d.motivo ? `${d.motivo.codigo} - ${d.motivo.nombre}` : null]);
+    if (d.descripcionMotivo) filas.push(['Descripción del motivo', d.descripcionMotivo]);
+    filas.push(['Modalidad de transporte', d.modalidad ? `${d.modalidad.codigo} - ${d.modalidad.nombre}` : null]);
+    filas.push(['Peso bruto total', d.pesoBrutoTotal !== null ? `${cantidad(d.pesoBrutoTotal)} ${d.unidadPeso ?? 'KGM'}` : null]);
+    if (d.numeroBultos !== null) filas.push(['Número de bultos', cantidad(d.numeroBultos)]);
+    if (d.documentoRelacionado) filas.push(['Documento relacionado', `${d.documentoRelacionado.tipo} ${d.documentoRelacionado.numero}`]);
+    return filas;
+  }
+
+  private filasPunto(punto: PuntoPdfGuia): Fila[] {
+    const filas: Fila[] = [
+      ['Dirección', punto.direccion],
+      ['Ubigeo', punto.ubigeo],
+    ];
+    // El código de establecimiento solo viaja (y se imprime) en el traslado entre establecimientos (04).
+    if (this.d.motivo?.codigo === '04' && punto.codigoEstablecimiento) filas.push(['Establecimiento SUNAT', punto.codigoEstablecimiento]);
+    return filas;
+  }
+
+  private filasTransporte(): Fila[] {
+    const { transportista, vehiculo, conductor } = this.d;
+    if (transportista) {
+      const filas: Fila[] = [
+        ['Transportista', transportista.razonSocial],
+        ['RUC', transportista.ruc],
+      ];
+      if (transportista.registroMtc) filas.push(['Registro MTC', transportista.registroMtc]);
+      return filas;
     }
-    this.pie();
+    const filas: Fila[] = [];
+    if (vehiculo) {
+      filas.push(['Vehículo (placa)', vehiculo.placa]);
+      if (vehiculo.tarjetaCirculacion) filas.push(['Tarjeta de circulación', vehiculo.tarjetaCirculacion]);
+      if (vehiculo.marca) filas.push(['Marca', vehiculo.marca]);
+    }
+    if (conductor) {
+      filas.push(['Conductor', conductor.nombre]);
+      filas.push(['Documento del conductor', [conductor.tipoDocTexto, conductor.numDoc].filter(Boolean).join(' ')]);
+      filas.push(['Licencia de conducir', conductor.licencia]);
+    }
+    return filas;
   }
 
   private cabecera(): void {
     const alto = 92;
+    const caja = 180;
     const x = MARGEN;
-    if (this.datos.emisor.logo) {
+    let xTexto = x;
+    const logo = this.d.emisor.logo;
+    // Se valida antes: un PNG dañado haría fallar a pdfkit; el logo es decorativo y nunca bloquea la impresión.
+    if (logo && Buffer.isBuffer(logo) && imagenSoportada(logo)) {
       try {
-        this.documento.image(this.datos.emisor.logo, x, this.y, { fit: [86, 70], align: 'center', valign: 'center' });
+        this.doc.image(logo, x, this.y, { fit: [86, 70], align: 'center', valign: 'center' });
+        xTexto = x + 96;
       } catch {
-        // El documento sigue siendo válido aunque el logo no pueda dibujarse.
+        xTexto = x;
       }
     }
-    this.documento.font('Helvetica-Bold').fontSize(13).fillColor(COLOR.texto)
-      .text(texto(this.datos.emisor.razon_social), x + 100, this.y + 5, { lineBreak: false });
-    this.documento.font('Helvetica').fontSize(8).fillColor(COLOR.gris)
-      .text(`RUC ${texto(this.datos.emisor.ruc)}`, x + 100, this.y + 25, { lineBreak: false })
-      .text(texto(this.datos.emisor.direccion), x + 100, this.y + 39, { width: 210, lineBreak: false })
-      .text(texto(this.datos.emisor.ubicacion), x + 100, this.y + 52, { width: 210, lineBreak: false });
+    const anchoTexto = this.ancho - caja - (xTexto - x) - 10;
+    let yTexto = this.y + 2;
+    this.doc.font('Helvetica-Bold').fontSize(12).fillColor(COLOR.marca);
+    this.doc.text(t(this.d.emisor.razonSocial), xTexto, yTexto, { width: anchoTexto });
+    yTexto = this.doc.y + 2;
+    this.doc.font('Helvetica').fontSize(8).fillColor(COLOR.gris);
+    for (const linea of [this.d.emisor.nombreComercial, this.d.emisor.direccion, this.d.emisor.ubicacion]) {
+      if (!t(linea)) continue;
+      this.doc.text(t(linea), xTexto, yTexto, { width: anchoTexto });
+      yTexto = this.doc.y + 1;
+    }
 
-    this.documento.roundedRect(x + this.ancho - 170, this.y, 170, alto - 8, 4)
-      .lineWidth(0.8).strokeColor(COLOR.borde).stroke();
-    this.documento.font('Helvetica-Bold').fontSize(11).fillColor(COLOR.texto)
-      .text(`RUC ${texto(this.datos.emisor.ruc)}`, x + this.ancho - 160, this.y + 14, { width: 150, align: 'center' })
-      .fontSize(10).text('GUÍA DE REMISIÓN', x + this.ancho - 160, this.y + 32, { width: 150, align: 'center' })
-      .fontSize(13).text('REMITENTE', x + this.ancho - 160, this.y + 47, { width: 150, align: 'center' })
-      .fontSize(14).text(texto(this.datos.codigo), x + this.ancho - 160, this.y + 65, { width: 150, align: 'center' });
+    const xCaja = x + this.ancho - caja;
+    this.doc.roundedRect(xCaja, this.y, caja, alto - 6, 4).lineWidth(1).strokeColor(COLOR.marca).stroke();
+    const centrado = { width: caja - 12, align: 'center' as const };
+    this.doc.font('Helvetica-Bold').fontSize(11).fillColor(COLOR.texto).text(`RUC ${t(this.d.emisor.ruc)}`, xCaja + 6, this.y + 9, centrado);
+    this.doc.fontSize(9).text('GUÍA DE REMISIÓN ELECTRÓNICA', xCaja + 6, this.y + 27, centrado);
+    this.doc.fontSize(11).text('REMITENTE', xCaja + 6, this.y + 40, centrado);
+    this.doc.fontSize(this.d.numero ? 13 : 11).fillColor(this.d.numero ? COLOR.marca : COLOR.peligro)
+      .text(t(this.d.numero ?? `BORRADOR N.° ${this.d.idGuia}`), xCaja + 6, this.y + 58, centrado);
+    this.y = Math.max(this.y + alto, yTexto + 6);
+  }
+
+  private banner(texto: string): void {
+    const alto = 22;
+    this.asegurar(alto + 8);
+    this.doc.roundedRect(MARGEN, this.y, this.ancho, alto, 3).lineWidth(1.4).strokeColor(COLOR.peligro).stroke();
+    this.doc.font('Helvetica-Bold').fontSize(11).fillColor(COLOR.peligro)
+      .text(t(texto), MARGEN, this.y + 6, { width: this.ancho, align: 'center', lineBreak: false });
     this.y += alto + 8;
   }
 
-  private bloque(titulo: string, filas: Array<[string, string]>): void {
-    const anchoValor = this.ancho - 125;
-    const alturas = filas.map(([, valor]) => {
-      this.documento.font('Helvetica').fontSize(8);
-      return Math.max(15, this.documento.heightOfString(texto(valor), { width: anchoValor }) + 3);
+  private bloque(titulo: string, filas: Fila[]): void {
+    const etiqueta = 122;
+    const anchoValor = this.ancho - etiqueta - 16;
+    this.doc.font('Helvetica').fontSize(8);
+    const alturas = filas.map(([, valor]) => Math.max(12, this.doc.heightOfString(t(valor) || '—', { width: anchoValor }) + 3));
+    const alto = 22 + alturas.reduce((total, altura) => total + altura, 0) + 6;
+    this.asegurar(Math.min(alto, 200));
+    // Si el bloque no cabe, sigue en la hoja siguiente: cada tramo lleva su propio recuadro.
+    let inicioTramo = this.y;
+    const recuadro = (hasta: number): void => {
+      this.doc.roundedRect(MARGEN, inicioTramo, this.ancho, hasta - inicioTramo, 3).lineWidth(0.6).strokeColor(COLOR.linea).stroke();
+    };
+    this.doc.rect(MARGEN, inicioTramo, this.ancho, 18).fillColor(COLOR.fondo).fill();
+    this.doc.font('Helvetica-Bold').fontSize(8).fillColor(COLOR.marca).text(titulo, MARGEN + 8, inicioTramo + 5, { lineBreak: false });
+    let filaY = inicioTramo + 23;
+    filas.forEach(([nombre, valor], i) => {
+      if (filaY + alturas[i] > this.limiteInferior()) {
+        recuadro(filaY + 3);
+        this.nuevaPagina();
+        inicioTramo = this.y;
+        filaY = this.y + 4;
+      }
+      this.doc.font('Helvetica-Bold').fontSize(7.5).fillColor(COLOR.gris).text(t(nombre), MARGEN + 8, filaY, { width: etiqueta - 8, lineBreak: false });
+      this.doc.font('Helvetica').fontSize(8).fillColor(COLOR.texto).text(t(valor) || '—', MARGEN + etiqueta, filaY, { width: anchoValor });
+      filaY += alturas[i];
     });
-    const alto = 25 + alturas.reduce((total: number, altura: number) => total + altura, 0) + 10;
-    this.documento.roundedRect(MARGEN, this.y, this.ancho, alto, 4)
-      .lineWidth(0.6).strokeColor(COLOR.borde).stroke();
-    this.documento.rect(MARGEN, this.y, this.ancho, 20).fillColor(COLOR.suave).fill();
-    this.documento.font('Helvetica-Bold').fontSize(8).fillColor(COLOR.texto)
-      .text(titulo, MARGEN + 7, this.y + 6, { lineBreak: false });
-    let filaY = this.y + 27;
-    for (const [[etiqueta, valor], altura] of filas.map((fila, indice) => [fila, alturas[indice]] as const)) {
-      this.documento.font('Helvetica-Bold').fontSize(7).fillColor(COLOR.gris)
-        .text(texto(etiqueta), MARGEN + 8, filaY, { width: 105, lineBreak: false });
-      this.documento.font('Helvetica').fontSize(8).fillColor(COLOR.texto)
-        .text(texto(valor), MARGEN + 115, filaY, { width: anchoValor, lineGap: 1 });
-      filaY += altura;
-    }
-    this.y += alto + 8;
+    recuadro(filaY + 3);
+    this.y = filaY + 11;
   }
 
   private tablaItems(): void {
-    const encabezado = 22;
-    const columnas = [30, 62, this.ancho - 30 - 62 - 58 - 58, 58, 58];
-    const x = MARGEN;
-    this.documento.font('Helvetica-Bold').fontSize(7);
-    this.documento.rect(x, this.y, this.ancho, encabezado).fillColor(COLOR.suave).fill()
-      .lineWidth(0.6).strokeColor(COLOR.borde).stroke();
-    let cursor = x;
-    for (const [indice, titulo] of ['ITEM', 'CÓDIGO', 'DESCRIPCIÓN', 'UNIDAD', 'CANTIDAD'].entries()) {
-      this.documento.fillColor(COLOR.texto).text(titulo, cursor + 4, this.y + 7, { width: columnas[indice] - 8, align: indice > 2 ? 'center' : 'left', lineBreak: false });
-      cursor += columnas[indice];
+    const columnas = [28, 70, this.ancho - 28 - 70 - 46 - 70, 46, 70];
+    const titulos = ['N.°', 'CÓDIGO', 'DESCRIPCIÓN', 'UNIDAD', 'CANTIDAD'];
+    const encabezado = (): void => {
+      this.asegurar(20 + 16);
+      this.doc.rect(MARGEN, this.y, this.ancho, 18).fillColor(COLOR.marca).fill();
+      let cursor = MARGEN;
+      this.doc.font('Helvetica-Bold').fontSize(7.5).fillColor(COLOR.blanco);
+      titulos.forEach((titulo, i) => {
+        this.doc.text(titulo, cursor + 4, this.y + 5, { width: columnas[i] - 8, align: i >= 3 ? 'center' : 'left', lineBreak: false });
+        cursor += columnas[i];
+      });
+      this.y += 18;
+    };
+    this.asegurar(40);
+    this.doc.font('Helvetica-Bold').fontSize(8).fillColor(COLOR.marca).text('BIENES A TRASLADAR', MARGEN, this.y, { lineBreak: false });
+    this.y += 13;
+    encabezado();
+    if (!this.d.items.length) {
+      this.doc.font('Helvetica-Oblique').fontSize(8).fillColor(COLOR.gris).text('Sin bienes registrados.', MARGEN + 4, this.y + 5, { lineBreak: false });
+      this.y += 20;
     }
-    this.y += encabezado;
-    for (const [indice, item] of this.datos.items.entries()) {
-      const alto = 18;
-      this.documento.rect(x, this.y, this.ancho, alto).fillColor(indice % 2 ? '#fbfbfb' : COLOR.blanco).fill()
-        .lineWidth(0.3).strokeColor(COLOR.borde).stroke();
-      const valores = [String(indice + 1), item.codigo, this.unaLinea(item.descripcion, columnas[2] - 8), item.unidad_medida, numero(item.cantidad)];
-      cursor = x;
-      for (const [columna, valor] of valores.entries()) {
-        this.documento.font('Helvetica').fontSize(7).fillColor(COLOR.texto)
-          .text(texto(valor), cursor + 4, this.y + 6, { width: columnas[columna] - 8, align: columna > 2 ? 'center' : 'left', lineBreak: false });
-        cursor += columnas[columna];
+    this.d.items.forEach((item, indice) => {
+      this.doc.font('Helvetica').fontSize(7.5);
+      const descripcion = t(item.descripcion) || '—';
+      const alto = Math.max(16, this.doc.heightOfString(descripcion, { width: columnas[2] - 8 }) + 7);
+      if (this.y + alto > this.limiteInferior()) {
+        this.nuevaPagina();
+        encabezado();
       }
+      if (indice % 2 === 1) this.doc.rect(MARGEN, this.y, this.ancho, alto).fillColor(COLOR.cebra).fill();
+      const valores = [String(indice + 1), t(item.codigo) || '—', descripcion, t(item.unidad), cantidad(item.cantidad)];
+      let cursor = MARGEN;
+      this.doc.font('Helvetica').fontSize(7.5).fillColor(COLOR.texto);
+      valores.forEach((valor, i) => {
+        const opciones = i === 2 ? { width: columnas[i] - 8 } : { width: columnas[i] - 8, align: i >= 3 ? 'center' : 'left', lineBreak: false };
+        this.doc.text(valor, cursor + 4, this.y + 4, opciones);
+        cursor += columnas[i];
+      });
+      this.doc.moveTo(MARGEN, this.y + alto).lineTo(MARGEN + this.ancho, this.y + alto).lineWidth(0.3).strokeColor(COLOR.linea).stroke();
       this.y += alto;
-    }
-    this.y += 8;
+    });
+    this.y += 10;
   }
 
-  private unaLinea(valor: unknown, ancho: number): string {
-    const completo = texto(valor);
-    if (this.documento.widthOfString(completo) <= ancho) return completo;
-    let resultado = '';
-    for (const caracter of completo) {
-      if (this.documento.widthOfString(`${resultado}${caracter}...`) > ancho) break;
-      resultado += caracter;
+  /** QR y leyenda con la guía aceptada; si no, la advertencia de que no tiene validez. */
+  private cierre(): void {
+    if (this.qr) {
+      this.asegurar(LADO_QR + 10);
+      this.doc.image(this.qr, MARGEN, this.y, { width: LADO_QR, height: LADO_QR });
+      const x = MARGEN + LADO_QR + 14;
+      const ancho = this.ancho - LADO_QR - 14;
+      this.doc.font('Helvetica-Bold').fontSize(9).fillColor(COLOR.texto).text(t(LEYENDA_GRE_REMITENTE), x, this.y + 22, { width: ancho });
+      this.doc.font('Helvetica').fontSize(7.5).fillColor(COLOR.gris)
+        .text('Escanee el código QR para consultar la guía en SUNAT.', x, this.doc.y + 4, { width: ancho });
+      this.y += LADO_QR + 10;
+      return;
     }
-    return `${resultado.trimEnd()}...`;
+    this.asegurar(30);
+    const texto = this.d.estado === 'aceptado'
+      ? `${LEYENDA_GRE_REMITENTE}. SUNAT no entregó el enlace del código QR en la constancia.`
+      : 'Documento sin validez tributaria: SUNAT no ha aceptado esta guía de remisión.';
+    this.doc.font('Helvetica-Bold').fontSize(8.5).fillColor(this.d.estado === 'aceptado' ? COLOR.texto : COLOR.peligro)
+      .text(t(texto), MARGEN, this.y, { width: this.ancho, align: 'center' });
+    this.y = this.doc.y + 8;
   }
 
-  private pie(): void {
-    const estado = this.datos.estado === 'aceptado' ? 'ACEPTADA' : 'BORRADOR - SIN VALOR TRIBUTARIO';
-    this.documento.font('Helvetica-Bold').fontSize(8).fillColor(this.datos.estado === 'aceptado' ? COLOR.texto : COLOR.peligro)
-      .text(estado, MARGEN, this.documento.page.height - 92, { width: this.ancho, align: 'center' });
-    this.documento.font('Helvetica').fontSize(7).fillColor(COLOR.gris)
-      .text('Representación impresa de la guía de remisión remitente', MARGEN, this.documento.page.height - 75, { width: this.ancho, align: 'center' })
-      .text('La emisión SUNAT aún no está habilitada en este borrador.', MARGEN, this.documento.page.height - 62, { width: this.ancho, align: 'center' });
+  /** Numeración de páginas y, si no está aceptada, la marca de fondo en cada hoja. */
+  private paginas(): void {
+    const { start, count } = this.doc.bufferedPageRange();
+    for (let i = start; i < start + count; i++) {
+      this.doc.switchToPage(i);
+      if (this.marca) this.marcaAgua(this.marca);
+      // El pie va dentro del margen inferior: sin margen, pdfkit no abre una hoja nueva al escribirlo.
+      const margenInferior = this.doc.page.margins.bottom;
+      this.doc.page.margins.bottom = 0;
+      this.doc.font('Helvetica').fontSize(7).fillColor(COLOR.gris)
+        .text(`${t(this.d.numero ?? `Borrador N.° ${this.d.idGuia}`)} · Página ${i - start + 1} de ${count}`, MARGEN, this.doc.page.height - MARGEN + 6, {
+          width: this.ancho,
+          align: 'right',
+          lineBreak: false,
+        });
+      this.doc.page.margins.bottom = margenInferior;
+    }
+  }
+
+  private marcaAgua(texto: string): void {
+    const { width, height } = this.doc.page;
+    this.doc.save();
+    this.doc.rotate(-35, { origin: [width / 2, height / 2] });
+    this.doc.fillOpacity(0.08);
+    this.doc.font('Helvetica-Bold').fontSize(44).fillColor(COLOR.peligro);
+    const limpio = t(texto);
+    this.doc.text(limpio, (width - this.doc.widthOfString(limpio)) / 2, height / 2 - 22, { lineBreak: false });
+    this.doc.restore();
+  }
+
+  private limiteInferior(): number {
+    return this.doc.page.height - MARGEN - ALTO_PIE;
+  }
+
+  private asegurar(alto: number): void {
+    if (this.y + alto > this.limiteInferior()) this.nuevaPagina();
+  }
+
+  private nuevaPagina(): void {
+    this.doc.addPage();
+    this.y = MARGEN;
   }
 }

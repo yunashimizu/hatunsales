@@ -1,7 +1,7 @@
 import { Injectable, UnauthorizedException, ConflictException, NotFoundException, BadRequestException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { OAuth2Client } from 'google-auth-library';
 import { randomBytes } from 'crypto';
 import { Usuarios } from '../../models/DBModel/usuarios.entity';
@@ -23,6 +23,14 @@ interface JwtPayload {
   email: string;
   rol: string;
   permisos: string[];
+}
+
+/** 23505 del índice único de correos (uq_usuarios_email_lower, sql/fase16). */
+export function esCorreoDuplicado(error: unknown): boolean {
+  const e = error as { code?: string; constraint?: string; driverError?: { code?: string; constraint?: string } } | null;
+  const codigo = e?.code ?? e?.driverError?.code;
+  const restriccion = e?.constraint ?? e?.driverError?.constraint ?? '';
+  return codigo === '23505' && /email/i.test(restriccion);
 }
 
 @Injectable()
@@ -111,6 +119,55 @@ export class AuthBussnies {
     };
   }
 
+  /**
+   * Usuario por correo SIN distinguir mayúsculas, igual que el login. Si quedaron duplicados
+   * de antes (correo guardado con mayúsculas), toma siempre el más antiguo.
+   */
+  private buscarUsuarioPorEmail(email: string, manager?: EntityManager): Promise<Usuarios | null> {
+    const repo = manager ? manager.getRepository(Usuarios) : this.usuarioRepo;
+    return repo
+      .createQueryBuilder('u')
+      .leftJoinAndSelect('u.rol', 'rol')
+      .where('LOWER(u.email) = :email', { email: email.trim().toLowerCase() })
+      .orderBy('u.id_usuario', 'ASC')
+      .getOne();
+  }
+
+  /**
+   * Crea el usuario (rol cliente) y su cliente en UNA transacción, con un candado por correo
+   * tomado antes de comprobar que no existe: dos "Crear cuenta" a la vez (doble clic) o el
+   * registro y Google al mismo tiempo ya no crean dos usuarios con el mismo email, aunque
+   * falte el índice único de sql/fase16 (que es la última defensa: 23505). Antes el cliente
+   * se guardaba aparte y un fallo dejaba un usuario sin cliente.
+   */
+  private async crearCuentaCliente(
+    email: string,
+    usuario: Partial<Usuarios>,
+    cliente: Partial<Cliente>,
+  ): Promise<{ creado: true; usuario: Usuarios } | { creado: false; existente: Usuarios }> {
+    try {
+      return await this.usuarioRepo.manager.transaction(async (m) => {
+        await m.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`auth:email:${email}`]);
+        const existente = await this.buscarUsuarioPorEmail(email, m);
+        if (existente) return { creado: false as const, existente };
+
+        const usuarios = m.getRepository(Usuarios);
+        const guardado = await usuarios.save(usuarios.create({ ...usuario, email }));
+        const clientes = m.getRepository(Cliente);
+        await clientes.save(
+          clientes.create({ ...cliente, email, usuario: { id_usuario: guardado.id_usuario } as Usuarios }),
+        );
+        return { creado: true as const, usuario: guardado };
+      });
+    } catch (error) {
+      if (esCorreoDuplicado(error)) {
+        const existente = await this.buscarUsuarioPorEmail(email);
+        if (existente) return { creado: false, existente };
+      }
+      throw error;
+    }
+  }
+
   async login(dto: LoginRequest, res: any): Promise<any> {
     const normalizedEmail = dto.email.trim().toLowerCase();
     const usuario = await this.usuarioRepo
@@ -118,6 +175,7 @@ export class AuthBussnies {
       .leftJoinAndSelect('u.rol', 'rol')
       .where('LOWER(u.email) = :email', { email: normalizedEmail })
       .andWhere('u.estado = true')
+      .orderBy('u.id_usuario', 'ASC')
       .getOne();
 
     if (!usuario) throw new UnauthorizedException('Credenciales incorrectas');
@@ -138,8 +196,10 @@ export class AuthBussnies {
    */
   async register(dto: RegisterRequest): Promise<any> {
     const normalizedEmail = dto.email.trim().toLowerCase();
-    const existe = await this.usuarioRepo.findOne({ where: { email: normalizedEmail } });
-    if (existe) throw new ConflictException('El email ya está registrado');
+    // Aviso rápido sin calcular el hash; la comprobación que vale es la de crearCuentaCliente.
+    if (await this.buscarUsuarioPorEmail(normalizedEmail)) {
+      throw new ConflictException('El email ya está registrado');
+    }
 
     const nombre = this.armarNombreCompleto(dto);
     const apellidos = (dto.apellidos ?? '').trim();
@@ -147,26 +207,23 @@ export class AuthBussnies {
     const hashedPassword = await HashUtil.hashPassword(dto.password);
     const rolCliente = await this.rolService.asegurarRolCliente();
 
-    const nuevoUsuario = this.usuarioRepo.create({
-      nombre,
-      apellido_paterno: apellidos || null as any,
-      email: normalizedEmail,
-      password: hashedPassword,
-      estado: true,
-      rol: { id_rol: rolCliente.id_rol || ROL_IDS.CLIENTE } as Rol,
-    });
-
-    const guardado = await this.usuarioRepo.save(nuevoUsuario);
-
-    await this.clienteRepo.save(
-      this.clienteRepo.create({
+    const cuenta = await this.crearCuentaCliente(
+      normalizedEmail,
+      {
         nombre,
         apellido_paterno: apellidos || null as any,
-        email: normalizedEmail,
+        password: hashedPassword,
+        estado: true,
+        rol: { id_rol: rolCliente.id_rol || ROL_IDS.CLIENTE } as Rol,
+      },
+      {
+        nombre,
+        apellido_paterno: apellidos || null as any,
         telefono: telefono as any,
-        usuario: { id_usuario: guardado.id_usuario } as Usuarios,
-      }),
+      },
     );
+    if (!cuenta.creado) throw new ConflictException('El email ya está registrado');
+    const guardado = cuenta.usuario;
 
     return {
       success: true,
@@ -226,41 +283,35 @@ export class AuthBussnies {
       || `${payload.given_name ?? ''} ${payload.family_name ?? ''}`.trim()
       || email.split('@')[0];
 
-    let usuario = await this.usuarioRepo.findOne({
-      where: { email },
-      relations: ['rol'],
-    });
+    // Sin distinguir mayúsculas: un correo guardado como "Juan@..." es la misma cuenta.
+    let usuario = await this.buscarUsuarioPorEmail(email);
 
     if (!usuario) {
       const rolCliente = await this.rolService.asegurarRolCliente();
       const passwordAleatorio = await HashUtil.hashPassword(randomBytes(32).toString('hex'));
+      const apellido = (payload.family_name ?? '').trim() || null as any;
 
-      usuario = await this.usuarioRepo.save(
-        this.usuarioRepo.create({
+      const cuenta = await this.crearCuentaCliente(
+        email,
+        {
           nombre,
-          apellido_paterno: (payload.family_name ?? '').trim() || null as any,
-          email,
+          apellido_paterno: apellido,
           password: passwordAleatorio,
           estado: true,
           rol: { id_rol: rolCliente.id_rol || ROL_IDS.CLIENTE } as Rol,
-        }),
+        },
+        { nombre, apellido_paterno: apellido },
       );
 
-      await this.clienteRepo.save(
-        this.clienteRepo.create({
-          nombre,
-          apellido_paterno: (payload.family_name ?? '').trim() || null as any,
-          email,
-          usuario: { id_usuario: usuario.id_usuario } as Usuarios,
-        }),
-      );
-
-      usuario = await this.usuarioRepo.findOne({
-        where: { id_usuario: usuario.id_usuario },
-        relations: ['rol'],
-      }) as Usuarios;
-
-      return this.emitirSesion(usuario, res, 'Cuenta creada con Google');
+      if (cuenta.creado) {
+        usuario = await this.usuarioRepo.findOne({
+          where: { id_usuario: cuenta.usuario.id_usuario },
+          relations: ['rol'],
+        }) as Usuarios;
+        return this.emitirSesion(usuario, res, 'Cuenta creada con Google');
+      }
+      // Otra petición creó la cuenta entre medias: sigue como inicio de sesión.
+      usuario = cuenta.existente;
     }
 
     if (!usuario.estado) {
@@ -309,7 +360,7 @@ export class AuthBussnies {
     if (dto.email?.trim()) {
       const email = dto.email.trim().toLowerCase();
       if (email !== usuario.email?.toLowerCase()) {
-        const existe = await this.usuarioRepo.findOne({ where: { email } });
+        const existe = await this.buscarUsuarioPorEmail(email);
         if (existe && existe.id_usuario !== idUsuario) {
           throw new ConflictException('Ese correo ya está en uso');
         }
@@ -329,7 +380,13 @@ export class AuthBussnies {
       usuario.password = await HashUtil.hashPassword(dto.password_nueva);
     }
 
-    await this.usuarioRepo.save(usuario);
+    try {
+      await this.usuarioRepo.save(usuario);
+    } catch (error) {
+      // Otro usuario tomó el mismo correo a la vez (índice único de fase16).
+      if (esCorreoDuplicado(error)) throw new ConflictException('Ese correo ya está en uso');
+      throw error;
+    }
 
     const cliente = await this.clienteRepo.findOne({
       where: { usuario: { id_usuario: idUsuario } as any },

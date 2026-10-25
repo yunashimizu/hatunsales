@@ -7,6 +7,8 @@ export interface FaultSoap {
   codigoOriginal: string;
   mensaje: string;
   detalle?: string;
+  /** 'Server' o 'Client' según el faultcode (SOAP 1.2: Receiver o Sender); ausente si no lo indica. */
+  origen?: 'Server' | 'Client';
 }
 
 export interface EstadoSoap {
@@ -44,6 +46,18 @@ export function normalizarCodigoFault(faultcode: string, faultstring = '', detal
   return codigo ? codigo.padStart(4, '0') : '';
 }
 
+/**
+ * Origen del Fault según el Manual del Programador (anexo 1, C.3): 'Server' = problema probable
+ * de SUNAT, 'Client' = problema probable del envío. Acepta 'soap-env:Server.0835', 'Client.0111',
+ * 'soap:Server' y los equivalentes de SOAP 1.2 (Receiver, Sender).
+ */
+export function origenDelFault(faultcode: string): 'Server' | 'Client' | undefined {
+  const parte = /(?:^|[:.])(Server|Client|Receiver|Sender)(?=$|[.:])/i.exec(String(faultcode ?? '').trim())?.[1]?.toLowerCase();
+  if (parte === 'server' || parte === 'receiver') return 'Server';
+  if (parte === 'client' || parte === 'sender') return 'Client';
+  return undefined;
+}
+
 function limpiar(valor: string): string {
   return valor.replace(/\s+/g, ' ').trim();
 }
@@ -60,11 +74,13 @@ export function leerRespuestaSoap(cuerpo: string): RespuestaSoapLeida {
     const codigoOriginal = texto(hijos(nodoFault, 'faultcode')[0]) || texto(ruta(nodoFault, 'Code', 'Value'));
     const mensaje = limpiar(texto(hijos(nodoFault, 'faultstring')[0]) || texto(ruta(nodoFault, 'Reason', 'Text')));
     const detalle = limpiar(texto(hijos(nodoFault, 'detail')[0]) || texto(hijos(nodoFault, 'Detail')[0]));
+    const origen = origenDelFault(codigoOriginal);
     fault = {
       codigo: normalizarCodigoFault(codigoOriginal, mensaje, detalle),
       codigoOriginal,
       mensaje: mensaje || detalle || 'SUNAT devolvió un SOAP Fault sin detalle.',
       detalle: detalle || undefined,
+      ...(origen ? { origen } : {}),
     };
   }
 

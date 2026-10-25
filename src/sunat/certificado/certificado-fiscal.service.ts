@@ -4,13 +4,15 @@ import { extname } from 'path';
 import { ACCIONES_AUDITORIA_FISCAL, FiscalAuditoriaRepository } from '../auditoria/fiscal-auditoria.repository';
 import { CacheTtl } from '../config/cache-ttl';
 import type { CertificadoParaChecklist } from '../config/checklist-activacion';
+import { RepositorioConfigFiscal } from '../config/config-fiscal.repository';
 import { FiscalConfigError } from '../config/fiscal-errores';
 import { FiscalConfigService } from '../config/fiscal-config.service';
-import { ActorFiscal, AMBIENTES_FISCALES, AmbienteFiscal } from '../config/fiscal-config.tipos';
+import { ActorFiscal, AMBIENTES_FISCALES, AmbienteFiscal, CLAVES_CONFIG_FISCAL } from '../config/fiscal-config.tipos';
 import { FiscalEsquemaService } from '../config/fiscal-esquema.service';
+import { InterruptorEmisionFiscal } from '../config/interruptor-emision.service';
 import { NotificadorCambiosFiscales } from '../config/notificador-cambios-fiscales';
 import { RelojFiscal } from '../config/reloj-fiscal';
-import { TransaccionesFiscales } from '../config/transacciones-fiscales';
+import { EjecutorSql, TransaccionesFiscales } from '../config/transacciones-fiscales';
 import { CifradoFiscalService } from '../seguridad/cifrado-fiscal.service';
 import { CredencialesGre, CredencialesGreService } from '../seguridad/credenciales-gre.service';
 import { CredencialesSolService } from '../seguridad/credenciales-sol.service';
@@ -92,6 +94,8 @@ export class CertificadoFiscalService {
     private readonly notificador: NotificadorCambiosFiscales,
     private readonly credencialesSol: CredencialesSolService,
     private readonly credencialesGre: CredencialesGreService,
+    private readonly configuraciones: RepositorioConfigFiscal,
+    private readonly interruptor: InterruptorEmisionFiscal,
   ) {
     const ahora = () => this.reloj.ms();
     this.cacheMaterial = new CacheTtl<MaterialCargado | null>(CertificadoFiscalService.TTL_MATERIAL_MS, ahora);
@@ -262,7 +266,7 @@ export class CertificadoFiscalService {
       if (ambiente === 'produccion' && (snapshot.proveedor === 'sunat_directo' || snapshot.gre.activa)) {
         throw new FiscalConfigError(
           'FISCAL_CERT_EN_USO',
-          'El certificado de producción está en uso. Primero vuelva a Nubefact (y desactive la GRE electrónica) y luego elimínelo, o súbalo de nuevo para reemplazarlo.',
+          'El certificado de producción está en uso. Primero desactive la emisión electrónica de producción (y la GRE electrónica) y luego elimínelo, o suba el nuevo para reemplazarlo.',
         );
       }
       const retirado = await this.repositorio.retirarActivo(ambiente, actor.id_usuario, tx);
@@ -356,7 +360,7 @@ export class CertificadoFiscalService {
     const claveCifrada = this.cifrado.cifrarTexto(clave, CertificadoFiscalService.contextoClave(ambiente, huella));
     const nombreArchivo = (opciones.nombreArchivo ?? '').replace(/[^\w.\- ]+/g, '_').slice(0, 200) || null;
 
-    const { id_certificado, reemplazado } = await this.transacciones.ejecutar(async (tx) => {
+    const { id_certificado, reemplazado, configCambiada } = await this.transacciones.ejecutar(async (tx) => {
       const resultado = await this.repositorio.reemplazarActivo(
         {
           ambiente,
@@ -408,9 +412,13 @@ export class CertificadoFiscalService {
         },
         tx,
       );
-      return resultado;
+      // Mismo orden de candados que el guardado de la configuración: confirmación del RUC y luego el interruptor.
+      const confirmacionRetirada = ambiente === 'produccion' && (await this.retirarConfirmacionRuc(actor, tx));
+      const reanudada = await this.interruptor.limpiar(ambiente, 'certificado digital actualizado', actor, tx);
+      return { ...resultado, configCambiada: confirmacionRetirada || reanudada !== null };
     });
     this.trasCambio();
+    if (configCambiada) this.notificador.notificar('config');
 
     const meta: MetadatosCertificadoFiscal = {
       id_certificado,
@@ -437,6 +445,29 @@ export class CertificadoFiscalService {
   private trasCambio(): void {
     this.invalidar();
     this.notificador.notificar('certificado');
+  }
+
+  /**
+   * La confirmación «el certificado sin RUC legible es del emisor» (D1) valía para el certificado
+   * anterior: con uno nuevo de producción el administrador debe revisarlo otra vez.
+   */
+  private async retirarConfirmacionRuc(actor: ActorFiscal, tx: EjecutorSql): Promise<boolean> {
+    const clave = CLAVES_CONFIG_FISCAL.certRucConfirmadoProduccion;
+    const valores = await this.configuraciones.leer([clave], tx);
+    if (valores[clave] !== 'true') return false;
+    await this.configuraciones.guardar({ [clave]: '' }, tx);
+    await this.auditoria.registrar(
+      {
+        accion: ACCIONES_AUDITORIA_FISCAL.CERT_RUC_CONFIRMACION_RETIRADA,
+        id_usuario: actor.id_usuario,
+        entidad: 'configuraciones',
+        id_entidad: clave,
+        detalle: { motivo: 'certificado de producción reemplazado', usuario: actor.nombre },
+        ip: actor.ip,
+      },
+      tx,
+    );
+    return true;
   }
 
   /** Material del certificado vigente de ESE ambiente (sin fallback), coherente entre instancias. */

@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { EntityManager } from 'typeorm';
 import { InventarioRepository, FiltroInventario } from '../../repository/Repository/inventario.repository';
 import { ProductoRepository } from '../../repository/Repository/producto.repository';
 import {
@@ -90,22 +91,40 @@ export class InventarioBussnies implements IInventarioBussniees {
 
   /** Corrige el stock dejando escrito el motivo en el kardex. */
   async ajustar(dto: AjustarStockRequest) {
+    this.validarCantidad(dto);
+
+    const producto = await this.productoRepo.getById(dto.id_producto);
+    if (!producto) throw new NotFoundException(`Producto ${dto.id_producto} no encontrado`);
+
+    const stock = await this.aplicarAjuste(dto);
+    return { id_producto: dto.id_producto, id_almacen: dto.id_almacen, stock };
+  }
+
+  /**
+   * El mismo ajuste dentro de la transacción de quien llama (recepción, visto bueno de una
+   * observación): si algo posterior falla, el stock vuelve atrás junto con lo demás. Quien
+   * llama ya validó que el producto existe (y la FK lo exige igual).
+   */
+  async ajustarEnTransaccion(manager: EntityManager, dto: AjustarStockRequest): Promise<number> {
+    this.validarCantidad(dto);
+    return this.aplicarAjuste(dto, manager);
+  }
+
+  private validarCantidad(dto: AjustarStockRequest): void {
     if (!dto.cantidad) throw new BadRequestException('Indique cuántas unidades ingresan o salen');
     // También llegan ajustes internos (recepción) que no pasan por el ValidationPipe.
     if (!Number.isInteger(Number(dto.cantidad))) {
       throw new BadRequestException('La cantidad debe ser un número entero de unidades (sin decimales)');
     }
+  }
 
-    const producto = await this.productoRepo.getById(dto.id_producto);
-    if (!producto) throw new NotFoundException(`Producto ${dto.id_producto} no encontrado`);
-
+  private async aplicarAjuste(dto: AjustarStockRequest, manager?: EntityManager): Promise<number> {
     const descripcion = [ETIQUETA_MOTIVO[dto.motivo] ?? dto.motivo, dto.comentario]
       .filter(Boolean)
       .join(' · ');
 
     try {
-      const stock = await this.repo.ajustar(dto.id_producto, dto.id_almacen, Number(dto.cantidad), descripcion);
-      return { id_producto: dto.id_producto, id_almacen: dto.id_almacen, stock };
+      return await this.repo.ajustar(dto.id_producto, dto.id_almacen, Number(dto.cantidad), descripcion, manager);
     } catch (error: any) {
       const mensaje = String(error?.message ?? '');
       if (mensaje.startsWith('STOCK_NEGATIVO:')) {

@@ -5,6 +5,8 @@
  *
  * - Con almacén preferido: solo de ese almacén (sin derrame a otros).
  * - Sin él (legacy): primero el preferido si lo hay, luego el de más stock.
+ * - Con `derrame` (modo spillover de la tienda web): el preferido primero y luego el de más
+ *   stock, aunque haya almacén preferido.
  * - Las líneas se atienden en el orden del carrito; si un producto se repite, la segunda
  *   línea ve el stock que dejó la primera (igual que cuando se consultaba línea por línea).
  */
@@ -41,8 +43,10 @@ export function planificarSalidas(
   lineas: readonly LineaPorDespachar[],
   filas: readonly FilaInventarioBloqueada[],
   idAlmacenPreferido?: number,
+  opciones: { derrame?: boolean } = {},
 ): PlanSalida {
-  const exclusivo = idAlmacenPreferido != null && Number.isFinite(idAlmacenPreferido) && idAlmacenPreferido > 0;
+  const exclusivo = !opciones.derrame
+    && idAlmacenPreferido != null && Number.isFinite(idAlmacenPreferido) && idAlmacenPreferido > 0;
   const restante = new Map<number, number>(filas.map((f) => [f.id_inventario, Math.max(0, Number(f.stock) || 0)]));
   const salidas: SalidaStock[] = [];
 

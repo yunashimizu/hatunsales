@@ -1,12 +1,16 @@
 import { leerCdr } from '../cdr/lector-cdr';
-import type { AmbienteFiscal, EstadoComprobanteSunat, RespuestaSunat, TipoCpe } from '../documento-fiscal.types';
+import type { AmbienteFiscal, RespuestaSunat, TipoCpe } from '../documento-fiscal.types';
 import { ConfiguracionSoapInvalidaError } from '../errores-nucleo';
+import { admiteGetStatusCdr } from '../reglas-envio';
 import { escaparXml } from '../xml/escritor-xml';
 import { leerXmlDeZip } from '../zip/paquete-zip';
 import { endpointsSunat, esEndpointProduccion } from './endpoints-sunat';
+import { DESCRIPCIONES_CONSULTA_SUNAT, estadoDeConsulta, normalizarCodigoConsulta } from './estados-consulta-sunat';
 import { leerRespuestaSoap, RespuestaSoapLeida } from './lector-respuesta-soap';
 import { ArgumentosSoap, construirSobreSoap, CredencialesSoap, MetodoSoapSunat, soapActionDe } from './sobre-soap';
 import { CODIGOS_RED_TRANSITORIOS, ErrorTransporteSoap, TransporteSoap, TransporteSoapAxios } from './transporte-soap';
+
+export { DESCRIPCIONES_CONSULTA_SUNAT, ESTADOS_CONSULTA_SUNAT } from './estados-consulta-sunat';
 
 /** Timeout de un envío dentro de la venta (el cajero espera). */
 export const TIMEOUT_POS_MS = 15_000;
@@ -15,16 +19,8 @@ export const TIMEOUT_WORKER_MS = 30_000;
 /** Tamaño máximo de `raw` (respuesta cruda redactada) que se devuelve para guardar. */
 export const LIMITE_RAW_BYTES = 20 * 1024;
 
-/**
- * statusCode de billConsultService sin constancia adjunta (Manual del
- * Programador, servicio de consulta). Editable si SUNAT agrega códigos.
- */
-export const ESTADOS_CONSULTA_SUNAT: Readonly<Record<string, EstadoComprobanteSunat>> = {
-  '0001': 'ACEPTADO',
-  '0002': 'RECHAZADO',
-  '0003': 'DE_BAJA',
-  '0011': 'NO_EXISTE',
-};
+/** `codigo` de la respuesta NO_DISPONIBLE cuando el servicio de consulta no admite el documento (boletas, series B). */
+export const CODIGO_CONSULTA_NO_ADMITIDA = 'CONSULTA_NO_ADMITIDA';
 
 export interface ConfiguracionClienteSoap {
   /** RUC + usuario SOL (BETA: RUC + MODDATOS). */
@@ -109,18 +105,18 @@ function interpretarTicket(ticket: string): Interpretador {
   };
 }
 
-/** billConsultService: constancia si existe; si no, el estado del comprobante. */
+/** billConsultService: constancia si existe; si no, el estado del comprobante (tabla del anexo 2 del Manual). */
 const interpretarConsulta: Interpretador = (leida, base) => {
   const estado = leida.estado;
   if (!estado?.statusCode) return transporte(base, 'RESPUESTA_INVALIDA', 'SUNAT respondió sin el estado del comprobante.');
-  const codigo = /^\d+$/.test(estado.statusCode) ? estado.statusCode.padStart(4, '0') : estado.statusCode;
+  const codigo = normalizarCodigoConsulta(estado.statusCode);
   if (estado.content) return respuestaConCdr(base, estado.content, codigo);
   return respuesta(base, {
     tipo: 'ESTADO',
     codigo,
     statusCode: codigo,
-    estadoComprobante: ESTADOS_CONSULTA_SUNAT[codigo] ?? 'DESCONOCIDO',
-    descripcion: estado.statusMessage ?? `Estado del comprobante: ${codigo}.`,
+    estadoComprobante: estadoDeConsulta(codigo),
+    descripcion: estado.statusMessage ?? DESCRIPCIONES_CONSULTA_SUNAT[codigo] ?? `Estado del comprobante: ${codigo}.`,
   });
 };
 
@@ -147,6 +143,8 @@ function validarUrl(url: string, nombre: string): string {
  *  - consultarTicket   → billService.getStatus
  *  - consultarCdr      → billConsultService.getStatusCdr (solo producción)
  *  - consultarValidez  → billConsultService.getStatus (solo producción)
+ * Las dos consultas solo admiten facturas y sus notas con serie F (admiteGetStatusCdr): para
+ * cualquier otro documento responden NO_DISPONIBLE sin usar la red.
  */
 export class SunatSoapClient {
   readonly ambiente: AmbienteFiscal;
@@ -203,6 +201,16 @@ export class SunatSoapClient {
   }
 
   private async consultar(metodo: MetodoSoapSunat, ruc: string, tipo: TipoCpe, serie: string, numero: number): Promise<RespuestaSunat> {
+    // SUNAT contestaría 0009/0010 (Manual, anexo 2): no se gasta una llamada ni se arriesga un reintento.
+    if (!admiteGetStatusCdr(String(tipo ?? '').trim(), String(serie ?? '').trim())) {
+      return {
+        tipo: 'NO_DISPONIBLE',
+        codigo: CODIGO_CONSULTA_NO_ADMITIDA,
+        descripcion: `SUNAT solo permite consultar por este servicio facturas y sus notas con serie F (tipo 01, 07 u 08); el documento tipo ${String(tipo ?? '')} ${String(serie ?? '')}-${String(numero ?? '')} no se puede consultar así.`,
+        observaciones: [],
+        tiempoMs: 0,
+      };
+    }
     if (!this.endpointConsulta) {
       return {
         tipo: 'NO_DISPONIBLE',
@@ -242,6 +250,7 @@ export class SunatSoapClient {
             tipo: 'FAULT',
             codigo: leida.fault.codigo || leida.fault.codigoOriginal || 'FAULT',
             descripcion: leida.fault.detalle && leida.fault.detalle !== leida.fault.mensaje ? `${leida.fault.mensaje} - ${leida.fault.detalle}` : leida.fault.mensaje,
+            ...(leida.fault.origen ? { faultOrigen: leida.fault.origen } : {}),
           });
         }
         if (http.estadoHttp < 200 || http.estadoHttp >= 300) {

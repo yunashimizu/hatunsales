@@ -48,7 +48,8 @@ function fechaCorta(fecha: Date): string {
  * «Probar conexión»: valida localmente todo lo que el dueño configuró
  * (esquema, llave, certificado, firma y credenciales) y, si el módulo de
  * emisión o de GRE registró su probador, delega el envío/autenticación real.
- * Nunca emite comprobantes reales: en producción el probador solo consulta.
+ * Nunca emite comprobantes reales: en producción la prueba de factura/boleta
+ * se queda en los pasos locales (la consulta de credenciales es otra acción).
  */
 @Injectable()
 export class PruebaConexionFiscalService {
@@ -79,7 +80,16 @@ export class PruebaConexionFiscalService {
     const contexto = await this.pasosLocales(ambiente, documento, actor, pasos);
     if (contexto) contexto.tipoCpe = opciones.tipoCpe;
     const probador = this.probador(documento);
-    if (contexto) {
+    if (contexto && ambiente === 'produccion' && documento === 'cpe') {
+      // En producción todo comprobante enviado es real: aquí solo se comprueba lo local.
+      pasos.push({
+        paso: 'envio',
+        ok: null,
+        detalle:
+          'En producción no se envían comprobantes de prueba. Use «Probar credenciales SOL de producción» '
+          + '(una consulta a SUNAT que no emite nada) para verificar el usuario secundario.',
+      });
+    } else if (contexto) {
       if (probador) {
         try {
           pasos.push(...(await probador.probar(contexto)));

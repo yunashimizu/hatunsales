@@ -46,6 +46,12 @@ export const FALTANTES = {
   emisorCodigoEstablecimiento: 'emisor.codigo_establecimiento',
   series: 'series',
   confirmacionNoOse: 'confirmacion_no_ose',
+  certRucSinConfirmar: 'cert_ruc_confirmado',
+  correlativoInicial: 'correlativo_inicial',
+  confirmacionEmisorElectronico: 'confirmacion.emisor_electronico_sol',
+  confirmacionCertificadoSol: 'confirmacion.certificado_en_sol',
+  confirmacionUsuarioSecundario: 'confirmacion.usuario_sol_secundario',
+  confirmacionRucHabido: 'confirmacion.ruc_habido',
   greCredenciales: 'gre.credenciales_api',
   greSerie: 'gre.serie',
   grePartidaUbigeo: 'gre.partida.ubigeo',
@@ -201,13 +207,22 @@ function itemsCertificado(h: HechosPreparacion): ItemChecklist[] {
       `La clave del certificado tiene ${cert.bitsClave} bits; SUNAT exige al menos ${BITS_MINIMOS}.`,
       'Solicite un certificado nuevo (RSA de 2048 bits).',
     ),
-    item(
-      FALTANTES.rucCertificado,
-      'El certificado pertenece al RUC del emisor',
-      cert.ruc === null || cert.ruc === ruc,
-      `El certificado es del RUC ${cert.ruc}, pero el emisor configurado es ${ruc}.`,
-      'Suba el certificado de la empresa o corrija el RUC del emisor.',
-    ),
+    // Si el RUC no se puede leer del certificado, lo confirma el administrador (D1): sin eso no se emite.
+    cert.ruc === null
+      ? item(
+          FALTANTES.certRucSinConfirmar,
+          'Confirmación: el certificado pertenece al RUC del emisor',
+          h.snapshot.certRucConfirmadoProduccion,
+          `No se pudo leer el RUC dentro del certificado de producción; confirme que pertenece a ${ruc}.`,
+          'Revise el titular del certificado (el CDT de SOL siempre es del RUC) y marque la confirmación en el panel.',
+        )
+      : item(
+          FALTANTES.rucCertificado,
+          'El certificado pertenece al RUC del emisor',
+          cert.ruc === ruc,
+          `El certificado es del RUC ${cert.ruc}, pero el emisor configurado es ${ruc}.`,
+          'Suba el certificado de la empresa o corrija el RUC del emisor.',
+        ),
   ];
 }
 
@@ -311,6 +326,51 @@ function itemSeriesCpe(h: HechosPreparacion): ItemChecklist {
   );
 }
 
+function itemCorrelativoInicial(h: HechosPreparacion): ItemChecklist {
+  return item(
+    FALTANTES.correlativoInicial,
+    'Primer número de cada serie revisado',
+    h.snapshot.correlativoInicialRevisado,
+    'Falta revisar desde qué número empieza cada serie de factura, boleta y notas.',
+    'Si ya usó estas series con otro sistema (o en SOL), indique el primer número libre de cada una; si son nuevas, guarde el valor 1.',
+  );
+}
+
+/** Lo que solo se ve en SOL: el dueño lo declara desde el panel y queda auditado (D1.4). */
+function itemsConfirmacionesSol(h: HechosPreparacion): ItemChecklist[] {
+  const c = h.snapshot.confirmaciones;
+  return [
+    item(
+      FALTANTES.confirmacionEmisorElectronico,
+      'Confirmación: alta como emisor electrónico desde su sistema (SEE - Del Contribuyente)',
+      c.emisorElectronicoSol,
+      'Falta confirmar que en SOL se dio de alta como emisor electrónico desde el sistema del contribuyente.',
+      'En SOL › Comprobantes de pago › SEE - Del Contribuyente, declare la emisión desde su sistema y luego marque la confirmación.',
+    ),
+    item(
+      FALTANTES.confirmacionCertificadoSol,
+      'Confirmación: certificado digital registrado en SOL',
+      c.certificadoEnSol,
+      'Falta confirmar que el certificado de producción subido aquí está registrado en SOL.',
+      'Descargue la parte pública (.cer) desde este panel, regístrela en SOL › «Actualización de certificado digital» y luego marque la confirmación.',
+    ),
+    item(
+      FALTANTES.confirmacionUsuarioSecundario,
+      'Confirmación: usuario secundario SOL con perfil de envío de comprobantes',
+      c.usuarioSolSecundario,
+      'Falta confirmar que el usuario secundario tiene el perfil para enviar comprobantes electrónicos.',
+      'En SOL › Administración de usuarios secundarios, asígnele el perfil de envío de comprobantes electrónicos y luego marque la confirmación.',
+    ),
+    item(
+      FALTANTES.confirmacionRucHabido,
+      'Confirmación: RUC activo y habido',
+      c.rucHabido,
+      'Falta confirmar que el RUC está activo y con domicilio habido.',
+      'Revíselo en la Consulta RUC de SUNAT y luego marque la confirmación.',
+    ),
+  ];
+}
+
 function itemConfirmacion(h: HechosPreparacion): ItemChecklist {
   return item(
     FALTANTES.confirmacionNoOse,
@@ -380,14 +440,11 @@ function advertencias(h: HechosPreparacion): string[] {
     if (cert.bitsClave !== null && cert.bitsClave >= BITS_MINIMOS && cert.bitsClave < BITS_RECOMENDADOS) {
       lista.push(`La clave del certificado es de ${cert.bitsClave} bits; se recomienda 2048 bits al renovarlo.`);
     }
-    if (cert.ruc === null) {
-      lista.push(
-        `No se encontró el RUC dentro del certificado de producción: verifique que pertenezca a ${h.snapshot.emisor.ruc}.`,
-      );
-    }
   }
   if (h.snapshot.proveedor === 'sunat_directo' && h.snapshot.ambiente !== 'produccion') {
-    lista.push('SUNAT directo está elegido con el ambiente BETA: las ventas se siguen emitiendo con Nubefact.');
+    lista.push(
+      'La emisión de producción está elegida pero el ambiente es BETA: solo se emiten pruebas de SUNAT BETA y únicamente si la emisión de prueba del POS está activa.',
+    );
   }
   return lista;
 }
@@ -402,7 +459,17 @@ export function evaluarPreparacion(h: HechosPreparacion): ResultadoPreparacion {
     'cpe',
     'Factura, boleta y notas electrónicas',
     ['01 Factura', '03 Boleta de venta', '07 Nota de crédito', '08 Nota de débito'],
-    [...generales, ...certificado, ...sol, ...itemsEmisorBasico(h), ...itemsEmisorDomicilio(h), itemSeriesCpe(h), confirmacion],
+    [
+      ...generales,
+      ...certificado,
+      ...sol,
+      ...itemsEmisorBasico(h),
+      ...itemsEmisorDomicilio(h),
+      itemSeriesCpe(h),
+      itemCorrelativoInicial(h),
+      confirmacion,
+      ...itemsConfirmacionesSol(h),
+    ],
   );
   const gre = checklist(
     'gre',

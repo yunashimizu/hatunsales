@@ -43,9 +43,62 @@ function armar(configuracion: Record<string, string | null> = {}) {
     obtenerNumero: jest.fn().mockResolvedValue(18),
     obtenerTexto: jest.fn(),
   };
-  const servicio = new ProformaBussnies(repo as any, {} as any, new WhatsappPasarela(), config as any);
+  const servicio = new ProformaBussnies(repo as any, new WhatsappPasarela(), config as any);
   return { servicio, repo, config };
 }
+
+/** Catálogo falso para crear cotizaciones: una sola consulta para todos los ítems. */
+function armarCreacion() {
+  const catalogo = new Map<number, any>([
+    [1, { id_producto: 1, nombre: 'Cemento Sol Tipo I', sku: 'CEM-SOL', precio_venta: '28.90', descuento: '0', unidad_medida: 'BLS' }],
+    [2, { id_producto: 2, nombre: 'Fierro corrugado 8 mm', sku: 'FIE-8MM', precio_venta: '20.00', descuento: '1.50', unidad_medida: 'NIU' }],
+    [3, { id_producto: 3, nombre: 'Alambre N° 16', sku: 'ALA-16', precio_venta: '6.50', descuento: '0', unidad_medida: 'KGM' }],
+  ]);
+  const repo = {
+    productosPorId: jest.fn(async (ids: number[]) => new Map(ids.filter((id) => catalogo.has(id)).map((id) => [id, catalogo.get(id)]))),
+    crearConItems: jest.fn(async (datos: any) => ({ id_proforma: 11, codigo: 'COT-000011', id_almacen: null, ...datos })),
+    nombresAlmacenes: jest.fn().mockResolvedValue(new Map()),
+  };
+  const config = { obtenerNumero: jest.fn().mockResolvedValue(18), obtenerVarias: jest.fn(), obtenerTexto: jest.fn() };
+  const servicio = new ProformaBussnies(repo as any, new WhatsappPasarela(), config as any);
+  return { servicio, repo };
+}
+
+describe('ProformaBussnies.create · productos en una sola consulta', () => {
+  it('una cotización de 3 líneas lee el catálogo una sola vez', async () => {
+    const { servicio, repo } = armarCreacion();
+
+    await servicio.create({
+      cliente_nombre: 'Obra Lurín',
+      items: [
+        { id_producto: 1, cantidad: 10, precio_unitario: 0 },
+        { id_producto: 2, cantidad: 5, precio_unitario: 0 },
+        { id_producto: 3, cantidad: 2, precio_unitario: 0 },
+      ],
+    } as any);
+
+    expect(repo.productosPorId).toHaveBeenCalledTimes(1);
+    expect(repo.productosPorId).toHaveBeenCalledWith([1, 2, 3]);
+    const guardado = repo.crearConItems.mock.calls[0][0];
+    expect(guardado.items.map((i: any) => [i.id_producto, i.precio_unitario])).toEqual([
+      [1, 28.9],
+      [2, 18.5],
+      [3, 6.5],
+    ]);
+  });
+
+  it('conserva los mensajes por ítem: producto inexistente y cantidad inválida', async () => {
+    const { servicio } = armarCreacion();
+
+    await expect(
+      servicio.create({ cliente_nombre: 'X', items: [{ id_producto: 99, cantidad: 1, precio_unitario: 0 }] } as any),
+    ).rejects.toMatchObject({ response: expect.objectContaining({ codigo: 'COTIZACION_PRODUCTO_NO_ENCONTRADO' }) });
+
+    await expect(
+      servicio.create({ cliente_nombre: 'X', items: [{ id_producto: 2, cantidad: 1.5, precio_unitario: 0 }] } as any),
+    ).rejects.toThrow('La cantidad de "Fierro corrugado 8 mm" debe ser un número entero de 1 o más');
+  });
+});
 
 describe('ProformaBussnies · documentos y WhatsApp', () => {
   it('genera PDF y Excel con el nombre de archivo de la proforma', async () => {

@@ -6,12 +6,14 @@ import type { EstadoEsquemaFiscal } from './fiscal-esquema.service';
 import {
   AmbienteFiscal,
   AVISO_LEGAL_OSE,
+  BloqueoEmision,
   ConfirmacionNoOse,
   ModoBoletas,
   ModoReglas2027,
   ProveedorFiscal,
   SeriesFiscales,
   SnapshotConfigFiscal,
+  TIPOS_SERIE_CPE,
 } from './fiscal-config.tipos';
 
 /**
@@ -19,9 +21,8 @@ import {
  * Nunca incluye secretos: de las claves solo se informa si existen.
  */
 export interface ConfiguracionFiscalVista {
-  /** Lo elegido en el panel. */
+  /** Lo elegido en el panel: sunat_directo = emisión de producción activa; nubefact = sin emisión electrónica. */
   proveedor: ProveedorFiscal;
-  /** Con lo que realmente se emiten las ventas (sunat_directo solo en producción). */
   proveedor_efectivo: ProveedorFiscal;
   ambiente: AmbienteFiscal;
   boletas_modo: ModoBoletas;
@@ -59,12 +60,26 @@ export interface ConfiguracionFiscalVista {
   certificado: Record<AmbienteFiscal, CertificadoInfoVista | null>;
   confirmacion_no_ose: ConfirmacionNoOse | null;
   aviso_legal_ose: typeof AVISO_LEGAL_OSE;
+  /** Primer número libre de cada serie de comprobante configurada (1 = desde el principio). */
+  correlativo_inicial: Record<string, number>;
+  /** false hasta que el administrador guarde el correlativo inicial (aunque sea con 1 en todas). */
+  correlativo_inicial_revisado: boolean;
+  /** El administrador confirmó que el certificado de producción (sin RUC legible) es del emisor. */
+  cert_ruc_confirmado: boolean;
+  /** Declaraciones sobre lo que solo se ve en SOL (D1.4). */
+  confirmaciones: {
+    emisor_electronico_sol: boolean;
+    certificado_en_sol: boolean;
+    usuario_sol_secundario: boolean;
+    ruc_habido: boolean;
+  };
+  /** Interruptor de emisión por ambiente (solo lectura: se limpia con «Reanudar emisión» o al corregir la causa). */
+  emision_bloqueada: Record<AmbienteFiscal, BloqueoEmision | null>;
   estado: {
     esquema: { listo: boolean; verificado: boolean; script: string; mensaje: string | null; faltantes: string[] };
     cifrado_disponible: boolean;
     /** Por qué no hay cifrado (sin revelar la llave), o null. */
     cifrado_problema: string | null;
-    nubefact_configurado: boolean;
     /** Token de ApiPeru (autocompletar DNI/RUC del POS) presente en variables o en configuraciones. */
     consulta_documentos_configurada: boolean;
     listo_para_produccion: boolean;
@@ -86,7 +101,6 @@ export interface DatosVistaConfigFiscal {
   esquema: EstadoEsquemaFiscal;
   scriptEsquema: string;
   cifrado: { disponible: boolean; problema: string | null };
-  nubefactConfigurado: boolean;
   consultaDocumentosConfigurada: boolean;
 }
 
@@ -135,6 +149,21 @@ export function construirVistaConfigFiscal(d: DatosVistaConfigFiscal): Configura
     certificado: { beta: d.certificados.beta, produccion: d.certificados.produccion },
     confirmacion_no_ose: s.confirmacionNoOse ? { ...s.confirmacionNoOse } : null,
     aviso_legal_ose: AVISO_LEGAL_OSE,
+    correlativo_inicial: Object.fromEntries(
+      TIPOS_SERIE_CPE.map((tipo) => [s.series[tipo], s.correlativoInicialCpe[s.series[tipo]] ?? 1]),
+    ),
+    correlativo_inicial_revisado: s.correlativoInicialRevisado,
+    cert_ruc_confirmado: s.certRucConfirmadoProduccion,
+    confirmaciones: {
+      emisor_electronico_sol: s.confirmaciones.emisorElectronicoSol,
+      certificado_en_sol: s.confirmaciones.certificadoEnSol,
+      usuario_sol_secundario: s.confirmaciones.usuarioSolSecundario,
+      ruc_habido: s.confirmaciones.rucHabido,
+    },
+    emision_bloqueada: {
+      beta: s.bloqueos.beta ? { ...s.bloqueos.beta } : null,
+      produccion: s.bloqueos.produccion ? { ...s.bloqueos.produccion } : null,
+    },
     estado: {
       esquema: {
         listo: d.esquema.listo,
@@ -145,7 +174,6 @@ export function construirVistaConfigFiscal(d: DatosVistaConfigFiscal): Configura
       },
       cifrado_disponible: d.cifrado.disponible,
       cifrado_problema: d.cifrado.problema,
-      nubefact_configurado: d.nubefactConfigurado,
       consulta_documentos_configurada: d.consultaDocumentosConfigurada,
       listo_para_produccion: d.preparacion.listo,
       gre_lista_para_produccion: d.preparacion.checklist.gre.listo,

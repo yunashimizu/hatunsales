@@ -19,7 +19,6 @@ import {
 } from '../../models/model/proforma.request';
 import { ProformaResponse } from '../../models/model/proforma.response';
 import { IProformaBussniees } from '../Ibussnies/IProformaBussniees';
-import { ProductoRepository } from '../../repository/Repository/producto.repository';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { WhatsappPasarela } from '../../util/pasarela/whatsapp.pasarela';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
@@ -101,7 +100,6 @@ export class ProformaBussnies implements IProformaBussniees {
 
   constructor(
     private readonly repo: ProformaRepository,
-    private readonly productoRepo: ProductoRepository,
     private readonly whatsapp: WhatsappPasarela,
     private readonly config: ConfiguracionRepository,
   ) {}
@@ -143,11 +141,14 @@ export class ProformaBussnies implements IProformaBussniees {
 
     const itemsBase: Array<Omit<NuevoItemProforma, 'subtotal'>> = [];
 
+    // Todos los productos en una consulta; los mensajes por ítem no cambian.
+    const productos = await this.conError(
+      () => this.repo.productosPorId(dto.items.map((item) => Number(item.id_producto))),
+      'No se pudo leer el catálogo de productos',
+    );
+
     for (const item of dto.items) {
-      const producto = await this.conError(
-        () => this.productoRepo.getById(Number(item.id_producto)),
-        'No se pudo leer el catálogo de productos',
-      );
+      const producto = productos.get(Number(item.id_producto));
       if (!producto) {
         throw new NotFoundException(
           cuerpoError(

@@ -30,9 +30,14 @@ export class CheckoutController {
     return this.pagos.configuracionPublica();
   }
 
+  /** Ruta pública: un cuerpo incompleto o un monto que no es número no debe llegar como 500. */
   @Post('validar-cupon')
-  async validarCupon(@Body() body: { codigo: string; monto: number }) {
-    const { cupon, descuento } = await this.service.validarCupon(body.codigo, Number(body.monto ?? 0));
+  async validarCupon(@Body() body: { codigo?: unknown; monto?: unknown }) {
+    const monto = Number(body?.monto ?? 0);
+    const { cupon, descuento } = await this.service.validarCupon(
+      typeof body?.codigo === 'string' ? body.codigo : '',
+      Number.isFinite(monto) && monto > 0 ? monto : 0,
+    );
 
     return {
       valido: true,
@@ -47,7 +52,9 @@ export class CheckoutController {
 
 /**
  * Notificaciones de la pasarela. Va sin guard porque quien llama es el
- * proveedor, no un usuario; la autenticidad se valida con la firma del webhook.
+ * proveedor, no un usuario; la autenticidad se valida con la firma del webhook
+ * (con la pasarela simulada en producción ninguno es válido) y solo se confirma
+ * un pedido pendiente por su monto exacto.
  *
  * Siempre responde 200 para que la pasarela no reintente en bucle: los casos
  * con problema quedan guardados en `pasarela_eventos` para revisarlos.

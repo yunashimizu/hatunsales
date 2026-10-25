@@ -1,5 +1,12 @@
 import { DEFECTOS_PRUEBA } from './configuracion.prueba-spec';
-import { construirSnapshot, defectosDesdeEntorno, partirUbicacion } from './snapshot-config-fiscal';
+import {
+  construirSnapshot,
+  defectosDesdeEntorno,
+  leerAmbiente,
+  leerBloqueoEmision,
+  leerCorrelativoInicialCpe,
+  partirUbicacion,
+} from './snapshot-config-fiscal';
 
 describe('construirSnapshot', () => {
   it('sin nada guardado: Nubefact, BETA, series por defecto y GRE apagada (comportamiento de hoy)', () => {
@@ -84,6 +91,48 @@ describe('construirSnapshot', () => {
     expect(s.series.gre_remitente).toBe('T005');
     expect(s.ambiente).toBe('produccion');
     expect(construirSnapshot({ fiscal_serie_gre_remitente: 'T009' }, defectos).series.gre_remitente).toBe('T009');
+  });
+
+  it('emisión directa: interruptor BETA, correlativo inicial, confirmaciones e interruptores por ambiente', () => {
+    const vacio = construirSnapshot({}, DEFECTOS_PRUEBA);
+    expect(vacio).toMatchObject({
+      posBetaActivo: false,
+      correlativoInicialCpe: {},
+      correlativoInicialRevisado: false,
+      certRucConfirmadoProduccion: false,
+      confirmaciones: { emisorElectronicoSol: false, certificadoEnSol: false, usuarioSolSecundario: false, rucHabido: false },
+      bloqueos: { beta: null, produccion: null },
+    });
+
+    const s = construirSnapshot(
+      {
+        fiscal_beta_pos_directo: 'true',
+        fiscal_cpe_correlativo_inicial: '{"f001": 120, "B001": "35", "T001": 4, "FC01": 0, "BC01": 1.5}',
+        fiscal_cert_ruc_confirmado_produccion: 'true',
+        fiscal_confirma_ruc_habido: 'true',
+        // Solo cuenta el 'true' exacto que escribe el panel.
+        fiscal_confirma_certificado_en_sol: 'si',
+        fiscal_emision_bloqueada_produccion: '{"codigo":"0102","motivo":"Clave SOL incorrecta.","fecha":"2026-10-20T10:00:00Z"}',
+        fiscal_emision_bloqueada_beta: 'false',
+      },
+      DEFECTOS_PRUEBA,
+    );
+    expect(s.posBetaActivo).toBe(true);
+    expect(s.correlativoInicialCpe).toEqual({ F001: 120, B001: 35 });
+    expect(s.correlativoInicialRevisado).toBe(true);
+    expect(s.certRucConfirmadoProduccion).toBe(true);
+    expect(s.confirmaciones).toEqual({ emisorElectronicoSol: false, certificadoEnSol: false, usuarioSolSecundario: false, rucHabido: true });
+    expect(s.bloqueos).toEqual({ beta: null, produccion: { codigo: '0102', motivo: 'Clave SOL incorrecta.', fecha: '2026-10-20T10:00:00Z' } });
+  });
+
+  it('un interruptor ilegible cuenta como detenido (ante la duda no se llama a SUNAT); un correlativo ilegible se ignora', () => {
+    expect(leerBloqueoEmision('detenido a mano')).toMatchObject({ codigo: '', motivo: expect.stringMatching(/Reanude|reanude/) });
+    expect(leerBloqueoEmision('')).toBeNull();
+    expect(leerBloqueoEmision(null)).toBeNull();
+    expect(leerCorrelativoInicialCpe('no es json')).toEqual({});
+    expect(leerCorrelativoInicialCpe('[1,2]')).toEqual({});
+    expect(leerAmbiente(' PRODUCCION ', 'beta')).toBe('produccion');
+    expect(leerAmbiente('prod', 'beta')).toBe('beta');
   });
 
   it('parte la ubicación «DISTRITO - PROVINCIA - DEPARTAMENTO»', () => {

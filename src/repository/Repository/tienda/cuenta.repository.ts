@@ -6,6 +6,7 @@ import { DireccionEnvio } from '../../../models/DBModel/tienda/direccion-envio.e
 import { Favorito } from '../../../models/DBModel/tienda/favorito.entity';
 import { Resena } from '../../../models/DBModel/tienda/resena.entity';
 import { Producto } from '../../../models/DBModel/producto.entity';
+import { FUENTE_CATALOGO } from './catalogo.repository';
 
 /**
  * Datos que pertenecen a la cuenta del cliente en la tienda:
@@ -91,10 +92,11 @@ export class CuentaTiendaRepository {
 
   // -------------------------------------------------------------- favoritos
 
+  /** Mismas columnas del catálogo, calculadas solo para los favoritos del cliente. */
   async listarFavoritos(idCliente: number): Promise<any[]> {
     return this.favoritoRepo.manager.query(
       `SELECT c.* FROM favoritos f
-       JOIN vw_catalogo c ON c.id_producto = f.id_producto
+       JOIN ${FUENTE_CATALOGO} ON c.id_producto = f.id_producto
        WHERE f.id_cliente = $1
        ORDER BY f.id_favorito DESC`,
       [idCliente],

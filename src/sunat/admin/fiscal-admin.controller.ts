@@ -37,7 +37,7 @@ import {
   ProbarConexionDto,
   SubirCertificadoDto,
 } from '../config/fiscal-config.dto';
-import type { ActorFiscal } from '../config/fiscal-config.tipos';
+import { actorDe } from './actor-fiscal';
 import { ErroresFiscalesInterceptor } from './errores-fiscales.interceptor';
 import { FiscalAdminBussnies } from './fiscal-admin.bussnies';
 
@@ -47,18 +47,12 @@ const OPCIONES_SUBIDA_CERTIFICADO = {
   limits: { fileSize: TAMANO_MAXIMO_CERTIFICADO, files: 1, fields: 6, fieldSize: 2048, parts: 8 },
 };
 
-function actorDe(usuario: UsuarioToken | undefined, req: Request): ActorFiscal {
-  return {
-    id_usuario: usuario?.id_usuario ?? null,
-    nombre: usuario?.nombre ?? null,
-    ip: (req.ip ?? req.socket?.remoteAddress ?? null) || null,
-  };
-}
-
 /**
  * Administración de la facturación electrónica directa con SUNAT
  * (configuración, certificado digital, credenciales SOL y de la API de GRE,
  * prueba de conexión, estado y bitácora). Solo admin, salvo GET /fiscal/estado.
+ * Los envíos, el interruptor de emisión y la prueba de credenciales de producción
+ * están en EnviosAdminController (src/sunat/emision).
  */
 @Controller('fiscal')
 @UseGuards(JwtGuard, RolesGuard)

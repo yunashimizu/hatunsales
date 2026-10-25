@@ -4,6 +4,7 @@ import type { PaqueteZip } from '../documento-fiscal.types';
 import { PaqueteZipError } from '../errores-nucleo';
 import { PATRON_NOMBRE_BASE_CPE, PATRON_NOMBRE_RESUMEN } from '../identificadores-cpe';
 import { PATRON_RAIZ_DOCUMENTO_SUNAT } from '../ubl/espacios-ubl';
+import { decodificarXml } from '../xml/lector-xml';
 
 /** Límites al descomprimir respuestas de SUNAT (protección ante ZIP bomba). */
 export const MAXIMO_BYTES_XML_EN_ZIP = 5 * 1024 * 1024;
@@ -45,7 +46,8 @@ export function empaquetarZip(nombreBase: string, xml: string): PaqueteZip {
 
 /**
  * Lee la primera entrada .xml de un ZIP (la constancia de SUNAT viene como
- * R-RUC-TT-SERIE-NUMERO.xml). Devuelve null si el ZIP es ilegible o no trae XML.
+ * R-RUC-TT-SERIE-NUMERO.xml, junto a una carpeta dummy/ vacía). Devuelve null si
+ * el ZIP es ilegible o no trae XML. El texto respeta la codificación declarada.
  */
 export function leerXmlDeZip(contenido: Buffer | string): { nombre: string; xml: string } | null {
   try {
@@ -57,7 +59,7 @@ export function leerXmlDeZip(contenido: Buffer | string): { nombre: string; xml:
     if (!entrada || entrada.header.size > MAXIMO_BYTES_XML_EN_ZIP) return null;
     const datos = entrada.getData();
     if (datos.length > MAXIMO_BYTES_XML_EN_ZIP) return null;
-    return { nombre: entrada.entryName, xml: datos.toString('utf8') };
+    return { nombre: entrada.entryName, xml: decodificarXml(datos) };
   } catch {
     return null;
   }

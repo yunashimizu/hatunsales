@@ -10,13 +10,16 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateBy,
   ValidateNested,
+  ValidationOptions,
 } from 'class-validator';
 import {
   AMBIENTES_FISCALES,
   CORRELATIVO_MAXIMO,
   MODOS_BOLETAS,
   MODOS_REGLAS_2027,
+  PATRON_SERIE_CPE,
   PROVEEDORES_FISCALES,
 } from './fiscal-config.tipos';
 import type { AmbienteFiscal, ModoBoletas, ModoReglas2027, ProveedorFiscal } from './fiscal-config.tipos';
@@ -41,6 +44,40 @@ export const aBooleano = ({ value }: Transformacion) => {
 };
 
 const textoDeOpcion = ({ value }: Transformacion) => (typeof value === 'boolean' ? String(value) : minusculas({ value }));
+
+/** Claves en mayúsculas y números escritos como texto ('120') a número; lo demás llega igual para que lo rechace la validación. */
+const normalizarCorrelativos = ({ value }: Transformacion) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([serie, numero]) => [
+      serie.trim().toUpperCase(),
+      typeof numero === 'string' && /^\d{1,9}$/.test(numero.trim()) ? Number(numero) : numero,
+    ]),
+  );
+};
+
+/** {"F001": 1, "B001": 120}: series de factura/boleta/notas y enteros de 1 a 99 999 999. */
+export function esMapaCorrelativoInicial(valor: unknown): boolean {
+  if (!valor || typeof valor !== 'object' || Array.isArray(valor)) return false;
+  return Object.entries(valor as Record<string, unknown>).every(
+    ([serie, numero]) =>
+      PATRON_SERIE_CPE.test(serie) && Number.isSafeInteger(numero) && (numero as number) >= 1 && (numero as number) <= CORRELATIVO_MAXIMO,
+  );
+}
+
+function EsMapaCorrelativoInicial(opciones?: ValidationOptions): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'esMapaCorrelativoInicial',
+      validator: {
+        validate: (valor: unknown) => esMapaCorrelativoInicial(valor),
+        defaultMessage: () =>
+          'correlativo_inicial debe ser un objeto { "F001": 1, "B001": 120 }: series de 4 caracteres que empiezan con F o B y números enteros de 1 a 99999999.',
+      },
+    },
+    opciones,
+  );
+}
 
 const SERIE_F = /^F[A-Z0-9]{3}$/;
 const SERIE_B = /^B[A-Z0-9]{3}$/;
@@ -189,10 +226,36 @@ export class ConfigGreDto {
   partida?: PuntoPartidaGreDto;
 }
 
+/** Declaraciones del checklist de activación (D1.4): true = confirmado, false = se retira. */
+export class ConfirmacionesActivacionDto {
+  @IsOptional()
+  @Transform(aBooleano)
+  @IsBoolean({ message: 'confirmaciones.emisor_electronico_sol debe ser verdadero o falso.' })
+  emisor_electronico_sol?: boolean;
+
+  @IsOptional()
+  @Transform(aBooleano)
+  @IsBoolean({ message: 'confirmaciones.certificado_en_sol debe ser verdadero o falso.' })
+  certificado_en_sol?: boolean;
+
+  @IsOptional()
+  @Transform(aBooleano)
+  @IsBoolean({ message: 'confirmaciones.usuario_sol_secundario debe ser verdadero o falso.' })
+  usuario_sol_secundario?: boolean;
+
+  @IsOptional()
+  @Transform(aBooleano)
+  @IsBoolean({ message: 'confirmaciones.ruc_habido debe ser verdadero o falso.' })
+  ruc_habido?: boolean;
+}
+
 export class ActualizarConfigFiscalDto {
+  /** sunat_directo = emisión de producción activa; nubefact = sin emisión electrónica (valor histórico). */
   @IsOptional()
   @Transform(minusculas)
-  @IsIn([...PROVEEDORES_FISCALES], { message: 'El proveedor debe ser nubefact o sunat_directo.' })
+  @IsIn([...PROVEEDORES_FISCALES], {
+    message: 'El proveedor debe ser sunat_directo (emisión activa) o nubefact (sin emisión electrónica).',
+  })
   proveedor?: ProveedorFiscal;
 
   @IsOptional()
@@ -251,6 +314,23 @@ export class ActualizarConfigFiscalDto {
   @Transform(aBooleano)
   @IsBoolean({ message: 'confirmo_no_ose debe ser verdadero o falso.' })
   confirmo_no_ose?: boolean;
+
+  /** Primer número libre por serie de comprobante (solo series configuradas): { "F001": 120 }. */
+  @IsOptional()
+  @Transform(normalizarCorrelativos)
+  @EsMapaCorrelativoInicial()
+  correlativo_inicial?: Record<string, number>;
+
+  /** true = el certificado de producción (cuyo RUC no se puede leer del archivo) pertenece al emisor. */
+  @IsOptional()
+  @Transform(aBooleano)
+  @IsBoolean({ message: 'cert_ruc_confirmado debe ser verdadero o falso.' })
+  cert_ruc_confirmado?: boolean;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ConfirmacionesActivacionDto)
+  confirmaciones?: ConfirmacionesActivacionDto;
 }
 
 /** Campos de texto del multipart de POST /fiscal/certificado (el archivo va en el campo «archivo»). */

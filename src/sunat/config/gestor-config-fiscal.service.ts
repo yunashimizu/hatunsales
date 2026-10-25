@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { nubefactConfigurado } from '../../config/nubefact.config';
 import { tokenApiPeruDeEntorno } from '../../config/sunat.config';
 import { FiscalAuditoriaRepository } from '../auditoria/fiscal-auditoria.repository';
 import { CertificadoFiscalService } from '../certificado/certificado-fiscal.service';
@@ -12,6 +11,7 @@ import { FiscalConfigService } from './fiscal-config.service';
 import { ActorFiscal, ConfirmacionNoOse } from './fiscal-config.tipos';
 import { FiscalEsquemaService } from './fiscal-esquema.service';
 import { GestorConfigFiscal, ResultadoGuardadoFiscal } from './fiscal-tokens';
+import { InterruptorEmisionFiscal } from './interruptor-emision.service';
 import { NotificadorCambiosFiscales } from './notificador-cambios-fiscales';
 import { PreparacionFiscalService } from './preparacion-fiscal.service';
 import {
@@ -38,8 +38,9 @@ export const CANDADO_CONFIG_FISCAL = 'fiscal:config';
  *
  * El guardado es una transacción corta con orden de bloqueo fijo:
  * candado 'fiscal:config' → claves de configuraciones (orden alfabético) →
- * fiscal_secretos → fiscal_auditoria. Antes de escribir se evalúa el checklist
- * del estado FUTURO y se aplican las reglas de transición (§5.3).
+ * fiscal_secretos → interruptor de emisión → fiscal_auditoria. Antes de escribir
+ * se evalúa el checklist del estado FUTURO y se aplican las reglas de transición (§5.3).
+ * Guardar credenciales SOL reanuda la emisión de producción si estaba detenida (D5.4).
  */
 @Injectable()
 export class GestorConfigFiscalService implements GestorConfigFiscal {
@@ -56,6 +57,7 @@ export class GestorConfigFiscalService implements GestorConfigFiscal {
     private readonly cifrado: CifradoFiscalService,
     private readonly notificador: NotificadorCambiosFiscales,
     private readonly reloj: RelojFiscal,
+    private readonly interruptor: InterruptorEmisionFiscal,
   ) {}
 
   async obtenerConfigCompleta(): Promise<ConfiguracionFiscalVista> {
@@ -80,7 +82,6 @@ export class GestorConfigFiscalService implements GestorConfigFiscal {
       esquema,
       scriptEsquema: FiscalEsquemaService.SCRIPT,
       cifrado: { disponible: diagnostico.disponible, problema: diagnostico.problema },
-      nubefactConfigurado: nubefactConfigurado(),
       consultaDocumentosConfigurada: consulta,
     });
   }
@@ -106,13 +107,17 @@ export class GestorConfigFiscalService implements GestorConfigFiscal {
       validarCambios(cambios, futuro);
 
       const preparacion = await this.preparacion.evaluar(futuro, { claveSolNueva: cambios.solClave !== undefined });
-      const { advertencias } = validarTransicion(actual, futuro, preparacion, cambios, {
-        nubefactConfigurado: nubefactConfigurado(),
-      });
+      const { advertencias } = validarTransicion(actual, futuro, preparacion);
 
       await this.repositorio.guardar(paresParaGuardar(cambios, futuro), tx);
       if (cambios.solClave !== undefined) {
         await this.credencialesSol.guardarClave(cambios.solClave, actor.id_usuario, tx);
+      }
+      if (cambios.solUsuario !== undefined || cambios.solClave !== undefined) {
+        // Las credenciales SOL son de producción: corregirlas reanuda esa emisión si SUNAT las había rechazado.
+        if (await this.interruptor.limpiar('produccion', 'credenciales SOL actualizadas', actor, tx)) {
+          advertencias.push('La emisión de producción estaba detenida por un rechazo de las credenciales SOL y se reanudó con las nuevas.');
+        }
       }
       for (const evento of eventosAuditoria(actual, futuro, cambios)) {
         await this.auditoria.registrar(

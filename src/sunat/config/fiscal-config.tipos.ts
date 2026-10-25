@@ -4,6 +4,11 @@
  * entorno antiguas (SUNAT_*) solo aportan valores por defecto.
  */
 
+/**
+ * 'sunat_directo' = emisión electrónica de PRODUCCIÓN activa (el único proveedor real).
+ * 'nubefact' = valor histórico que hoy significa «sin emisión electrónica»: lo conservan las filas
+ * viejas de comprobantes y el CHECK de la columna, por eso no se renombra.
+ */
 export const PROVEEDORES_FISCALES = ['nubefact', 'sunat_directo'] as const;
 export type ProveedorFiscal = (typeof PROVEEDORES_FISCALES)[number];
 
@@ -79,6 +84,31 @@ export interface ConfirmacionNoOse {
   ip?: string | null;
 }
 
+/**
+ * Interruptor de emisión de un ambiente (D5.4): SUNAT rechazó la credencial SOL o el certificado.
+ * Mientras exista no se llama a SUNAT en ese ambiente (así una clave mala no se reintenta en cada
+ * venta ni bloquea al usuario SOL). Se limpia al guardar credenciales SOL o un certificado de ese
+ * ambiente, o con «Reanudar emisión» en el panel.
+ */
+export interface BloqueoEmision {
+  codigo: string;
+  motivo: string;
+  /** ISO 8601. */
+  fecha: string;
+}
+
+/** Declaraciones del dueño sobre lo que solo se ve en SOL (checklist de activación D1.4). */
+export interface ConfirmacionesActivacion {
+  /** Alta como emisor electrónico desde el sistema del contribuyente (SEE - Del Contribuyente). */
+  emisorElectronicoSol: boolean;
+  /** Certificado de producción registrado en SOL. */
+  certificadoEnSol: boolean;
+  /** Usuario secundario SOL con el perfil de envío de comprobantes. */
+  usuarioSolSecundario: boolean;
+  /** RUC activo y con domicilio habido. */
+  rucHabido: boolean;
+}
+
 /** Foto inmutable de toda la configuración fiscal, leída de una sola consulta. */
 export interface SnapshotConfigFiscal {
   readonly proveedor: ProveedorFiscal;
@@ -93,6 +123,16 @@ export interface SnapshotConfigFiscal {
   readonly confirmacionNoOse: Readonly<ConfirmacionNoOse> | null;
   readonly reglas2027: ModoReglas2027;
   readonly gre: Readonly<ConfigGreFiscal>;
+  /** Interruptor «emisión de prueba del POS en SUNAT BETA» (fiscal_beta_pos_directo). */
+  readonly posBetaActivo: boolean;
+  /** Primer número libre por serie de comprobante (D2); las series que no aparecen empiezan en 1. */
+  readonly correlativoInicialCpe: Readonly<Record<string, number>>;
+  /** El administrador guardó alguna vez el correlativo inicial (aunque sea {}): lo revisó. */
+  readonly correlativoInicialRevisado: boolean;
+  /** El administrador confirmó que el certificado de producción (sin RUC legible) es del emisor. */
+  readonly certRucConfirmadoProduccion: boolean;
+  readonly confirmaciones: Readonly<ConfirmacionesActivacion>;
+  readonly bloqueos: Readonly<Record<AmbienteFiscal, Readonly<BloqueoEmision> | null>>;
 }
 
 /** Quién hace un cambio (para auditoría). */
@@ -113,9 +153,26 @@ export const CLAVES_CONFIG_FISCAL = {
   solUsuario: 'fiscal_sol_usuario',
   codigoProductoDefecto: 'fiscal_codigo_producto_defecto',
   confirmacionNoOse: 'fiscal_confirmacion_no_ose',
-  betaCorrelativo: 'fiscal_beta_correlativo',
   reglas2027: 'fiscal_aplicar_reglas_2027',
+  posBetaActivo: 'fiscal_beta_pos_directo',
+  /** JSON {"F001": 1, "B001": 120, …}: primer número libre de cada serie de comprobante. */
+  correlativoInicialCpe: 'fiscal_cpe_correlativo_inicial',
+  certRucConfirmadoProduccion: 'fiscal_cert_ruc_confirmado_produccion',
 } as const;
+
+/** 'true' cuando el administrador lo declaró desde el panel (queda auditado). */
+export const CLAVES_CONFIRMACIONES_ACTIVACION: Readonly<Record<keyof ConfirmacionesActivacion, string>> = {
+  emisorElectronicoSol: 'fiscal_confirma_emisor_electronico_sol',
+  certificadoEnSol: 'fiscal_confirma_certificado_en_sol',
+  usuarioSolSecundario: 'fiscal_confirma_usuario_sol_secundario',
+  rucHabido: 'fiscal_confirma_ruc_habido',
+};
+
+/** JSON {codigo, motivo, fecha} mientras el interruptor del ambiente está abierto; vacío = emisión normal. */
+export const CLAVES_BLOQUEO_EMISION: Readonly<Record<AmbienteFiscal, string>> = {
+  beta: 'fiscal_emision_bloqueada_beta',
+  produccion: 'fiscal_emision_bloqueada_produccion',
+};
 
 export const CLAVES_SERIES_FISCALES: Readonly<Record<TipoSerieFiscal, string>> = {
   factura: 'fiscal_serie_factura',
@@ -156,6 +213,8 @@ export const CLAVES_SNAPSHOT_FISCAL: readonly string[] = [
   ...Object.values(CLAVES_SERIES_FISCALES),
   ...Object.values(CLAVES_EMISOR_FISCAL),
   ...Object.values(CLAVES_GRE_FISCAL),
+  ...Object.values(CLAVES_CONFIRMACIONES_ACTIVACION),
+  ...Object.values(CLAVES_BLOQUEO_EMISION),
 ];
 
 export const SERIES_FISCALES_POR_DEFECTO: Readonly<SeriesFiscales> = {
@@ -179,6 +238,9 @@ export const PATRON_SERIE: Readonly<Record<TipoSerieFiscal, RegExp>> = {
   gre_remitente: /^T[A-Z0-9]{3}$/,
 };
 
+/** Cualquier serie de factura, boleta o sus notas (F o B + 3 caracteres). */
+export const PATRON_SERIE_CPE = /^[FB][A-Z0-9]{3}$/;
+
 export const CODIGO_ESTABLECIMIENTO_POR_DEFECTO = '0000';
 export const PATRON_UBIGEO = /^\d{6}$/;
 export const PATRON_CODIGO_ESTABLECIMIENTO = /^\d{4}$/;
@@ -195,7 +257,8 @@ export const AVISO_LEGAL_OSE = {
     'Si HatunSales tiene registrado un OSE en SOL (por ejemplo, NUBEFACT como OSE), o es principal '
     + 'contribuyente o agente de retención o percepción del IGV, no puede emitir por SEE - Del Contribuyente '
     + '(RS 117-2017/SUNAT, arts. 11.1 y 12.2, y RS 239-2018/SUNAT). Revíselo en SOL y en la Consulta RUC '
-    + 'antes de activar. Si aplica alguna de esas condiciones, siga emitiendo con Nubefact.',
+    + 'antes de activar. Si aplica alguna de esas condiciones, no active la emisión directa: emita por el OSE '
+    + 'registrado o regularice primero su condición en SUNAT.',
   confirmacion:
     'Confirmo que HatunSales NO tiene un OSE registrado en SOL y no es principal contribuyente ni agente '
     + 'de retención o percepción del IGV.',

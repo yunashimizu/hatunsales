@@ -19,6 +19,8 @@ export * from './firma/material-certificado';
 export { firmarXmlDemo, MENSAJE_DEMO_EN_PRODUCCION } from './firma/firma-demo';
 export * from './zip/paquete-zip';
 export * from './cdr/lector-cdr';
+export * from './cdr/verificar-cdr';
+export * from './reglas-envio';
 export * from './soap/endpoints-sunat';
 export { construirSobreSoap, soapActionDe } from './soap/sobre-soap';
 export type { CredencialesSoap, MetodoSoapSunat } from './soap/sobre-soap';

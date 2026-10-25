@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
 import { VentaBussnies } from '../../bussnies/Bussnies/venta.bussnies';
-import { CrearVentaRequest } from '../../models/model/venta/venta.request';
+import { CrearVentaRequest, EmitirComprobanteVentaRequest } from '../../models/model/venta/venta.request';
+import { AnularVentaRequest } from '../../models/model/venta/anular-venta.request';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
 import { Roles } from '../../guards/roles.decorator';
@@ -100,9 +101,30 @@ export class VentaController {
     return this.service.obtener(Number(id));
   }
 
+  /** Emite la factura o boleta de una venta que quedó sin comprobante, con los montos ya cobrados. */
+  @Post(':id/emitir-comprobante')
+  @Roles('admin', 'vendedor', 'caja')
+  @HttpCode(200)
+  emitirComprobante(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EmitirComprobanteVentaRequest,
+    @UsuarioActual() usuario: UsuarioToken,
+  ) {
+    return this.service.emitirComprobanteDeVenta(id, body, usuario);
+  }
+
+  /**
+   * Anula la venta (D9). Responde estado 'anulada' | 'anulacion_en_curso' (se emitió la nota de crédito
+   * y se anula cuando SUNAT la acepte) | 'anulacion_rechazada'; 409 si hay que verificar en SUNAT.
+   */
   @Post(':id/anular')
   @Roles('admin')
-  anular(@Param('id') id: string) {
-    return this.service.anular(Number(id));
+  @HttpCode(200)
+  anular(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AnularVentaRequest,
+    @UsuarioActual() usuario: UsuarioToken,
+  ) {
+    return this.service.anular(id, body ?? {}, usuario);
   }
 }

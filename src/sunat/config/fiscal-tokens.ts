@@ -68,14 +68,16 @@ export interface ContextoPruebaEnvio {
 
 export interface ProbadorEnvioFiscal {
   /**
-   * Debe respetar el ambiente: en BETA puede enviar un documento de prueba con
-   * numeración propia (siguienteCorrelativoBeta); en PRODUCCIÓN no emite nada
-   * (solo autentica/consulta, p. ej. getStatusCdr o el token de la GRE).
+   * Debe respetar el ambiente: en BETA puede enviar un documento de prueba con un
+   * número que no choque con los ya enviados; en PRODUCCIÓN no emite nada (solo
+   * autentica/consulta, p. ej. getStatusCdr o el token de la GRE).
    */
   probar(contexto: ContextoPruebaEnvio): Promise<PasoPruebaFiscal[]>;
 }
 
 export interface EstadoOperativoFiscal {
+  /** Emisión del ambiente vigente (EmisionDirecta.modo()): activa o el motivo por el que no. */
+  emision?: { activa: boolean; ambiente: AmbienteFiscal; codigo?: string; motivo?: string } | null;
   cola?: Record<string, number> | null;
   plazos?: Record<string, number> | null;
   ultimo_envio_ok?: string | null;

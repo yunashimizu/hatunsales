@@ -19,7 +19,7 @@ export const DEFECTOS_PRUEBA: DefectosEntornoFiscal = {
   },
 };
 
-/** Configuración COMPLETA para producción (todo lo que pide el checklist). */
+/** Configuración COMPLETA para producción (todo lo que pide el checklist, incluidas las confirmaciones de D1.4). */
 export const VALORES_COMPLETOS: Record<string, string> = {
   fiscal_proveedor: 'nubefact',
   fiscal_ambiente: 'produccion',
@@ -27,6 +27,11 @@ export const VALORES_COMPLETOS: Record<string, string> = {
   emisor_ubigeo: '150119',
   emisor_codigo_establecimiento: '0000',
   fiscal_confirmacion_no_ose: JSON.stringify({ id_usuario: 1, nombre: 'Admin', fecha: '2026-10-10T10:00:00.000Z' }),
+  fiscal_cpe_correlativo_inicial: '{}',
+  fiscal_confirma_emisor_electronico_sol: 'true',
+  fiscal_confirma_certificado_en_sol: 'true',
+  fiscal_confirma_usuario_sol_secundario: 'true',
+  fiscal_confirma_ruc_habido: 'true',
 };
 
 export function snapshotPrueba(valores: Record<string, string | null> = VALORES_COMPLETOS) {

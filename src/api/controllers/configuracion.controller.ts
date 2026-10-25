@@ -9,7 +9,10 @@ import { Roles } from '../../guards/roles.decorator';
 export class ConfiguracionController {
   constructor(private readonly service: ConfiguracionFiscalBussnies) {}
 
-  /** Series para el POS (cualquier rol de venta). */
+  /**
+   * Series del ambiente de emisión vigente para el POS (cualquier rol de venta) y si la emisión
+   * está activa. Nunca falla por emisión inactiva: lo explica en `mensaje`.
+   */
   @Get('series')
   @Roles('admin', 'vendedor', 'caja', 'consulta')
   series() {
@@ -23,6 +26,7 @@ export class ConfiguracionController {
     return this.service.obtenerAdmin();
   }
 
+  /** Emisor y condiciones de la proforma. `series` se ignora: se configuran en Facturación SUNAT. */
   @Put('fiscal')
   @Roles('admin')
   guardarFiscal(

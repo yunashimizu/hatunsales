@@ -15,6 +15,24 @@ const CDATA = 4;
 /** Las respuestas externas nunca traen DTD: se rechazan para evitar expansión de entidades. */
 const PATRON_DOCTYPE = /<!DOCTYPE/i;
 
+const PATRON_DECLARACION_LATIN1 = /^\s*<\?xml[^>]*\bencoding\s*=\s*["'](?:iso[-_]?8859-1|latin-?1)["']/i;
+
+/**
+ * Bytes de un XML de SUNAT → texto. Respeta la declaración: UTF-8 por omisión (así llegan los CDR
+ * de BETA) e ISO-8859-1 si así lo declara (como el ejemplo de CDR del Manual del Programador); si
+ * se leyera como UTF-8, las tildes de la descripción saldrían ilegibles. Quita el BOM.
+ */
+export function decodificarXml(bytes: Buffer): string {
+  const cabecera = bytes.subarray(0, 200).toString('latin1').replace(/^\xEF\xBB\xBF/, '');
+  const texto = PATRON_DECLARACION_LATIN1.test(cabecera) ? bytes.toString('latin1') : bytes.toString('utf8');
+  return quitarBom(texto);
+}
+
+/** El BOM al inicio no es parte del documento (un XML de terceros puede traerlo). */
+export function quitarBom(xml: string): string {
+  return xml.charCodeAt(0) === 0xfeff ? xml.slice(1) : xml;
+}
+
 /** Parsea y lanza XmlInvalidoError si el XML está mal formado. */
 export function parsearXml(xml: string, contexto = 'XML'): Document {
   if (typeof xml !== 'string' || xml.trim() === '') {

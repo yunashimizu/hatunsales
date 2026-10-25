@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } fro
 import { CarritoBussnies, ContextoCarrito } from '../../../bussnies/Bussnies/tienda/carrito.bussnies';
 import { CuentaTiendaBussnies } from '../../../bussnies/Bussnies/tienda/cuenta.bussnies';
 import { OptionalJwtGuard } from '../../../guards/optional-jwt.guard';
+import { IdEnteroPipe } from '../../../util/http/pipes/id-entero.pipe';
 import { UsuarioActual } from '../../../guards/usuario-actual.decorator';
 import type { UsuarioToken } from '../../../guards/usuario-actual.decorator';
 import {
@@ -12,7 +13,8 @@ import {
 
 /**
  * Carrito de la tienda. Funciona igual para visitantes anónimos (identificados
- * por `token_invitado`) y para clientes autenticados.
+ * por `token_invitado`) y para clientes autenticados. Ver el carrito no escribe
+ * nada: el carrito se crea recién al agregar el primer producto.
  */
 @Controller('tienda/carrito')
 @UseGuards(OptionalJwtGuard)
@@ -49,22 +51,22 @@ export class CarritoController {
 
   @Put('items/:idItem')
   async actualizar(
-    @Param('idItem') idItem: string,
+    @Param('idItem', IdEnteroPipe) idItem: number,
     @Body() body: ActualizarItemCarritoRequest,
     @UsuarioActual() usuario?: UsuarioToken,
   ) {
     const ctx = await this.contexto(usuario, body.token_invitado);
-    return this.service.actualizarCantidad(ctx, Number(idItem), body.cantidad);
+    return this.service.actualizarCantidad(ctx, idItem, body.cantidad);
   }
 
   @Delete('items/:idItem')
   async eliminar(
-    @Param('idItem') idItem: string,
+    @Param('idItem', IdEnteroPipe) idItem: number,
     @UsuarioActual() usuario?: UsuarioToken,
     @Query('token_invitado') token?: string,
   ) {
     const ctx = await this.contexto(usuario, token);
-    return this.service.eliminar(ctx, Number(idItem));
+    return this.service.eliminar(ctx, idItem);
   }
 
   @Delete()

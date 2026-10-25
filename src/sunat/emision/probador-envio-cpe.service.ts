@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { FiscalConfigService } from '../config/fiscal-config.service';
 import { FiscalEsquemaService } from '../config/fiscal-esquema.service';
 import type {
   ContextoPruebaEnvio,
@@ -8,13 +7,20 @@ import type {
 } from '../config/fiscal-tokens';
 import { RelojFiscal } from '../config/reloj-fiscal';
 import { crearDocumentoPruebaBeta } from './documento-prueba-beta';
-import { SunatEmisionBetaService } from './sunat-emision-beta.service';
+import { SERIES_BETA } from './emision.tipos';
+import { EnvioFiscalRepository } from './envio-fiscal.repository';
+import { SunatEmisionService } from './sunat-emision.service';
 
+/**
+ * «Probar conexión» de factura/boleta en SUNAT BETA: envía un documento de prueba (S/ 1.18) sin crear
+ * ventas ni comprobantes, con un número posterior a todo lo ya enviado en esa serie de BETA. En
+ * PRODUCCIÓN no envía nada (cada comprobante sería real).
+ */
 @Injectable()
 export class ProbadorEnvioCpeService implements ProbadorEnvioFiscal {
   constructor(
-    private readonly emision: SunatEmisionBetaService,
-    private readonly config: FiscalConfigService,
+    private readonly emision: SunatEmisionService,
+    private readonly envios: EnvioFiscalRepository,
     private readonly esquema: FiscalEsquemaService,
     private readonly reloj: RelojFiscal,
   ) {}
@@ -30,14 +36,15 @@ export class ProbadorEnvioCpeService implements ProbadorEnvioFiscal {
         },
       ];
     await this.esquema.exigir('emision', 'secretos');
-    const numero = await this.config.siguienteCorrelativoBeta();
+    const tipo = ctx.tipoCpe ?? '01';
+    const numero = await this.envios.siguienteNumeroPruebaBeta(tipo === '01' ? SERIES_BETA.factura : SERIES_BETA.boleta);
     const documento = crearDocumentoPruebaBeta(
       ctx.emisor,
-      ctx.tipoCpe ?? '01',
+      tipo,
       numero,
       this.reloj.ahora(),
     );
-    const resultado = await this.emision.emitir(
+    const resultado = await this.emision.emitirPrueba(
       documento,
       ctx.material,
       ctx.idUsuario,
@@ -62,8 +69,8 @@ export class ProbadorEnvioCpeService implements ProbadorEnvioFiscal {
       {
         paso: 'respuesta_sunat',
         ok: resultado.aceptado,
-        codigo: resultado.codigo,
-        detalle: resultado.mensaje,
+        codigo: resultado.codigo ?? undefined,
+        detalle: resultado.mensaje ?? '',
         observaciones: resultado.observaciones,
         envio_id: resultado.id_envio,
         archivos: resultado.archivos,

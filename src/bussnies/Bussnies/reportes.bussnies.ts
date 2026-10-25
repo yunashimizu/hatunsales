@@ -16,11 +16,26 @@ import {
   REPORTE_COLUMNAS_DETALLE,
   capitalizarEstado,
   etiquetaPeriodo,
-  formatearFechaEs,
-  formatearFechaHoraEs,
   formatearMonedaEs,
   nombreArchivoReporte,
 } from '../../util/reporte-export';
+import {
+  FechaLimaInvalidaError,
+  aFechaLima,
+  esFechaYmd,
+  fechaHoraLimaLegible,
+  finDiaLima,
+  hoyLima,
+  inicioAnioLima,
+  inicioMesLima,
+  inicioQuincenaLima,
+  inicioSemanaLima,
+  rangoDiaLima,
+  rangoFechasLima,
+  validarFechaYmd,
+} from '../../util/fecha-lima';
+import { TIPO_NOTA_CREDITO, TIPO_NOTA_DEBITO } from '../../util/fiscal/tipos-comprobante';
+import { Dinero } from '../../caja/dominio/dinero';
 
 type ReportesFilters = {
   fecha_inicio?: string;
@@ -29,6 +44,96 @@ type ReportesFilters = {
   id_tipo?: number;
   id_moneda?: number;
 };
+
+/**
+ * Qué cuenta en el reporte de ventas y con qué signo.
+ *
+ * - Factura y boleta (y cualquier comprobante histórico que no sea nota) SUMAN.
+ * - Nota de crédito (id_tipo 7) RESTA: devuelve o descuenta una venta que ya se contó.
+ * - Nota de débito (id_tipo 8) SUMA: es un cargo adicional sobre una venta.
+ * - NO cuentan: anulados (anulado = true, estado 'anulado' o baja aceptada 'ANULADO'),
+ *   los de prueba (ambiente_fiscal 'beta'), los que quedaron en estado 'error' (nunca se
+ *   emitieron) y los RECHAZADOS por SUNAT (no tienen validez).
+ * - Los históricos emitidos con Nubefact (ambiente_fiscal nulo) cuentan como siempre.
+ * Es el mismo criterio de "comprobante vigente" con el que las notas de crédito calculan
+ * el saldo de una venta (no anulado, sin error, no rechazado), más la exclusión de BETA.
+ */
+export type ClaseReporte =
+  | { cuenta: true; signo: 1 | -1; tipo: 'venta' | 'nota_credito' | 'nota_debito' }
+  | { cuenta: false; motivo: 'anulado' | 'prueba' | 'error' | 'rechazado' };
+
+export interface ComprobanteReporte {
+  anulado?: boolean | null;
+  estado?: string | null;
+  estado_sunat?: string | null;
+  ambiente_fiscal?: string | null;
+  tipo?: { id_tipo?: number | null } | null;
+  id_tipo?: number | null;
+}
+
+export function clasificarComprobanteReporte(c: ComprobanteReporte): ClaseReporte {
+  const estado = String(c.estado ?? '').trim().toLowerCase();
+  const estadoSunat = String(c.estado_sunat ?? '').trim().toUpperCase();
+  if (c.anulado === true || estado === 'anulado' || estadoSunat === 'ANULADO') {
+    return { cuenta: false, motivo: 'anulado' };
+  }
+  if (String(c.ambiente_fiscal ?? '').trim().toLowerCase() === 'beta') return { cuenta: false, motivo: 'prueba' };
+  if (estado === 'error') return { cuenta: false, motivo: 'error' };
+  if (estadoSunat === 'RECHAZADO') return { cuenta: false, motivo: 'rechazado' };
+
+  const idTipo = Number(c.tipo?.id_tipo ?? c.id_tipo);
+  if (idTipo === TIPO_NOTA_CREDITO) return { cuenta: true, signo: -1, tipo: 'nota_credito' };
+  if (idTipo === TIPO_NOTA_DEBITO) return { cuenta: true, signo: 1, tipo: 'nota_debito' };
+  return { cuenta: true, signo: 1, tipo: 'venta' };
+}
+
+/** Fila del detalle: total_vendido ya lleva el signo (la nota de crédito va en negativo). */
+export interface DetalleReporteVentas extends VentasReportDetalle {
+  tipo_documento: 'venta' | 'nota_credito' | 'nota_debito';
+}
+
+/** Respuesta con el neto y lo que lo explica (campos nuevos: un front anterior los ignora). */
+export interface ReporteVentasNeto extends VentasReportResponse {
+  detalle: DetalleReporteVentas[];
+  /** Facturas y boletas más notas de débito, antes de restar las notas de crédito. */
+  total_bruto: number;
+  notas_credito: { cantidad: number; total: number };
+  notas_debito: { cantidad: number; total: number };
+  /** Comprobantes del periodo que no suman: anulados, con error o rechazados (sin pruebas BETA). */
+  excluidos: { anulados: number; con_error: number; rechazados: number };
+}
+
+interface RangoReporte {
+  /** 00:00 de Lima del primer día (inclusivo). */
+  desde: Date;
+  /** 00:00 de Lima del día siguiente al último (exclusivo, para el SQL). */
+  hasta: Date;
+  /** 23:59:59.999 de Lima del último día (para mostrar). */
+  fin: Date;
+}
+
+const PATRON_DMY = /^(\d{2})[-/](\d{2})[-/](\d{4})$/;
+
+/**
+ * Día de Lima del comprobante ('YYYY-MM-DD'): su fecha de emisión si es legible (la
+ * directa la guarda AAAA-MM-DD; la de Nubefact pudo ser DD-MM-AAAA) y, si no, el día de
+ * Lima en que se registró. Nunca un instante UTC: a las 20:00 de Lima ya es "mañana" en UTC.
+ */
+export function diaLimaComprobante(c: { fecha_de_emision?: string | null; creado_en?: Date | string | null }): string {
+  const texto = String(c.fecha_de_emision ?? '').trim().slice(0, 10);
+  if (esFechaYmd(texto)) return texto;
+  const dmy = PATRON_DMY.exec(texto);
+  if (dmy && esFechaYmd(`${dmy[3]}-${dmy[2]}-${dmy[1]}`)) return `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
+  const instante = c.creado_en ? new Date(c.creado_en) : null;
+  return instante && !Number.isNaN(instante.getTime()) ? aFechaLima(instante) : '';
+}
+
+/** 'YYYY-MM-DD' → 'dd/mm/aaaa' sin pasar por Date (no depende de la zona del servidor). */
+function ymdLegible(ymd: string): string {
+  return esFechaYmd(ymd) ? `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}/${ymd.slice(0, 4)}` : ymd || '—';
+}
+
+const MESES_CORTOS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
 
 const PERIODOS_VALIDOS = new Set(['diario', 'semana', 'quincenal', 'mensual', 'anual']);
 
@@ -54,10 +159,15 @@ const EXCEL = {
 export class ReportesBussnies implements IReportesBussniees {
   constructor(private readonly repo: ReportesRepository) {}
 
+  /**
+   * Ventas netas del periodo (días de Lima). total_vendido = facturas y boletas + notas de
+   * débito − notas de crédito; cantidad_comprobantes y ticket_promedio son de los
+   * comprobantes de venta (facturas y boletas). La regla está en clasificarComprobanteReporte.
+   */
   async reporteVentas(
     periodo: string,
     filters: ReportesFilters,
-  ): Promise<VentasReportResponse> {
+  ): Promise<ReporteVentasNeto> {
     const periodoNormalizado = (periodo || 'diario').toLowerCase().trim();
     if (!filters.fecha_inicio && !filters.fecha_fin && !PERIODOS_VALIDOS.has(periodoNormalizado)) {
       throw new BadRequestException(
@@ -68,46 +178,80 @@ export class ReportesBussnies implements IReportesBussniees {
       );
     }
 
-    const { fechaInicio, fechaFin } = this.resolverRango(periodoNormalizado, filters);
+    const rango = this.resolverRango(periodoNormalizado, filters);
 
-    const lista = await this.repo.obtenerVentasPorPeriodo(fechaInicio, fechaFin, {
+    const lista = await this.repo.obtenerVentasPorPeriodo(rango.desde, rango.hasta, {
       id_cliente: filters.id_cliente,
       id_tipo: filters.id_tipo,
       id_moneda: filters.id_moneda,
     });
 
-    const detalle: VentasReportDetalle[] = lista.map((item) => {
+    const detalle: DetalleReporteVentas[] = [];
+    const excluidos = { anulados: 0, con_error: 0, rechazados: 0 };
+    let ventas = Dinero.cero();
+    let notasCredito = Dinero.cero();
+    let notasDebito = Dinero.cero();
+    let cantidadVentas = 0;
+    let cantidadNc = 0;
+    let cantidadNd = 0;
+
+    for (const item of lista) {
+      const clase = clasificarComprobanteReporte(item);
+      if (!clase.cuenta) {
+        if (clase.motivo === 'anulado') excluidos.anulados += 1;
+        else if (clase.motivo === 'error') excluidos.con_error += 1;
+        else if (clase.motivo === 'rechazado') excluidos.rechazados += 1;
+        continue;
+      }
+
+      const importe = Dinero.desdeBd(item.total);
+      if (clase.tipo === 'nota_credito') {
+        notasCredito = notasCredito.sumar(importe);
+        cantidadNc += 1;
+      } else if (clase.tipo === 'nota_debito') {
+        notasDebito = notasDebito.sumar(importe);
+        cantidadNd += 1;
+      } else {
+        ventas = ventas.sumar(importe);
+        cantidadVentas += 1;
+      }
+
       const serie = item.serie ?? '';
       const numero = Number(item.numero ?? 0);
-      return {
+      detalle.push({
         id_comprobante: item.id_comprobante,
-        fecha: item.fecha_de_emision || (item.creado_en ? new Date(item.creado_en).toISOString() : ''),
+        fecha: diaLimaComprobante(item),
         serie,
         numero,
         numero_formateado:
           serie && numero ? `${serie}-${String(numero).padStart(8, '0')}` : serie || String(numero || '—'),
         cliente: item.cliente_denominacion || '—',
         documento_cliente: item.cliente_numero_doc || '',
-        estado: item.anulado ? 'anulado' : item.estado || 'emitido',
-        anulado: Boolean(item.anulado),
+        estado: item.estado || 'emitido',
+        anulado: false,
         cantidad_comprobantes: 1,
-        total_vendido: Number(item.total ?? 0),
-      };
-    });
+        total_vendido: clase.signo < 0 ? importe.negar().aNumero() : importe.aNumero(),
+        tipo_documento: clase.tipo,
+      });
+    }
 
-    const totalVendido = detalle.reduce((sum, item) => sum + Number(item.total_vendido ?? 0), 0);
-    const cantidadComprobantes = detalle.length;
-    const ticketPromedio = cantidadComprobantes > 0 ? totalVendido / cantidadComprobantes : 0;
+    const bruto = ventas.sumar(notasDebito);
+    const neto = bruto.restar(notasCredito);
+    const ticketPromedio = cantidadVentas > 0 ? Math.round(neto.centimos / cantidadVentas) / 100 : 0;
 
     return {
       periodo: periodoNormalizado,
-      fecha_inicio: fechaInicio.toISOString(),
-      fecha_fin: fechaFin.toISOString(),
-      cantidad_comprobantes: cantidadComprobantes,
-      total_vendido: Number(totalVendido.toFixed(2)),
-      ticket_promedio: Number(ticketPromedio.toFixed(2)),
+      fecha_inicio: rango.desde.toISOString(),
+      fecha_fin: rango.fin.toISOString(),
+      cantidad_comprobantes: cantidadVentas,
+      total_vendido: neto.aNumero(),
+      ticket_promedio: ticketPromedio,
       detalle,
-      estadisticas: this.construirEstadisticas(periodoNormalizado, detalle),
+      estadisticas: this.construirEstadisticas(periodoNormalizado, detalle, excluidos),
+      total_bruto: bruto.aNumero(),
+      notas_credito: { cantidad: cantidadNc, total: notasCredito.aNumero() },
+      notas_debito: { cantidad: cantidadNd, total: notasDebito.aNumero() },
+      excluidos,
     };
   }
 
@@ -175,6 +319,8 @@ export class ReportesBussnies implements IReportesBussniees {
       const kpiStart = 8;
       const kpis: Array<[string, string | number]> = [
         ['Total vendido', report.total_vendido],
+        ['Ventas brutas', report.total_bruto],
+        ['Notas de crédito', report.notas_credito.total ? -report.notas_credito.total : 0],
         ['Comprobantes', report.cantidad_comprobantes],
         ['Ticket promedio', report.ticket_promedio],
         ['Venta máxima', stats.venta_maxima],
@@ -194,7 +340,9 @@ export class ReportesBussnies implements IReportesBussniees {
         fgColor: { argb: `FF${EXCEL.sectionBg}` },
       };
 
-      const kpiMoneda = new Set(['Total vendido', 'Ticket promedio', 'Venta máxima', 'Venta mínima']);
+      const kpiMoneda = new Set([
+        'Total vendido', 'Ventas brutas', 'Notas de crédito', 'Ticket promedio', 'Venta máxima', 'Venta mínima',
+      ]);
       kpis.forEach(([label, value], i) => {
         const row = kpiStart + 1 + i;
         const cLabel = ws.getCell(`A${row}`);
@@ -408,6 +556,7 @@ export class ReportesBussnies implements IReportesBussniees {
       doc.font('Helvetica').fontSize(9);
       const kpiLines = [
         `Total vendido: ${formatearMonedaEs(report.total_vendido)}`,
+        `Ventas brutas: ${formatearMonedaEs(report.total_bruto)}   |   Notas de crédito (${report.notas_credito.cantidad}): ${formatearMonedaEs(report.notas_credito.total ? -report.notas_credito.total : 0)}`,
         `Comprobantes: ${report.cantidad_comprobantes}   |   Ticket promedio: ${formatearMonedaEs(report.ticket_promedio)}`,
         `Máx / Mín: ${formatearMonedaEs(stats.venta_maxima)} / ${formatearMonedaEs(stats.venta_minima)}`,
         `Emitidos: ${stats.emitidos}   |   Anulados: ${stats.anulados}   |   Con error: ${stats.con_error}`,
@@ -548,10 +697,13 @@ export class ReportesBussnies implements IReportesBussniees {
       ruc: emisorConfig.ruc || '—',
       titulo: 'Reporte de ventas',
       periodo: report.periodo,
-      fechaInicio: formatearFechaEs(report.fecha_inicio),
-      fechaFin: formatearFechaEs(report.fecha_fin),
-      generadoEl: formatearFechaHoraEs(new Date()),
-      nota: 'Incluye comprobantes no anulados del periodo.',
+      // Días y hora de Lima: el servidor corre en UTC.
+      fechaInicio: ymdLegible(aFechaLima(new Date(report.fecha_inicio))),
+      fechaFin: ymdLegible(aFechaLima(new Date(report.fecha_fin))),
+      generadoEl: fechaHoraLimaLegible(new Date()),
+      nota:
+        'Ventas netas: facturas y boletas más notas de débito, menos notas de crédito. ' +
+        'No incluye anulados, rechazados por SUNAT, con error ni pruebas BETA.',
     };
   }
 
@@ -560,7 +712,7 @@ export class ReportesBussnies implements IReportesBussniees {
       comprobante:
         d.numero_formateado ||
         (d.serie || d.numero != null ? `${d.serie ?? ''}-${d.numero ?? ''}` : '—'),
-      fecha: formatearFechaEs(d.fecha),
+      fecha: ymdLegible(d.fecha),
       cliente: d.cliente || '—',
       documento: d.documento_cliente || '—',
       estado: capitalizarEstado(d.estado),
@@ -568,34 +720,27 @@ export class ReportesBussnies implements IReportesBussniees {
     }));
   }
 
-  private construirEstadisticas(periodo: string, detalle: VentasReportDetalle[]): VentasEstadisticas {
-    const totales = detalle.map((d) => Number(d.total_vendido ?? 0));
+  private construirEstadisticas(
+    periodo: string,
+    detalle: DetalleReporteVentas[],
+    excluidos: { anulados: number; con_error: number; rechazados: number },
+  ): VentasEstadisticas {
+    // Máximo, mínimo y días con venta miran solo facturas y boletas: una nota no es una venta.
+    const ventas = detalle.filter((d) => d.tipo_documento === 'venta');
+    const totales = ventas.map((d) => Number(d.total_vendido ?? 0));
     const ventaMaxima = totales.length ? Math.max(...totales) : 0;
     const ventaMinima = totales.length ? Math.min(...totales) : 0;
 
-    let emitidos = 0;
-    let anulados = 0;
-    let conError = 0;
-
-    for (const d of detalle) {
-      const estado = String(d.estado || '').toLowerCase();
-      if (d.anulado || estado === 'anulado') anulados += 1;
-      else if (estado === 'error') conError += 1;
-      else emitidos += 1;
-    }
-
     const serie = this.agruparSerie(periodo, detalle);
     const topClientes = this.topClientes(detalle, 5);
-    const diasConVenta = new Set(
-      detalle.map((d) => String(d.fecha || '').slice(0, 10)).filter((f) => f.length >= 8),
-    ).size;
+    const diasConVenta = new Set(ventas.map((d) => d.fecha).filter(Boolean)).size;
 
     return {
-      venta_maxima: Number(ventaMaxima.toFixed(2)),
-      venta_minima: Number(ventaMinima.toFixed(2)),
-      emitidos,
-      anulados,
-      con_error: conError,
+      venta_maxima: ventaMaxima,
+      venta_minima: ventaMinima,
+      emitidos: detalle.length,
+      anulados: excluidos.anulados,
+      con_error: excluidos.con_error + excluidos.rechazados,
       dias_con_venta: diasConVenta,
       serie,
       top_clientes: topClientes,
@@ -603,29 +748,29 @@ export class ReportesBussnies implements IReportesBussniees {
     };
   }
 
-  private agruparSerie(periodo: string, detalle: VentasReportDetalle[]): VentasSeriePunto[] {
-    const mapa = new Map<string, { total: number; cantidad: number; etiqueta: string }>();
+  /** Neto por día de Lima (por mes de Lima en el anual). */
+  private agruparSerie(periodo: string, detalle: DetalleReporteVentas[]): VentasSeriePunto[] {
+    const mapa = new Map<string, { total: Dinero; cantidad: number; etiqueta: string }>();
     const porMes = periodo === 'anual';
 
     for (const d of detalle) {
-      const fecha = new Date(d.fecha);
+      const dia = d.fecha;
       let clave: string;
       let etiqueta: string;
 
-      if (Number.isNaN(fecha.getTime())) {
-        clave = String(d.fecha || 'sin-fecha').slice(0, 10);
+      if (!esFechaYmd(dia)) {
+        clave = dia || 'sin-fecha';
         etiqueta = clave;
       } else if (porMes) {
-        const mes = fecha.getMonth() + 1;
-        clave = `${fecha.getFullYear()}-${String(mes).padStart(2, '0')}`;
-        etiqueta = fecha.toLocaleDateString('es-PE', { month: 'short', year: 'numeric' });
+        clave = dia.slice(0, 7);
+        etiqueta = `${MESES_CORTOS[Number(dia.slice(5, 7)) - 1]} ${dia.slice(0, 4)}`;
       } else {
-        clave = fecha.toISOString().slice(0, 10);
-        etiqueta = fecha.toLocaleDateString('es-PE', { day: '2-digit', month: 'short' });
+        clave = dia;
+        etiqueta = `${dia.slice(8, 10)} ${MESES_CORTOS[Number(dia.slice(5, 7)) - 1]}`;
       }
 
-      const actual = mapa.get(clave) ?? { total: 0, cantidad: 0, etiqueta };
-      actual.total += Number(d.total_vendido ?? 0);
+      const actual = mapa.get(clave) ?? { total: Dinero.cero(), cantidad: 0, etiqueta };
+      actual.total = actual.total.sumar(Dinero.desdeNumeroRedondeado(Number(d.total_vendido ?? 0)));
       actual.cantidad += 1;
       mapa.set(clave, actual);
     }
@@ -635,13 +780,14 @@ export class ReportesBussnies implements IReportesBussniees {
       .map(([clave, v]) => ({
         clave,
         etiqueta: v.etiqueta,
-        total: Number(v.total.toFixed(2)),
+        total: v.total.aNumero(),
         cantidad: v.cantidad,
       }));
   }
 
-  private topClientes(detalle: VentasReportDetalle[], limite: number): VentasTopCliente[] {
-    const mapa = new Map<string, VentasTopCliente>();
+  /** Neto por cliente: sus notas de crédito restan de lo que compró. */
+  private topClientes(detalle: DetalleReporteVentas[], limite: number): VentasTopCliente[] {
+    const mapa = new Map<string, { cliente: string; documento: string; total: Dinero; cantidad: number }>();
 
     for (const d of detalle) {
       const nombre = (d.cliente || '—').trim() || '—';
@@ -649,66 +795,64 @@ export class ReportesBussnies implements IReportesBussniees {
       const actual = mapa.get(key) ?? {
         cliente: nombre,
         documento: d.documento_cliente || '',
-        total: 0,
+        total: Dinero.cero(),
         cantidad: 0,
       };
-      actual.total += Number(d.total_vendido ?? 0);
+      actual.total = actual.total.sumar(Dinero.desdeNumeroRedondeado(Number(d.total_vendido ?? 0)));
       actual.cantidad += 1;
       mapa.set(key, actual);
     }
 
     return Array.from(mapa.values())
-      .map((c) => ({ ...c, total: Number(c.total.toFixed(2)) }))
+      .map((c) => ({ ...c, total: c.total.aNumero() }))
       .sort((a, b) => b.total - a.total)
       .slice(0, limite);
   }
 
-  private resolverRango(periodo: string, filters: ReportesFilters): { fechaInicio: Date; fechaFin: Date } {
+  /**
+   * Rango del periodo en días de Lima. Antes se usaba setHours sobre la hora del servidor
+   * (UTC): el "diario" iba de las 19:00 de ayer a las 18:59 de hoy en Lima y las ventas de
+   * la noche caían en el día siguiente.
+   */
+  private resolverRango(periodo: string, filters: ReportesFilters): RangoReporte {
     const ahora = new Date();
-    let fechaInicio: Date;
-    let fechaFin = new Date(ahora);
 
     if (filters.fecha_inicio && filters.fecha_fin) {
-      fechaInicio = new Date(filters.fecha_inicio);
-      fechaFin = new Date(filters.fecha_fin);
-      if (Number.isNaN(fechaInicio.getTime()) || Number.isNaN(fechaFin.getTime())) {
-        throw new BadRequestException(
-          cuerpoError(CodigoError.REPORTE_FECHA_INVALIDA, 'Formato de fecha inválido'),
-        );
+      try {
+        const desdeYmd = validarFechaYmd(filters.fecha_inicio, 'fecha_inicio');
+        const hastaYmd = validarFechaYmd(filters.fecha_fin, 'fecha_fin');
+        const { desde, hasta } = rangoFechasLima(desdeYmd, hastaYmd);
+        return { desde, hasta, fin: finDiaLima(hastaYmd) };
+      } catch (error) {
+        if (error instanceof FechaLimaInvalidaError) {
+          throw new BadRequestException(
+            cuerpoError(
+              CodigoError.REPORTE_FECHA_INVALIDA,
+              error.campo === 'desde'
+                ? 'La fecha de inicio no puede ser posterior a la fecha de fin'
+                : `Formato de fecha inválido en ${error.campo}: use AAAA-MM-DD`,
+            ),
+          );
+        }
+        throw error;
       }
-      fechaInicio.setHours(0, 0, 0, 0);
-      fechaFin.setHours(23, 59, 59, 999);
-      return { fechaInicio, fechaFin };
     }
+
+    const hoy = hoyLima(ahora);
+    const hasta = rangoDiaLima(hoy).hasta;
+    const fin = finDiaLima(hoy);
 
     switch (periodo) {
       case 'diario':
-        fechaInicio = new Date(ahora);
-        fechaInicio.setHours(0, 0, 0, 0);
-        break;
+        return { desde: rangoDiaLima(hoy).desde, hasta, fin };
       case 'semana':
-        fechaInicio = new Date(ahora);
-        const diaSemana = ahora.getDay();
-        fechaInicio.setDate(ahora.getDate() - diaSemana + (diaSemana === 0 ? -6 : 1));
-        fechaInicio.setHours(0, 0, 0, 0);
-        break;
+        return { desde: inicioSemanaLima(ahora), hasta, fin };
       case 'quincenal':
-        fechaInicio = new Date(ahora);
-        if (ahora.getDate() <= 15) {
-          fechaInicio.setDate(1);
-        } else {
-          fechaInicio.setDate(16);
-        }
-        fechaInicio.setHours(0, 0, 0, 0);
-        break;
+        return { desde: inicioQuincenaLima(ahora), hasta, fin };
       case 'mensual':
-        fechaInicio = new Date(ahora.getFullYear(), ahora.getMonth(), 1);
-        fechaInicio.setHours(0, 0, 0, 0);
-        break;
+        return { desde: inicioMesLima(ahora), hasta, fin };
       case 'anual':
-        fechaInicio = new Date(ahora.getFullYear(), 0, 1);
-        fechaInicio.setHours(0, 0, 0, 0);
-        break;
+        return { desde: inicioAnioLima(ahora), hasta, fin };
       default:
         throw new BadRequestException(
           cuerpoError(
@@ -717,8 +861,5 @@ export class ReportesBussnies implements IReportesBussniees {
           ),
         );
     }
-
-    fechaFin.setHours(23, 59, 59, 999);
-    return { fechaInicio, fechaFin };
   }
 }

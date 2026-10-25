@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Producto } from '../../../models/DBModel/producto.entity';
+import { PoliticaStockTienda, StockTiendaRepository } from './stock-tienda.repository';
+import { SQL_HOY_LIMA } from '../../../util/fecha-lima';
 
 export interface FiltrosCatalogo {
   q?: string;
@@ -18,31 +20,99 @@ export interface FiltrosCatalogo {
   limite: number;
 }
 
+export interface OpcionesBusqueda {
+  /** false en portada y buscador, que no muestran el total: se ahorra el COUNT. */
+  conTotal?: boolean;
+}
+
+const COLUMNAS_PRODUCTO = `p.id_producto, p.nombre, p.slug, p.descripcion, p.descripcion_corta, p.sku,
+         p.codigo_barras, p.precio_venta, p.descuento,
+         round(p.precio_venta - COALESCE(p.descuento, 0::numeric), 2) AS precio_final,
+         p.destacado, p.estado, p.unidad_medida,
+         cat.id_categoria, cat.nombre AS categoria,
+         m.id_marca, m.nombre AS marca,
+         COALESCE(st.stock_total, 0) AS stock`;
+
+/** Subconsulta suelta: PostgreSQL la calcula después del ORDER BY + LIMIT, solo para las filas devueltas. */
+const IMAGEN_PRINCIPAL = `(SELECT pi.url
+            FROM productos_imagenes pi
+           WHERE pi.id_producto = p.id_producto
+           ORDER BY pi.is_primary DESC NULLS LAST, pi.orden, pi.id_imagen
+           LIMIT 1) AS imagen_principal`;
+
+const RATING_POR_FILA = `COALESCE((SELECT round(avg(r.calificacion), 2)
+                     FROM resenas r
+                    WHERE r.id_producto = p.id_producto AND r.aprobado = true), 0::numeric) AS rating,
+         (SELECT count(r.id_resena)::integer
+            FROM resenas r
+           WHERE r.id_producto = p.id_producto AND r.aprobado = true) AS total_resenas`;
+
+const UNIONES_PRODUCTO = `FROM productos p
+    LEFT JOIN categorias cat ON cat.id_categoria = p.id_categoria
+    LEFT JOIN marcas m ON m.id_marca = p.id_marca
+    LEFT JOIN LATERAL (
+      SELECT SUM(i.stock)::integer AS stock_total
+        FROM inventario i
+       WHERE i.id_producto = p.id_producto
+    ) st ON TRUE`;
+
 /**
- * Lee del catálogo apoyándose en la vista `vw_catalogo`, que ya resuelve
- * precio final, categoría, marca, stock, rating e imagen principal.
+ * Productos del catálogo con las mismas columnas que la vista `vw_catalogo`
+ * (precio final, categoría, marca, stock, rating e imagen principal). La vista
+ * agrupa TODO el inventario y TODAS las reseñas antes de filtrar, así que hasta
+ * un `LIMIT 4` pagaba el catálogo entero; aquí el stock va por producto
+ * (LATERAL, hace falta para filtrar y ordenar) y rating e imagen se calculan
+ * solo para las filas que se devuelven. Un COUNT no evalúa ninguno.
  */
+export const FUENTE_CATALOGO = `(
+  SELECT ${COLUMNAS_PRODUCTO},
+         ${RATING_POR_FILA},
+         ${IMAGEN_PRINCIPAL}
+    ${UNIONES_PRODUCTO}
+) c`;
+
+/** Para ordenar por rating hace falta el de todos: las reseñas se agrupan una sola vez. */
+const FUENTE_CATALOGO_POR_RATING = `(
+  SELECT ${COLUMNAS_PRODUCTO},
+         COALESCE(rt.rating, 0::numeric) AS rating,
+         COALESCE(rt.total_resenas, 0) AS total_resenas,
+         ${IMAGEN_PRINCIPAL}
+    ${UNIONES_PRODUCTO}
+    LEFT JOIN (
+      SELECT r.id_producto, round(avg(r.calificacion), 2) AS rating, count(*)::integer AS total_resenas
+        FROM resenas r
+       WHERE r.aprobado = true
+       GROUP BY r.id_producto
+    ) rt ON rt.id_producto = p.id_producto
+) c`;
+
+/** Topes del paginado; el servicio ya los valida, esto evita que un valor raro llegue al SQL. */
+const LIMITE_SQL_MAXIMO = 100;
+
+/** `%`, `_` y `\` del texto buscado son literales, no comodines de LIKE. */
+function patronContiene(texto: string): string {
+  return `%${texto.toLowerCase().replace(/[\\%_]/g, '\\$&')}%`;
+}
+
 @Injectable()
 export class CatalogoRepository {
 
   constructor(
     @InjectRepository(Producto, 'pgConnection')
     private readonly productoRepo: Repository<Producto>,
+    private readonly stockRepo: StockTiendaRepository,
   ) {}
 
   private get manager() {
     return this.productoRepo.manager;
   }
 
-  private construirWhere(
-    filtros: FiltrosCatalogo,
-    politica?: { exclusivo: boolean; idAlmacen?: number },
-  ): { where: string; params: any[] } {
+  private construirWhere(filtros: FiltrosCatalogo, politica: PoliticaStockTienda): { where: string; params: any[] } {
     const condiciones: string[] = ['COALESCE(c.estado, TRUE) = TRUE'];
     const params: any[] = [];
 
     if (filtros.q) {
-      params.push(`%${filtros.q.toLowerCase()}%`);
+      params.push(patronContiene(filtros.q));
       const i = params.length;
       condiciones.push(`(
         LOWER(c.nombre) LIKE $${i}
@@ -75,7 +145,7 @@ export class CatalogoRepository {
     }
 
     if (filtros.solo_stock) {
-      if (politica?.exclusivo && politica.idAlmacen) {
+      if (politica.exclusivo && politica.idAlmacen) {
         params.push(politica.idAlmacen);
         condiciones.push(`EXISTS (
           SELECT 1 FROM inventario i
@@ -123,30 +193,40 @@ export class CatalogoRepository {
     }
   }
 
-  async buscar(filtros: FiltrosCatalogo): Promise<{ rows: any[]; total: number }> {
-    const politica = await this.politicaStockWeb();
+  async buscar(
+    filtros: FiltrosCatalogo,
+    opciones: OpcionesBusqueda = {},
+  ): Promise<{ rows: any[]; total?: number }> {
+    const politica = await this.stockRepo.politicaStock();
     const { where, params } = this.construirWhere(filtros, politica);
-    const offset = (filtros.pagina - 1) * filtros.limite;
+    const limite = Math.min(Math.max(1, Math.trunc(filtros.limite) || 1), LIMITE_SQL_MAXIMO);
+    const offset = (Math.max(1, Math.trunc(filtros.pagina) || 1) - 1) * limite;
+    const fuente = filtros.orden === 'rating' ? FUENTE_CATALOGO_POR_RATING : FUENTE_CATALOGO;
 
-    const [{ total }] = await this.manager.query(
-      `SELECT COUNT(*)::INTEGER AS total FROM vw_catalogo c WHERE ${where}`,
-      params,
-    );
-
-    const rows = await this.manager.query(
-      `SELECT * FROM vw_catalogo c
+    const filas = this.manager.query(
+      `SELECT * FROM ${fuente}
        WHERE ${where}
        ORDER BY ${this.construirOrden(filtros.orden)}
-       LIMIT ${filtros.limite} OFFSET ${offset}`,
-      params,
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limite, offset],
     );
 
-    return { rows: await this.aplicarStockTienda(rows, politica), total: Number(total ?? 0) };
+    if (opciones.conTotal === false) {
+      return { rows: await this.aplicarStockTienda(await filas, politica) };
+    }
+
+    // COUNT y filas a la vez: cada viaje a la BD cuesta el RTT del proxy público.
+    const [conteo, rows] = await Promise.all([
+      this.manager.query(`SELECT COUNT(*)::INTEGER AS total FROM ${FUENTE_CATALOGO} WHERE ${where}`, params),
+      filas,
+    ]);
+
+    return { rows: await this.aplicarStockTienda(rows, politica), total: Number(conteo[0]?.total ?? 0) };
   }
 
   async obtenerPorId(id: number): Promise<any | null> {
     const rows = await this.manager.query(
-      'SELECT * FROM vw_catalogo c WHERE c.id_producto = $1 LIMIT 1',
+      `SELECT * FROM ${FUENTE_CATALOGO} WHERE c.id_producto = $1 LIMIT 1`,
       [id],
     );
     const mapeadas = await this.aplicarStockTienda(rows);
@@ -155,7 +235,7 @@ export class CatalogoRepository {
 
   async obtenerPorSlug(slug: string): Promise<any | null> {
     const rows = await this.manager.query(
-      'SELECT * FROM vw_catalogo c WHERE c.slug = $1 LIMIT 1',
+      `SELECT * FROM ${FUENTE_CATALOGO} WHERE c.slug = $1 LIMIT 1`,
       [slug],
     );
     const mapeadas = await this.aplicarStockTienda(rows);
@@ -195,14 +275,14 @@ export class CatalogoRepository {
     let rows: any[];
     if (!idCategoria) {
       rows = await this.manager.query(
-        `SELECT * FROM vw_catalogo c
+        `SELECT * FROM ${FUENTE_CATALOGO}
          WHERE c.id_producto <> $1 AND COALESCE(c.estado, TRUE) = TRUE
          ORDER BY c.destacado DESC, c.id_producto DESC LIMIT $2`,
         [idProducto, limite],
       );
     } else {
       rows = await this.manager.query(
-        `SELECT * FROM vw_catalogo c
+        `SELECT * FROM ${FUENTE_CATALOGO}
          WHERE c.id_categoria = $1 AND c.id_producto <> $2 AND COALESCE(c.estado, TRUE) = TRUE
          ORDER BY c.destacado DESC, c.id_producto DESC LIMIT $3`,
         [idCategoria, idProducto, limite],
@@ -235,11 +315,12 @@ export class CatalogoRepository {
     );
   }
 
+  /** Mismo precio final que el catálogo, sin pasar por stock ni reseñas. */
   async obtenerRangoPrecios(): Promise<{ min: number; max: number }> {
     const rows = await this.manager.query(
-      `SELECT COALESCE(MIN(precio_final), 0)::NUMERIC AS min,
-              COALESCE(MAX(precio_final), 0)::NUMERIC AS max
-       FROM vw_catalogo WHERE COALESCE(estado, TRUE) = TRUE`,
+      `SELECT COALESCE(MIN(round(precio_venta - COALESCE(descuento, 0::numeric), 2)), 0)::NUMERIC AS min,
+              COALESCE(MAX(round(precio_venta - COALESCE(descuento, 0::numeric), 2)), 0)::NUMERIC AS max
+       FROM productos WHERE COALESCE(estado, TRUE) = TRUE`,
     );
     return { min: Number(rows[0]?.min ?? 0), max: Number(rows[0]?.max ?? 0) };
   }
@@ -264,65 +345,22 @@ export class CatalogoRepository {
     );
   }
 
+  /** Vigencia por día de Lima: con CURRENT_DATE (UTC) los banners cambiaban a las 19:00. */
   async obtenerBanners(): Promise<any[]> {
     return this.manager.query(
       `SELECT id_banner, titulo, subtitulo, etiqueta, imagen_url, cta_texto, cta_url
        FROM banners
        WHERE COALESCE(activo, TRUE) = TRUE
-         AND (fecha_inicio IS NULL OR fecha_inicio <= CURRENT_DATE)
-         AND (fecha_fin    IS NULL OR fecha_fin    >= CURRENT_DATE)
+         AND (fecha_inicio IS NULL OR fecha_inicio <= ${SQL_HOY_LIMA})
+         AND (fecha_fin    IS NULL OR fecha_fin    >= ${SQL_HOY_LIMA})
        ORDER BY COALESCE(orden, 0) ASC, id_banner ASC`,
     );
   }
 
-  async obtenerStockTotal(idProducto: number): Promise<number> {
-    const politica = await this.politicaStockWeb();
-    if (politica.exclusivo && politica.idAlmacen) {
-      const rows = await this.manager.query(
-        `SELECT COALESCE(stock, 0)::INTEGER AS stock
-           FROM inventario
-          WHERE id_producto = $1 AND id_almacen = $2
-          LIMIT 1`,
-        [idProducto, politica.idAlmacen],
-      );
-      return Number(rows[0]?.stock ?? 0);
-    }
-
-    const rows = await this.manager.query(
-      'SELECT COALESCE(stock_total, 0)::INTEGER AS stock FROM vw_producto_stock WHERE id_producto = $1',
-      [idProducto],
-    );
-    return Number(rows[0]?.stock ?? 0);
-  }
-
-  /** Fase 6 / D2: exclusivo si hay tienda_id_almacen y modo ≠ spillover. */
-  private async politicaStockWeb(): Promise<{ exclusivo: boolean; idAlmacen?: number }> {
-    const filas = await this.manager.query(
-      `SELECT clave, valor FROM configuraciones
-        WHERE clave IN ('tienda_stock_modo', 'tienda_id_almacen')`,
-    );
-    const mapa = new Map<string, string>();
-    for (const f of filas ?? []) {
-      if (f.valor !== undefined && f.valor !== null && String(f.valor).trim() !== '') {
-        mapa.set(String(f.clave), String(f.valor));
-      }
-    }
-    const modo = (mapa.get('tienda_stock_modo') ?? 'exclusivo').toLowerCase();
-    const idAlmacen = Number(mapa.get('tienda_id_almacen'));
-    const almacenOk = Number.isFinite(idAlmacen) && idAlmacen > 0 ? idAlmacen : undefined;
-    return {
-      exclusivo: modo !== 'spillover' && almacenOk != null,
-      idAlmacen: almacenOk,
-    };
-  }
-
-  /** Sustituye el stock SUM del catálogo por el del almacén de despacho web. */
-  private async aplicarStockTienda(
-    rows: any[],
-    politica?: { exclusivo: boolean; idAlmacen?: number },
-  ): Promise<any[]> {
+  /** Sustituye el stock total del catálogo por el del almacén de despacho web. */
+  private async aplicarStockTienda(rows: any[], politica?: PoliticaStockTienda): Promise<any[]> {
     if (!rows?.length) return rows ?? [];
-    const pol = politica ?? (await this.politicaStockWeb());
+    const pol = politica ?? (await this.stockRepo.politicaStock());
     if (!pol.exclusivo || !pol.idAlmacen) return rows;
 
     const ids = rows.map((r) => Number(r.id_producto)).filter((id) => Number.isFinite(id));

@@ -48,10 +48,12 @@ export class ClienteRepository extends CrudRepository<Cliente> implements IClien
     });
   }
 
+  /** Si quedó más de un cliente para la cuenta (antes de uq_clientes_usuario), siempre el más antiguo. */
   async buscarPorUsuario(id_usuario: number): Promise<Cliente | null> {
     return this.clienteRepo.findOne({
       where: { usuario: { id_usuario } } as any,
       relations: ['documento', 'usuario'],
+      order: { id_cliente: 'ASC' },
     });
   }
 

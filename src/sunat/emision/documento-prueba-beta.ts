@@ -2,6 +2,7 @@ import { calcularComprobante } from '../../util/fiscal/calculo-fiscal';
 import type { EmisorFiscal } from '../config/fiscal-config.tipos';
 import type { DocumentoCpe } from '../nucleo/documento-fiscal.types';
 import { construirLineaCpe, totalesCpeDesdeLineas } from '../nucleo/linea-cpe';
+import { SERIES_BETA } from './emision.tipos';
 
 /** Documento identificado como prueba; los importes los calcula el mismo motor del POS. */
 export function crearDocumentoPruebaBeta(
@@ -45,7 +46,7 @@ export function crearDocumentoPruebaBeta(
   }).format(ahora);
   return {
     tipo,
-    serie: tipo === '01' ? 'FB01' : 'BB01',
+    serie: tipo === '01' ? SERIES_BETA.factura : SERIES_BETA.boleta,
     numero,
     fechaEmision: fecha,
     horaEmision: hora,

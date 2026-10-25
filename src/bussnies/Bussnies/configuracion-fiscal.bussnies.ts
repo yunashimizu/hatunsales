@@ -1,82 +1,102 @@
-import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
+import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import {
   CLAVES_EMISOR,
   CLAVE_CONDICIONES_PROFORMA,
-  CLAVES_SERIES,
-  SERIES_POR_DEFECTO,
   emisorConfig,
 } from '../../config/emisor.config';
-import {
-  TIPO_BOLETA,
-  TIPO_FACTURA,
-  normalizarSerie,
-  seriePorDefecto,
-} from '../../util/fiscal/nubefact.catalogo';
+import { TIPO_BOLETA, TIPO_FACTURA } from '../../util/fiscal/tipos-comprobante';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { whatsappCloudListo } from '../../config/whatsapp.config';
 import { FiscalConfigService } from '../../sunat/config/fiscal-config.service';
-import { CLAVES_EMISOR_FISCAL } from '../../sunat/config/fiscal-config.tipos';
+import { CLAVES_EMISOR_FISCAL, SERIES_FISCALES_POR_DEFECTO } from '../../sunat/config/fiscal-config.tipos';
 import { NotificadorCambiosFiscales } from '../../sunat/config/notificador-cambios-fiscales';
 import { partirUbicacion } from '../../sunat/config/snapshot-config-fiscal';
-import { PosBetaService } from '../../sunat/emision/pos-beta.service';
+import { EmisionDirecta } from '../../sunat/emision/emision.contrato';
+import type { ContextoEmision } from '../../sunat/emision/emision.contrato';
+
+/** Series que muestra el POS (solo lectura) y en qué estado está la emisión. */
+export interface SeriesPosResponse {
+  serie_boleta: string;
+  serie_factura: string;
+  por_tipo: Record<number, string>;
+  editable_en_pos: false;
+  /** Las series salen de la configuración fiscal (Facturación SUNAT), no de una clave suelta. */
+  fuente: 'fiscal';
+  ambiente: 'beta' | 'produccion';
+  emision_activa: boolean;
+  /** Compatibilidad con el POS: emisión activa en el ambiente de pruebas. */
+  beta_pos_directo: boolean;
+  /** Código del motivo cuando la emisión no está activa. */
+  codigo?: string;
+  aviso: string | null;
+  mensaje: string;
+}
 
 @Injectable()
 export class ConfiguracionFiscalBussnies {
+  private readonly logger = new Logger(ConfiguracionFiscalBussnies.name);
+
   constructor(
     private readonly config: ConfiguracionRepository,
     private readonly fiscal: FiscalConfigService,
     private readonly cambiosFiscales: NotificadorCambiosFiscales,
-    private readonly posBeta: PosBetaService,
+    private readonly emision: EmisionDirecta,
   ) {}
 
-  /** Series efectivas para el POS (solo lectura en mostrador). */
-  async seriesPos() {
-    const betaPos = await this.posBeta.activoEnBeta();
-    const serieBoleta = betaPos ? 'BB01' : await this.serieEfectiva(TIPO_BOLETA);
-    const serieFactura = betaPos ? 'FB01' : await this.serieEfectiva(TIPO_FACTURA);
+  /**
+   * Series efectivas para el POS (solo lectura en mostrador) y el estado de la emisión. Nunca
+   * falla porque la emisión esté inactiva: lo informa en `mensaje` (la venta se registra igual).
+   */
+  async seriesPos(): Promise<SeriesPosResponse> {
+    const modo = await this.emision.modo();
+    let contexto: ContextoEmision | null = null;
+    try {
+      contexto = await this.emision.contexto();
+    } catch (error) {
+      if (modo.activo) {
+        this.logger.warn(`No se pudo leer el contexto de emisión: ${(error as Error)?.message ?? error}`);
+      }
+    }
+    const series = contexto?.series ?? (await this.seriesConfiguradas());
+    const ambiente = contexto?.ambiente ?? modo.ambiente;
+
     return {
-      serie_boleta: serieBoleta,
-      serie_factura: serieFactura,
+      serie_boleta: series.boleta,
+      serie_factura: series.factura,
       por_tipo: {
-        [TIPO_BOLETA]: serieBoleta,
-        [TIPO_FACTURA]: serieFactura,
+        [TIPO_BOLETA]: series.boleta,
+        [TIPO_FACTURA]: series.factura,
       },
       editable_en_pos: false,
-      beta_pos_directo: betaPos,
-      mensaje: betaPos
-        ? 'Prueba SUNAT BETA activa: el POS usará el emisor BETA y las series FB01/BB01. No tiene validez tributaria.'
-        : 'Emisión directa SUNAT BETA desactivada. Las ventas con comprobante no se enviarán a ningún proveedor alternativo.',
+      fuente: 'fiscal',
+      ambiente,
+      emision_activa: modo.activo,
+      beta_pos_directo: modo.activo && modo.ambiente === 'beta',
+      ...(modo.activo ? {} : { codigo: modo.codigo }),
+      aviso: contexto?.aviso ?? null,
+      mensaje: modo.activo
+        ? ambiente === 'beta'
+          ? `${contexto?.aviso ?? 'Prueba SUNAT BETA: sin validez tributaria.'} Series ${series.factura} (factura) y ${series.boleta} (boleta).`
+          : `Emisión electrónica activa en SUNAT (producción): series ${series.factura} (factura) y ${series.boleta} (boleta).`
+        : `La emisión electrónica no está activa: ${modo.motivo}. Las ventas se registran sin comprobante y se puede emitir después desde Ventas.`,
     };
   }
 
-  /**
-   * Serie configurada + normalizada para el tipo.
-   * El POS y la emisión usan esta fuente (no localStorage).
-   */
-  async serieEfectiva(idTipo: number): Promise<string> {
-    if (idTipo === TIPO_FACTURA) {
-      const cfg = await this.config.obtenerTexto(
-        CLAVES_SERIES.factura,
-        SERIES_POR_DEFECTO.factura,
-      );
-      return normalizarSerie(cfg, TIPO_FACTURA);
+  /** Series de producción configuradas; si ni eso se puede leer, las de fábrica (solo para mostrar). */
+  private async seriesConfiguradas(): Promise<{ factura: string; boleta: string }> {
+    try {
+      const series = await this.fiscal.series();
+      return { factura: series.factura, boleta: series.boleta };
+    } catch (error) {
+      this.logger.warn(`No se pudieron leer las series fiscales configuradas: ${(error as Error)?.message ?? error}`);
+      return { factura: SERIES_FISCALES_POR_DEFECTO.factura, boleta: SERIES_FISCALES_POR_DEFECTO.boleta };
     }
-    if (idTipo === TIPO_BOLETA) {
-      const cfg = await this.config.obtenerTexto(
-        CLAVES_SERIES.boleta,
-        SERIES_POR_DEFECTO.boleta,
-      );
-      return normalizarSerie(cfg, TIPO_BOLETA);
-    }
-    return seriePorDefecto(idTipo);
   }
 
   async obtenerAdmin() {
     const claves = [
       ...CLAVES_EMISOR,
-      CLAVES_SERIES.boleta,
-      CLAVES_SERIES.factura,
       CLAVE_CONDICIONES_PROFORMA,
       'caja_modo',
     ];
@@ -98,9 +118,13 @@ export class ConfiguracionFiscalBussnies {
       proforma: {
         condiciones: valores[CLAVE_CONDICIONES_PROFORMA] ?? '',
       },
+      // Solo lectura: se configuran en Facturación SUNAT (las del ambiente vigente).
       series: {
         serie_boleta: series.serie_boleta,
         serie_factura: series.serie_factura,
+        editable: false,
+        fuente: series.fuente,
+        mensaje: 'Las series se configuran en Facturación SUNAT (configuración fiscal).',
       },
       estados: {
         whatsapp_cloud: whatsappCloudListo(),
@@ -109,6 +133,7 @@ export class ConfiguracionFiscalBussnies {
         proveedor_fiscal: fiscal.proveedor,
         ambiente_fiscal: fiscal.ambiente,
         sunat_directo_listo: fiscal.listo,
+        emision_activa: series.emision_activa,
       },
     };
   }
@@ -136,6 +161,10 @@ export class ConfiguracionFiscalBussnies {
     }
   }
 
+  /**
+   * Guarda emisor y condiciones de la proforma. `series` se acepta por compatibilidad con el
+   * panel anterior y se ignora: las series de emisión se configuran en Facturación SUNAT.
+   */
   async guardarAdmin(body: {
     emisor?: {
       ruc?: string;
@@ -195,43 +224,9 @@ export class ConfiguracionFiscalBussnies {
       );
     }
 
-    if (body.series?.serie_boleta != null) {
-      const s = this.validarSerieGuardar(body.series.serie_boleta, TIPO_BOLETA);
-      await this.config.guardar(CLAVES_SERIES.boleta, s);
-    }
-    if (body.series?.serie_factura != null) {
-      const s = this.validarSerieGuardar(body.series.serie_factura, TIPO_FACTURA);
-      await this.config.guardar(CLAVES_SERIES.factura, s);
-    }
-
     this.config.limpiarCache();
     // El emisor también lo usa SUNAT directo: su caché (y la del estado) se renuevan al instante.
     this.cambiosFiscales.notificar('config');
     return this.obtenerAdmin();
-  }
-
-  private validarSerieGuardar(serie: string, idTipo: number): string {
-    const normalizada = normalizarSerie(serie, idTipo);
-    const limpia = (serie ?? '').toString().trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (limpia.length !== 4) {
-      throw new BadRequestException(
-        cuerpoError(
-          CodigoError.SERIE_INVALIDA,
-          'La serie debe tener 4 caracteres (por ejemplo, BBB1 o FFF1).',
-        ),
-      );
-    }
-    const esperado = idTipo === TIPO_FACTURA ? 'F' : 'B';
-    if (limpia[0] !== esperado) {
-      throw new BadRequestException(
-        cuerpoError(
-          CodigoError.SERIE_INVALIDA,
-          idTipo === TIPO_FACTURA
-            ? 'La serie de factura debe empezar con F (ej. FFF1).'
-            : 'La serie de boleta debe empezar con B (ej. BBB1).',
-        ),
-      );
-    }
-    return normalizada;
   }
 }

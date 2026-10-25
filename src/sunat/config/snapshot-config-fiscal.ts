@@ -2,12 +2,16 @@ import { emisorConfig } from '../../config/emisor.config';
 import {
   AMBIENTES_FISCALES,
   AmbienteFiscal,
+  BloqueoEmision,
+  CLAVES_BLOQUEO_EMISION,
   CLAVES_CONFIG_FISCAL,
+  CLAVES_CONFIRMACIONES_ACTIVACION,
   CLAVES_EMISOR_FISCAL,
   CLAVES_GRE_FISCAL,
   CLAVES_SERIES_FISCALES,
   CODIGO_ESTABLECIMIENTO_POR_DEFECTO,
   ConfigGreFiscal,
+  ConfirmacionesActivacion,
   ConfirmacionNoOse,
   CORRELATIVO_MAXIMO,
   EmisorFiscal,
@@ -15,6 +19,7 @@ import {
   MODOS_REGLAS_2027,
   PATRON_CODIGO_ESTABLECIMIENTO,
   PATRON_SERIE,
+  PATRON_SERIE_CPE,
   PATRON_UBIGEO,
   PROVEEDORES_FISCALES,
   SERIES_FISCALES_POR_DEFECTO,
@@ -155,6 +160,76 @@ function leerGre(valores: Valores, series: SeriesFiscales, emisor: EmisorFiscal)
   };
 }
 
+/** Ambiente guardado o, si no es válido, el que dan las variables de entorno. */
+export function leerAmbiente(valor: string | null | undefined, porDefecto: AmbienteFiscal): AmbienteFiscal {
+  const limpio = (valor ?? '').trim();
+  return opcion(limpio ? limpio : null, AMBIENTES_FISCALES, porDefecto);
+}
+
+/**
+ * Correlativo inicial por serie (D2): {"F001": 120}. Solo series de comprobante con enteros de 1 a
+ * CORRELATIVO_MAXIMO; una entrada mal escrita se ignora (esa serie empieza en MAX + 1, como siempre).
+ */
+export function leerCorrelativoInicialCpe(valor: string | null | undefined): Record<string, number> {
+  if (!valor) return {};
+  let dato: unknown;
+  try {
+    dato = JSON.parse(valor);
+  } catch {
+    return {};
+  }
+  if (!dato || typeof dato !== 'object' || Array.isArray(dato)) return {};
+  const resultado: Record<string, number> = {};
+  for (const [clave, numero] of Object.entries(dato as Record<string, unknown>)) {
+    const serie = clave.trim().toUpperCase();
+    const entero = typeof numero === 'string' && /^\d{1,9}$/.test(numero.trim()) ? Number(numero) : numero;
+    if (PATRON_SERIE_CPE.test(serie) && Number.isSafeInteger(entero) && (entero as number) >= 1 && (entero as number) <= CORRELATIVO_MAXIMO) {
+      resultado[serie] = entero as number;
+    }
+  }
+  return resultado;
+}
+
+const MOTIVO_BLOQUEO_DESCONOCIDO =
+  'La emisión quedó detenida por un rechazo de SUNAT a la credencial SOL o al certificado. Revise ambos y reanude la emisión desde el panel.';
+
+/**
+ * Interruptor del ambiente (D5.4). Vacío o un «false» explícito = emisión normal. Cualquier otro valor
+ * cuenta como detenido (ante la duda no se llama a SUNAT con una credencial que ya rechazó).
+ */
+export function leerBloqueoEmision(valor: string | null | undefined): BloqueoEmision | null {
+  const limpio = (valor ?? '').trim();
+  if (!limpio || ['false', '0', 'no', 'off'].includes(limpio.toLowerCase())) return null;
+  try {
+    const dato = JSON.parse(limpio);
+    if (dato && typeof dato === 'object' && !Array.isArray(dato)) {
+      return {
+        codigo: typeof dato.codigo === 'string' ? dato.codigo : String(dato.codigo ?? ''),
+        motivo: typeof dato.motivo === 'string' && dato.motivo.trim() ? dato.motivo : MOTIVO_BLOQUEO_DESCONOCIDO,
+        fecha: typeof dato.fecha === 'string' ? dato.fecha : '',
+      };
+    }
+  } catch {
+    // Texto libre escrito a mano: se trata como detenido con el motivo genérico.
+  }
+  return { codigo: '', motivo: MOTIVO_BLOQUEO_DESCONOCIDO, fecha: '' };
+}
+
+/** Las banderas que habilitan emitir solo cuentan con el 'true' exacto que escribe el panel. */
+function marcado(valores: Valores, clave: string): boolean {
+  return texto(valores, clave) === 'true';
+}
+
+function leerConfirmaciones(valores: Valores): ConfirmacionesActivacion {
+  const c = CLAVES_CONFIRMACIONES_ACTIVACION;
+  return {
+    emisorElectronicoSol: marcado(valores, c.emisorElectronicoSol),
+    certificadoEnSol: marcado(valores, c.certificadoEnSol),
+    usuarioSolSecundario: marcado(valores, c.usuarioSolSecundario),
+    rucHabido: marcado(valores, c.rucHabido),
+  };
+}
+
 /** Solo cuenta una confirmación explícita hecha desde el panel (JSON con fecha). */
 export function leerConfirmacion(valor: string | null): ConfirmacionNoOse | null {
   if (!valor) return null;
@@ -178,9 +253,11 @@ export function construirSnapshot(valores: Valores, defectos: DefectosEntornoFis
   const series = Object.freeze(leerSeries(valores, defectos));
   const emisor = Object.freeze(leerEmisor(valores, defectos));
 
+  const correlativoInicial = texto(valores, CLAVES_CONFIG_FISCAL.correlativoInicialCpe);
+
   return Object.freeze({
     proveedor: opcion(texto(valores, CLAVES_CONFIG_FISCAL.proveedor), PROVEEDORES_FISCALES, 'nubefact'),
-    ambiente: opcion(texto(valores, CLAVES_CONFIG_FISCAL.ambiente), AMBIENTES_FISCALES, defectos.ambiente),
+    ambiente: leerAmbiente(texto(valores, CLAVES_CONFIG_FISCAL.ambiente), defectos.ambiente),
     boletasModo: opcion(texto(valores, CLAVES_CONFIG_FISCAL.boletasModo), MODOS_BOLETAS, 'individual'),
     envioEnLinea: booleano(texto(valores, CLAVES_CONFIG_FISCAL.envioEnLinea), true),
     tareasActivas: booleano(texto(valores, CLAVES_CONFIG_FISCAL.tareasActivas), true),
@@ -191,5 +268,14 @@ export function construirSnapshot(valores: Valores, defectos: DefectosEntornoFis
     confirmacionNoOse: leerConfirmacion(texto(valores, CLAVES_CONFIG_FISCAL.confirmacionNoOse)),
     reglas2027: opcion(texto(valores, CLAVES_CONFIG_FISCAL.reglas2027), MODOS_REGLAS_2027, 'auto'),
     gre: Object.freeze(leerGre(valores, series, emisor)),
+    posBetaActivo: marcado(valores, CLAVES_CONFIG_FISCAL.posBetaActivo),
+    correlativoInicialCpe: Object.freeze(leerCorrelativoInicialCpe(correlativoInicial)),
+    correlativoInicialRevisado: correlativoInicial !== null,
+    certRucConfirmadoProduccion: marcado(valores, CLAVES_CONFIG_FISCAL.certRucConfirmadoProduccion),
+    confirmaciones: Object.freeze(leerConfirmaciones(valores)),
+    bloqueos: Object.freeze({
+      beta: leerBloqueoEmision(texto(valores, CLAVES_BLOQUEO_EMISION.beta)),
+      produccion: leerBloqueoEmision(texto(valores, CLAVES_BLOQUEO_EMISION.produccion)),
+    }),
   });
 }

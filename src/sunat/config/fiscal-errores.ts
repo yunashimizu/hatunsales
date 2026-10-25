@@ -9,7 +9,24 @@ import { CodigoErrorTipo } from '../../util/errores-operativos';
  * ya usa el resto del API: `{ statusCode, message, codigo, ...detalle }`.
  */
 
-export type CodigoFiscal = Extract<CodigoErrorTipo, `FISCAL_${string}`>;
+/**
+ * Códigos de la emisión directa en BETA y PRODUCCIÓN (PLAN V3). Viven aquí porque el catálogo general
+ * (util/errores-operativos.ts) es de otro módulo; el filtro global los serializa igual (usa estadoHttp).
+ */
+export const CODIGOS_FISCALES_EMISION = [
+  'FISCAL_CERT_RUC_SIN_CONFIRMAR',
+  'FISCAL_SOL_RUC_NO_COINCIDE',
+  'FISCAL_AMBIENTE_CAMBIO',
+  'FISCAL_NUMERO_OCUPADO',
+  'FISCAL_CONSULTA_NO_DISPONIBLE',
+  'FISCAL_CONFIRMACION_NO_PERMITIDA',
+  'FISCAL_BETA_POS_APAGADO',
+  'FISCAL_EMISION_INACTIVA',
+  'FISCAL_EMISION_BLOQUEADA',
+  'FISCAL_LECTURA_ERROR',
+] as const;
+
+export type CodigoFiscal = Extract<CodigoErrorTipo, `FISCAL_${string}`> | (typeof CODIGOS_FISCALES_EMISION)[number];
 
 const ESTADO_HTTP: Record<CodigoFiscal, number> = {
   FISCAL_CERT_FORMATO_INVALIDO: HttpStatus.BAD_REQUEST,
@@ -46,6 +63,17 @@ const ESTADO_HTTP: Record<CodigoFiscal, number> = {
   FISCAL_MIGRACION_PENDIENTE: HttpStatus.SERVICE_UNAVAILABLE,
   // Informativo (resultado de emisión); si llegara a lanzarse, es un conflicto de negocio.
   FISCAL_SUNAT_RECHAZO: HttpStatus.CONFLICT,
+  // Emisión directa multi-ambiente.
+  FISCAL_CERT_RUC_SIN_CONFIRMAR: HttpStatus.UNPROCESSABLE_ENTITY,
+  FISCAL_SOL_RUC_NO_COINCIDE: HttpStatus.UNPROCESSABLE_ENTITY,
+  FISCAL_AMBIENTE_CAMBIO: HttpStatus.CONFLICT,
+  FISCAL_NUMERO_OCUPADO: HttpStatus.CONFLICT,
+  FISCAL_CONSULTA_NO_DISPONIBLE: HttpStatus.CONFLICT,
+  FISCAL_CONFIRMACION_NO_PERMITIDA: HttpStatus.CONFLICT,
+  FISCAL_BETA_POS_APAGADO: HttpStatus.SERVICE_UNAVAILABLE,
+  FISCAL_EMISION_INACTIVA: HttpStatus.SERVICE_UNAVAILABLE,
+  FISCAL_EMISION_BLOQUEADA: HttpStatus.SERVICE_UNAVAILABLE,
+  FISCAL_LECTURA_ERROR: HttpStatus.SERVICE_UNAVAILABLE,
 };
 
 /** Campos que el detalle nunca puede pisar en el cuerpo HTTP. */
@@ -99,7 +127,7 @@ export const ErroresFiscales = {
   migracionPendiente(faltantes: readonly string[]): FiscalConfigError {
     return new FiscalConfigError(
       'FISCAL_MIGRACION_PENDIENTE',
-      'Falta ejecutar sql/fase9_sunat_directo.sql en la base de datos. Mientras tanto se sigue emitiendo con Nubefact.',
+      'Falta ejecutar sql/fase9_sunat_directo.sql en la base de datos. Mientras tanto las ventas se registran sin comprobante electrónico.',
       { faltantes: [...faltantes] },
     );
   },

@@ -1,10 +1,12 @@
 import { sign, verify, X509Certificate } from 'crypto';
 import { FiscalAuditoriaRepository } from '../auditoria/fiscal-auditoria.repository';
+import { RepositorioConfigFiscal } from '../config/config-fiscal.repository';
 import { snapshotPrueba, VALORES_COMPLETOS } from '../config/configuracion.prueba-spec';
 import { FiscalConfigError } from '../config/fiscal-errores';
 import { FiscalConfigService } from '../config/fiscal-config.service';
 import { AmbienteFiscal, SnapshotConfigFiscal } from '../config/fiscal-config.tipos';
 import { FiscalEsquemaService } from '../config/fiscal-esquema.service';
+import { InterruptorEmisionFiscal } from '../config/interruptor-emision.service';
 import { NotificadorCambiosFiscales } from '../config/notificador-cambios-fiscales';
 import { RelojFiscal } from '../config/reloj-fiscal';
 import { EjecutorSql, TransaccionesFiscales } from '../config/transacciones-fiscales';
@@ -94,7 +96,15 @@ class RelojManual extends RelojFiscal {
   }
 }
 
-function crear(opciones: { llave?: { actual?: string; anterior?: string }; repo?: RepositorioCertificadosMemoria; snapshot?: SnapshotConfigFiscal } = {}) {
+function crear(
+  opciones: {
+    llave?: { actual?: string; anterior?: string };
+    repo?: RepositorioCertificadosMemoria;
+    snapshot?: SnapshotConfigFiscal;
+    /** Claves de configuraciones (interruptor de emisión, confirmación del RUC…). */
+    configuraciones?: Record<string, string>;
+  } = {},
+) {
   const repo = opciones.repo ?? new RepositorioCertificadosMemoria();
   let snapshot = opciones.snapshot ?? snapshotPrueba({ ...VALORES_COMPLETOS, fiscal_ambiente: 'beta' });
   const config = {
@@ -109,6 +119,21 @@ function crear(opciones: { llave?: { actual?: string; anterior?: string }; repo?
   };
   const reloj = new RelojManual();
   const notificador = new NotificadorCambiosFiscales();
+  const valoresConfig: Record<string, string> = { ...(opciones.configuraciones ?? {}) };
+  const configuraciones = {
+    leer: async (claves: readonly string[]) => Object.fromEntries(claves.map((c) => [c, valoresConfig[c] || null])),
+    guardar: async (pares: Record<string, string>) => {
+      Object.assign(valoresConfig, pares);
+    },
+  } as unknown as RepositorioConfigFiscal;
+  const interruptor = new InterruptorEmisionFiscal(
+    configuraciones,
+    transacciones,
+    auditoria as unknown as FiscalAuditoriaRepository,
+    notificador,
+    config,
+    reloj,
+  );
   const servicio = new CertificadoFiscalService(
     repo,
     new CifradoFiscalService(opciones.llave ?? { actual: LLAVE_PRUEBA }),
@@ -120,6 +145,8 @@ function crear(opciones: { llave?: { actual?: string; anterior?: string }; repo?
     notificador,
     { obtener: jest.fn() } as unknown as CredencialesSolService,
     { obtener: jest.fn() } as unknown as CredencialesGreService,
+    configuraciones,
+    interruptor,
   );
   return {
     servicio,
@@ -128,6 +155,7 @@ function crear(opciones: { llave?: { actual?: string; anterior?: string }; repo?
     consultas,
     reloj,
     notificador,
+    valoresConfig,
     cambiarSnapshot: (s: SnapshotConfigFiscal) => (snapshot = s),
   };
 }
@@ -307,6 +335,42 @@ describe('CertificadoFiscalService', () => {
     expect(repo.recifrados).toEqual([1]);
     const soloNueva = crear({ repo, llave: { actual: LLAVE_PRUEBA } }).servicio;
     expect((await soloNueva.estadoParaChecklist()).produccion?.legible).toBe(true);
+  });
+
+  it('un certificado nuevo reanuda la emisión detenida de SU ambiente y retira la confirmación del RUC del anterior', async () => {
+    const bloqueo = JSON.stringify({ codigo: '2325', motivo: 'El certificado no está registrado en SOL.', fecha: '2026-10-20T10:00:00.000Z' });
+    const { servicio, valoresConfig, auditoria, notificador } = crear({
+      configuraciones: {
+        fiscal_emision_bloqueada_produccion: bloqueo,
+        fiscal_emision_bloqueada_beta: bloqueo,
+        fiscal_cert_ruc_confirmado_produccion: 'true',
+      },
+    });
+    const avisos: string[] = [];
+    notificador.suscribir((tipo) => avisos.push(tipo));
+
+    await servicio.subir({ buffer: pfxConCadena(CLAVE).contenido, originalname: 'cdt.pfx' }, CLAVE, {}, ACTOR);
+
+    expect(valoresConfig.fiscal_emision_bloqueada_produccion).toBe('');
+    expect(valoresConfig.fiscal_cert_ruc_confirmado_produccion).toBe('');
+    expect(valoresConfig.fiscal_emision_bloqueada_beta).toBe(bloqueo);
+    const acciones = auditoria.registrar.mock.calls.map((c) => (c as unknown as [{ accion: string }])[0].accion);
+    expect(acciones).toEqual(['CERT_SUBIDO', 'CERT_RUC_CONFIRMACION_RETIRADA', 'EMISION_REANUDADA']);
+    expect(avisos).toEqual(expect.arrayContaining(['certificado', 'config']));
+  });
+
+  it('un certificado de BETA solo toca el interruptor de BETA (no la confirmación de producción)', async () => {
+    const bloqueo = JSON.stringify({ codigo: '0102', motivo: 'x', fecha: '2026-10-20T10:00:00.000Z' });
+    const { servicio, valoresConfig, auditoria } = crear({
+      configuraciones: { fiscal_emision_bloqueada_beta: bloqueo, fiscal_cert_ruc_confirmado_produccion: 'true' },
+    });
+    await servicio.subir({ buffer: pfxAutofirmado({ clave: 'beta1234' }), originalname: 'prueba.p12' }, 'beta1234', {}, ACTOR);
+    expect(valoresConfig.fiscal_emision_bloqueada_beta).toBe('');
+    expect(valoresConfig.fiscal_cert_ruc_confirmado_produccion).toBe('true');
+    expect(auditoria.registrar.mock.calls.map((c) => (c as unknown as [{ accion: string }])[0].accion)).toEqual([
+      'CERT_SUBIDO',
+      'EMISION_REANUDADA',
+    ]);
   });
 
   it('nunca entrega un certificado vencido', async () => {

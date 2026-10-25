@@ -46,10 +46,50 @@ describe('checklist de activación por tipo de documento', () => {
     expect(ilegible.checklist.cpe.items.find((i) => i.codigo === 'certificado_produccion')?.detalle).toMatch(/FISCAL_SECRET_KEY/);
   });
 
-  it('sin RUC en el certificado no bloquea: solo advierte', () => {
-    const resultado = evaluarPreparacion(hechosPrueba({ certificados: { beta: null, produccion: certificadoPrueba({ ruc: null }) } }));
-    expect(resultado.listo).toBe(true);
-    expect(resultado.advertencias.join(' ')).toMatch(/No se encontró el RUC/);
+  it('sin RUC en el certificado exige la confirmación del administrador (D1)', () => {
+    const sinRuc = { beta: null, produccion: certificadoPrueba({ ruc: null }) };
+    const pendiente = evaluarPreparacion(hechosPrueba({ certificados: sinRuc }));
+    expect(pendiente.listo).toBe(false);
+    expect(pendiente.faltantes).toEqual(['cert_ruc_confirmado']);
+    expect(pendiente.checklist.cpe.items.find((i) => i.codigo === 'cert_ruc_confirmado')?.detalle).toMatch(/20610206337/);
+
+    const confirmado = evaluarPreparacion(
+      hechosPrueba({ certificados: sinRuc, snapshot: snapshotPrueba({ ...VALORES_COMPLETOS, fiscal_cert_ruc_confirmado_produccion: 'true' }) }),
+    );
+    expect(confirmado.listo).toBe(true);
+  });
+
+  it('pide las 4 confirmaciones de SOL y el correlativo inicial revisado, con la acción a seguir', () => {
+    const resultado = evaluarPreparacion(
+      hechosPrueba({
+        snapshot: snapshotPrueba({
+          ...VALORES_COMPLETOS,
+          fiscal_confirma_emisor_electronico_sol: '',
+          fiscal_confirma_certificado_en_sol: 'si',
+          fiscal_confirma_usuario_sol_secundario: '',
+          fiscal_confirma_ruc_habido: '',
+          fiscal_cpe_correlativo_inicial: '',
+        }),
+      }),
+    );
+    expect(resultado.faltantes).toEqual([
+      'correlativo_inicial',
+      'confirmacion.emisor_electronico_sol',
+      'confirmacion.certificado_en_sol',
+      'confirmacion.usuario_sol_secundario',
+      'confirmacion.ruc_habido',
+    ]);
+    const item = resultado.checklist.cpe.items.find((i) => i.codigo === 'confirmacion.certificado_en_sol');
+    expect(item?.accion).toMatch(/Actualización de certificado digital/);
+    expect(resultado.checklist.cpe.items.find((i) => i.codigo === 'correlativo_inicial')?.accion).toMatch(/primer número libre/);
+  });
+
+  it('las advertencias ya no hablan de Nubefact', () => {
+    const resultado = evaluarPreparacion(
+      hechosPrueba({ snapshot: snapshotPrueba({ ...VALORES_COMPLETOS, fiscal_proveedor: 'sunat_directo', fiscal_ambiente: 'beta' }) }),
+    );
+    expect(resultado.advertencias.join(' ')).toMatch(/BETA/);
+    expect(resultado.advertencias.join(' ')).not.toMatch(/Nubefact/i);
   });
 
   it('avisa si el certificado vence en 30 días o menos', () => {

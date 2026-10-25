@@ -129,8 +129,18 @@ export interface DocumentoCpe {
 /**
  * Lo que SUNAT dijo sobre una consulta de estado (billConsultService o
  * getStatus de un ticket) cuando la respuesta no trae la constancia (CDR).
+ * CONSULTA_INVALIDA: los datos consultados no son válidos o el servicio no admite ese
+ * tipo o serie (0004–0007, 0009, 0010). NO_AUTORIZADO: el RUC no está inscrito o el
+ * comprobante no pertenece al usuario SOL (0008, 0012). Repetir la consulta no cambia ninguno de los dos.
  */
-export type EstadoComprobanteSunat = 'ACEPTADO' | 'RECHAZADO' | 'DE_BAJA' | 'NO_EXISTE' | 'DESCONOCIDO';
+export type EstadoComprobanteSunat =
+  | 'ACEPTADO'
+  | 'RECHAZADO'
+  | 'DE_BAJA'
+  | 'NO_EXISTE'
+  | 'CONSULTA_INVALIDA'
+  | 'NO_AUTORIZADO'
+  | 'DESCONOCIDO';
 
 export interface ObservacionSunat {
   codigo: string;
@@ -145,7 +155,9 @@ export interface ObservacionSunat {
  *    `codigo` = statusCode y `estadoComprobante` su significado.
  *  - FAULT: SOAP Fault (excepción o rechazo); `codigo` = 4 dígitos normalizados.
  *  - TRANSPORTE: red, timeout, HTTP sin Fault o respuesta ilegible.
- *  - NO_DISPONIBLE: la operación no existe en el ambiente (consultas en BETA).
+ *  - NO_DISPONIBLE: la operación no existe en el ambiente (consultas en BETA) o para ese
+ *    documento (getStatusCdr/getStatus solo admiten facturas y sus notas de serie F; codigo
+ *    CONSULTA_NO_ADMITIDA). No se llamó a SUNAT.
  */
 export interface RespuestaSunat {
   tipo: 'CDR' | 'TICKET' | 'ESTADO' | 'FAULT' | 'TRANSPORTE' | 'NO_DISPONIBLE';
@@ -163,6 +175,11 @@ export interface RespuestaSunat {
   raw?: string;
   /** Solo en respuestas ESTADO: qué dice SUNAT del comprobante. */
   estadoComprobante?: EstadoComprobanteSunat;
+  /**
+   * Solo en respuestas FAULT, si el faultcode lo trae: 'Server' (problema probable de SUNAT) o
+   * 'Client' (problema probable del envío), según el Manual del Programador.
+   */
+  faultOrigen?: 'Server' | 'Client';
 }
 
 export type EstadoSunat =
@@ -195,12 +212,21 @@ export interface ContextoClasificacion {
   tipo?: TipoCpe;
   /** 'consulta_ticket' cuando la respuesta viene de getStatus(ticket) de un RC o RA. */
   etapa?: 'envio' | 'consulta_ticket';
+  /** Ambiente del envío: adapta los mensajes (p. ej. si se puede consultar el CDR o hay que verificar en SOL). */
+  ambiente?: AmbienteFiscal;
+  /** Serie del documento: junto con el tipo decide si admite getStatusCdr (solo series F). */
+  serie?: string;
 }
 
 export interface ClasificacionRespuesta {
   estado: EstadoSunat;
   accion: AccionSunat;
   mensajeUsuario: string;
+  /**
+   * SUNAT rechazó la credencial SOL o el certificado del emisor: reintentar con los mismos datos no
+   * sirve y podría bloquear el usuario SOL. La emisión abre el interruptor del ambiente hasta que se corrija.
+   */
+  bloqueaEmision?: boolean;
 }
 
 export interface ResultadoValidacionCpe {
@@ -213,7 +239,8 @@ export interface OpcionesValidacionCpe {
   hoy?: string | Date;
   /**
    * Reglas de la RS 000048-2026 (postergadas al 01/01/2027 por la RS 000143-2026).
-   * 'auto' u omitido: se aplican si la fecha de emisión es desde 2027-01-01.
+   * Desde esa fecha de emisión son obligatorias con cualquier opción ('false' solo evita
+   * adelantarlas); true las aplica también antes; 'auto' u omitido decide por la fecha de emisión.
    */
   aplicarReglas2027?: boolean | 'auto';
   /** Saldo del comprobante modificado (total − notas de crédito previas). Si llega, la NC no puede superarlo. */

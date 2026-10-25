@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { MetodoEnvio } from '../../../models/DBModel/tienda/metodo-envio.entity';
 import { MetodoPago } from '../../../models/DBModel/tienda/metodo-pago.entity';
 import { Cupon } from '../../../models/DBModel/tienda/cupon.entity';
+import { filasDe } from '../../../caja/bd/resultado-consulta';
 
 /** Catálogos auxiliares del checkout: envíos, pagos y cupones. */
 @Injectable()
@@ -49,9 +50,15 @@ export class CheckoutRepository {
       .getOne();
   }
 
+  /**
+   * Suma un uso solo si el cupón no llegó a su tope (UPDATE condicional): dos
+   * compras simultáneas no pueden pasarse del límite. TypeORM devuelve
+   * `[filas, afectadas]` en un UPDATE, por eso se leen las filas con `filasDe`
+   * (contar el resultado crudo daba siempre 2 y el tope nunca frenaba).
+   */
   async incrementarUsoCupon(idCupon: number, manager?: { query: (sql: string, p?: any[]) => Promise<any> }): Promise<boolean> {
     const q = manager ?? this.cuponRepo.manager;
-    const filas = await q.query(
+    const resultado = await q.query(
       `UPDATE cupones
           SET usos_actuales = COALESCE(usos_actuales, 0) + 1
         WHERE id_cupon = $1
@@ -59,6 +66,6 @@ export class CheckoutRepository {
         RETURNING id_cupon`,
       [idCupon],
     );
-    return (filas?.length ?? 0) > 0;
+    return filasDe(resultado).length > 0;
   }
 }

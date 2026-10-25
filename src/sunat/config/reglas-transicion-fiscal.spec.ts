@@ -1,5 +1,5 @@
 import { evaluarPreparacion, HechosPreparacion } from './checklist-activacion';
-import { hechosPrueba, snapshotPrueba, VALORES_COMPLETOS } from './configuracion.prueba-spec';
+import { certificadoPrueba, hechosPrueba, snapshotPrueba, VALORES_COMPLETOS } from './configuracion.prueba-spec';
 import type { ActualizarConfigFiscalDto } from './fiscal-config.dto';
 import { FiscalConfigError } from './fiscal-errores';
 import { ConfirmacionNoOse, SnapshotConfigFiscal } from './fiscal-config.tipos';
@@ -16,19 +16,14 @@ const RUC = '20610206337';
 const CONFIRMACION: ConfirmacionNoOse = { id_usuario: 7, nombre: 'Moisés', fecha: '2026-10-13T15:00:00.000Z', ip: '10.0.0.1' };
 
 /** Aplica el PUT completo como lo hace GestorConfigFiscalService, con los hechos dados para el futuro. */
-function aplicar(
-  actual: SnapshotConfigFiscal,
-  dto: ActualizarConfigFiscalDto,
-  hechos: Partial<HechosPreparacion> = {},
-  nubefactConfigurado = true,
-) {
+function aplicar(actual: SnapshotConfigFiscal, dto: ActualizarConfigFiscalDto, hechos: Partial<HechosPreparacion> = {}) {
   const cambios = cambiosDesdeDto(dto, actual.emisor.ruc);
   const futuro = proyectarSnapshot(actual, cambios, CONFIRMACION);
   validarCambios(cambios, futuro);
   const preparacion = evaluarPreparacion(
     hechosPrueba({ ...hechos, snapshot: futuro, claveSol: cambios.solClave ? 'ok' : (hechos.claveSol ?? 'ok') }),
   );
-  const { advertencias } = validarTransicion(actual, futuro, preparacion, cambios, { nubefactConfigurado });
+  const { advertencias } = validarTransicion(actual, futuro, preparacion);
   return { cambios, futuro, advertencias, pares: paresParaGuardar(cambios, futuro), eventos: eventosAuditoria(actual, futuro, cambios) };
 }
 
@@ -84,10 +79,78 @@ describe('reglas de transición del PUT /fiscal/configuracion', () => {
     expect(aplicar(EN_BETA, { ambiente: 'produccion' }, { claveSol: 'falta' }).futuro.ambiente).toBe('produccion');
   });
 
-  it('volver a Nubefact siempre se permite (rollback) y avisa si Nubefact no está configurado', () => {
-    const r = aplicar(ACTIVO, { proveedor: 'nubefact' }, { certificados: { beta: null, produccion: null } }, false);
+  it('desactivar la emisión de producción siempre se permite y avisa que las ventas quedan sin comprobante', () => {
+    const r = aplicar(ACTIVO, { proveedor: 'nubefact' }, { certificados: { beta: null, produccion: null } });
     expect(r.futuro.proveedor).toBe('nubefact');
-    expect(r.advertencias.join(' ')).toMatch(/NUBEFACT_URL/);
+    expect(r.advertencias.join(' ')).toMatch(/sin comprobante/);
+    expect(r.advertencias.join(' ')).not.toMatch(/Nubefact/i);
+  });
+
+  it('ningún mensaje de la transición manda a «volver a Nubefact»', () => {
+    const enBeta = error(() => aplicar(EN_BETA, { proveedor: 'sunat_directo', confirmo_no_ose: true }));
+    const incompleto = error(() => aplicar(ACTIVO, { confirmo_no_ose: false }));
+    expect(`${enBeta.message} ${incompleto.message}`).not.toMatch(/Nubefact/i);
+    expect(incompleto.message).toMatch(/desactive la emisión/);
+  });
+
+  it('pasar a producción exige que el certificado sea del RUC del emisor', () => {
+    const otroRuc = { beta: null, produccion: certificadoPrueba({ ruc: '20100070970' }) };
+    const e = error(() => aplicar(EN_BETA, { ambiente: 'produccion' }, { certificados: otroRuc }));
+    expect(e.cuerpo()).toMatchObject({ codigo: 'FISCAL_NO_LISTO', faltantes: ['ruc_certificado'] });
+  });
+
+  it('activar exige las 4 confirmaciones de SOL (D1.4) y el correlativo inicial revisado', () => {
+    const sinConfirmar = snapshotPrueba({
+      ...VALORES_COMPLETOS,
+      fiscal_confirma_certificado_en_sol: '',
+      fiscal_confirma_ruc_habido: '',
+      fiscal_cpe_correlativo_inicial: '',
+    });
+    const e = error(() => aplicar(sinConfirmar, { proveedor: 'sunat_directo' }));
+    expect(e.cuerpo().faltantes).toEqual(['correlativo_inicial', 'confirmacion.certificado_en_sol', 'confirmacion.ruc_habido']);
+
+    const r = aplicar(sinConfirmar, {
+      proveedor: 'sunat_directo',
+      correlativo_inicial: { F001: 1 },
+      confirmaciones: { certificado_en_sol: true, ruc_habido: true },
+    });
+    expect(r.futuro.proveedor).toBe('sunat_directo');
+    expect(r.pares).toMatchObject({
+      fiscal_confirma_certificado_en_sol: 'true',
+      fiscal_confirma_ruc_habido: 'true',
+      fiscal_cpe_correlativo_inicial: '{"F001":1}',
+    });
+    expect(r.eventos.map((ev) => ev.accion)).toEqual(['PROVEEDOR_CAMBIADO', 'CONFIRMACIONES_ACTIVACION', 'CORRELATIVO_INICIAL_CPE']);
+  });
+
+  it('un certificado sin RUC legible solo se acepta con la confirmación del administrador (auditada)', () => {
+    const sinRuc = { beta: null, produccion: certificadoPrueba({ ruc: null }) };
+    const e = error(() => aplicar(SIN_CONFIRMAR, { proveedor: 'sunat_directo', confirmo_no_ose: true }, { certificados: sinRuc }));
+    expect(e.cuerpo().faltantes).toEqual(['cert_ruc_confirmado']);
+
+    const r = aplicar(SIN_CONFIRMAR, { proveedor: 'sunat_directo', confirmo_no_ose: true, cert_ruc_confirmado: true }, { certificados: sinRuc });
+    expect(r.pares).toMatchObject({ fiscal_cert_ruc_confirmado_produccion: 'true' });
+    expect(r.eventos.find((ev) => ev.accion === 'CERT_RUC_CONFIRMADO')).toMatchObject({ detalle: { de: false, a: true, ruc_emisor: RUC } });
+    // Con la emisión activa no se puede retirar; sin ella, retirarla deja la clave vacía.
+    expect(error(() => aplicar(r.futuro, { cert_ruc_confirmado: false }, { certificados: sinRuc })).cuerpo().faltantes).toEqual([
+      'cert_ruc_confirmado',
+    ]);
+    const confirmadoInactivo = snapshotPrueba({ ...VALORES_COMPLETOS, fiscal_cert_ruc_confirmado_produccion: 'true' });
+    expect(aplicar(confirmadoInactivo, { cert_ruc_confirmado: false }, { certificados: sinRuc }).pares).toEqual({
+      fiscal_cert_ruc_confirmado_produccion: '',
+    });
+  });
+
+  it('el correlativo inicial se combina por serie y solo admite series configuradas', () => {
+    const conInicial = snapshotPrueba({ ...VALORES_COMPLETOS, fiscal_cpe_correlativo_inicial: '{"F001":120}' });
+    const r = aplicar(conInicial, { correlativo_inicial: { b001: 35 } as Record<string, number> });
+    expect(r.futuro.correlativoInicialCpe).toEqual({ F001: 120, B001: 35 });
+    expect(r.pares).toEqual({ fiscal_cpe_correlativo_inicial: '{"F001":120,"B001":35}' });
+    expect(r.eventos[0]).toMatchObject({ accion: 'CORRELATIVO_INICIAL_CPE', detalle: { cambios: { B001: { de: 1, a: 35 } } } });
+
+    const e = error(() => aplicar(conInicial, { correlativo_inicial: { FFF1: 40 } }));
+    expect(e.codigo).toBe('FISCAL_CONFIG_INVALIDA');
+    expect(e.message).toMatch(/FFF1/);
   });
 
   it('estando activo, un cambio que deja el checklist incompleto se rechaza', () => {

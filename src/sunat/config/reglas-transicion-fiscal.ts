@@ -7,10 +7,12 @@ import {
   AmbienteFiscal,
   AVISO_LEGAL_OSE,
   CLAVES_CONFIG_FISCAL,
+  CLAVES_CONFIRMACIONES_ACTIVACION,
   CLAVES_EMISOR_FISCAL,
   CLAVES_GRE_FISCAL,
   CLAVES_SERIES_FISCALES,
   ConfigGreFiscal,
+  ConfirmacionesActivacion,
   ConfirmacionNoOse,
   EmisorFiscal,
   ModoBoletas,
@@ -19,6 +21,7 @@ import {
   PuntoPartidaGre,
   SeriesFiscales,
   SnapshotConfigFiscal,
+  TIPOS_SERIE_CPE,
   TipoSerieFiscal,
 } from './fiscal-config.tipos';
 
@@ -54,7 +57,19 @@ export interface CambiosConfigFiscal {
   solClave?: string;
   confirmoNoOse?: boolean;
   gre?: { activa?: boolean; correlativoInicial?: number; partida?: CambiosPartida };
+  /** Por serie; se combina con lo guardado (las series que no vienen quedan igual). */
+  correlativoInicial?: Record<string, number>;
+  certRucConfirmado?: boolean;
+  confirmaciones?: Partial<ConfirmacionesActivacion>;
 }
+
+/** Nombres del API (snake_case) de las confirmaciones de D1.4. */
+const CAMPOS_CONFIRMACIONES: ReadonlyArray<[keyof ConfirmacionesActivacion, string]> = [
+  ['emisorElectronicoSol', 'emisor_electronico_sol'],
+  ['certificadoEnSol', 'certificado_en_sol'],
+  ['usuarioSolSecundario', 'usuario_sol_secundario'],
+  ['rucHabido', 'ruc_habido'],
+];
 
 const vacioANull = (valor: string | null | undefined): string | null => {
   const limpio = (valor ?? '').trim();
@@ -72,6 +87,22 @@ export function cambiosDesdeDto(dto: ActualizarConfigFiscalDto, rucEmisor: strin
   if (dto.aplicar_reglas_2027 !== undefined) cambios.reglas2027 = dto.aplicar_reglas_2027;
   if (dto.codigo_producto_defecto !== undefined) cambios.codigoProductoDefecto = vacioANull(dto.codigo_producto_defecto);
   if (dto.confirmo_no_ose !== undefined) cambios.confirmoNoOse = dto.confirmo_no_ose;
+  if (dto.cert_ruc_confirmado !== undefined) cambios.certRucConfirmado = dto.cert_ruc_confirmado;
+
+  if (dto.correlativo_inicial !== undefined && dto.correlativo_inicial !== null) {
+    cambios.correlativoInicial = Object.fromEntries(
+      Object.entries(dto.correlativo_inicial).map(([serie, numero]) => [serie.trim().toUpperCase(), Math.trunc(Number(numero))]),
+    );
+  }
+
+  if (dto.confirmaciones) {
+    const confirmaciones: Partial<ConfirmacionesActivacion> = {};
+    for (const [campo, nombreApi] of CAMPOS_CONFIRMACIONES) {
+      const valor = (dto.confirmaciones as Record<string, boolean | undefined>)[nombreApi];
+      if (valor !== undefined) confirmaciones[campo] = valor;
+    }
+    if (Object.keys(confirmaciones).length) cambios.confirmaciones = confirmaciones;
+  }
 
   if (dto.series) {
     const series: Partial<SeriesFiscales> = {};
@@ -172,11 +203,28 @@ export function proyectarSnapshot(
     confirmacionNoOse: confirmacion,
     reglas2027: cambios.reglas2027 ?? actual.reglas2027,
     gre: proyectarGre(actual.gre, cambios.gre, series, emisor),
+    posBetaActivo: actual.posBetaActivo,
+    correlativoInicialCpe: { ...actual.correlativoInicialCpe, ...(cambios.correlativoInicial ?? {}) },
+    correlativoInicialRevisado: actual.correlativoInicialRevisado || cambios.correlativoInicial !== undefined,
+    certRucConfirmadoProduccion: cambios.certRucConfirmado ?? actual.certRucConfirmadoProduccion,
+    confirmaciones: { ...actual.confirmaciones, ...(cambios.confirmaciones ?? {}) },
+    bloqueos: actual.bloqueos,
   };
 }
 
-/** Errores de forma que no dependen del checklist (series repetidas). */
+/** Errores de forma que no dependen del checklist (series repetidas, correlativo de una serie que no se usa). */
 export function validarCambios(cambios: CambiosConfigFiscal, futuro: SnapshotConfigFiscal): void {
+  if (cambios.correlativoInicial) {
+    const configuradas = TIPOS_SERIE_CPE.map((tipo) => futuro.series[tipo]);
+    const ajenas = Object.keys(cambios.correlativoInicial).filter((serie) => !configuradas.includes(serie));
+    if (ajenas.length) {
+      throw new FiscalConfigError(
+        'FISCAL_CONFIG_INVALIDA',
+        `El correlativo inicial solo se fija para las series configuradas (${configuradas.join(', ')}); ${ajenas.join(', ')} no lo está.`,
+        { series: ajenas },
+      );
+    }
+  }
   if (cambios.series) {
     const problemas = problemasSeriesCpe(futuro);
     if (problemas.length) {
@@ -209,22 +257,21 @@ const FALTANTES_CERTIFICADO: readonly CodigoFaltante[] = [
   FALTANTES.certificadoVencido,
   FALTANTES.certificadoAutofirmado,
   FALTANTES.certificadoClaveDebil,
+  FALTANTES.rucCertificado,
 ];
 
-export interface ContextoTransicion {
-  nubefactConfigurado: boolean;
-}
-
 /**
- * Reglas de transición (§5.3 del diseño + GRE). Lanza FISCAL_NO_LISTO (409)
+ * Reglas de transición (§5.3 del diseño + GRE + D1.4). Lanza FISCAL_NO_LISTO (409)
  * con los faltantes; devuelve advertencias no bloqueantes.
+ *
+ * 'sunat_directo' es la emisión de PRODUCCIÓN: exige el checklist cpe completo (certificado, SOL,
+ * emisor, series, correlativo revisado, no OSE y las confirmaciones de SOL). 'nubefact' = sin
+ * emisión electrónica: desactivarla siempre se permite.
  */
 export function validarTransicion(
   actual: SnapshotConfigFiscal,
   futuro: SnapshotConfigFiscal,
   preparacion: ResultadoPreparacion,
-  cambios: CambiosConfigFiscal,
-  contexto: ContextoTransicion,
 ): { advertencias: string[] } {
   const cpe = preparacion.checklist.cpe;
   const gre = preparacion.checklist.gre;
@@ -242,12 +289,12 @@ export function validarTransicion(
     }
   }
 
-  // SUNAT directo (factura, boleta y notas): solo en producción y con todo listo, incluso si ya estaba activo.
+  // Emisión de producción (factura, boleta y notas): solo con el ambiente de producción y todo listo, incluso si ya estaba activa.
   if (futuro.proveedor === 'sunat_directo') {
     if (futuro.ambiente !== 'produccion') {
       throw noListo(
-        'SUNAT directo solo se activa con el ambiente de producción: las ventas reales nunca van a SUNAT BETA. '
-          + 'Para volver a Nubefact envíe proveedor=nubefact.',
+        'La emisión de producción (SUNAT directo) solo se activa con el ambiente de producción: las ventas reales nunca van a SUNAT BETA. '
+          + 'Para hacer pruebas use el ambiente BETA con la emisión de prueba del POS.',
         ['ambiente_produccion'],
         'cpe',
       );
@@ -255,8 +302,8 @@ export function validarTransicion(
     if (!cpe.listo) {
       throw noListo(
         actual.proveedor === 'sunat_directo'
-          ? 'Ese cambio dejaría SUNAT directo sin lo necesario para emitir. Complete lo que falta o vuelva a Nubefact.'
-          : 'Todavía no se puede activar SUNAT directo. Complete lo que falta en la lista.',
+          ? 'Ese cambio dejaría la emisión de producción sin lo necesario para emitir. Complete lo que falta o desactive la emisión electrónica.'
+          : 'Todavía no se puede activar la emisión de producción. Complete lo que falta en la lista.',
         cpe.faltantes,
         'cpe',
         cpe.items,
@@ -282,11 +329,15 @@ export function validarTransicion(
   }
 
   const advertencias: string[] = [];
-  if (cambios.proveedor === 'nubefact' && !contexto.nubefactConfigurado) {
-    advertencias.push('Nubefact no está configurado en el servidor (NUBEFACT_URL / NUBEFACT_TOKEN): la emisión fallará hasta definirlos en Railway.');
+  if (futuro.proveedor === 'sunat_directo' && actual.proveedor !== 'sunat_directo') {
+    advertencias.push(
+      'Desde ahora las ventas se emiten directo a SUNAT (producción). Para detenerla al instante, desactive la emisión electrónica.',
+    );
   }
-  if (cambios.proveedor === 'sunat_directo' && actual.proveedor !== 'sunat_directo') {
-    advertencias.push('Desde ahora las ventas se emiten directo a SUNAT. Para volver atrás al instante elija Nubefact.');
+  if (actual.proveedor === 'sunat_directo' && futuro.proveedor !== 'sunat_directo') {
+    advertencias.push(
+      'La emisión electrónica de producción quedó desactivada: las ventas nuevas se registran sin comprobante y quedan en «ventas sin comprobante».',
+    );
   }
   return { advertencias };
 }
@@ -306,6 +357,11 @@ export function paresParaGuardar(cambios: CambiosConfigFiscal, futuro: SnapshotC
   if (cambios.confirmoNoOse !== undefined) {
     pares[c.confirmacionNoOse] = futuro.confirmacionNoOse ? JSON.stringify(futuro.confirmacionNoOse) : '';
   }
+  if (cambios.correlativoInicial !== undefined) pares[c.correlativoInicialCpe] = JSON.stringify(futuro.correlativoInicialCpe);
+  if (cambios.certRucConfirmado !== undefined) pares[c.certRucConfirmadoProduccion] = futuro.certRucConfirmadoProduccion ? 'true' : '';
+  for (const campo of Object.keys(cambios.confirmaciones ?? {}) as Array<keyof ConfirmacionesActivacion>) {
+    pares[CLAVES_CONFIRMACIONES_ACTIVACION[campo]] = futuro.confirmaciones[campo] ? 'true' : '';
+  }
 
   for (const [tipo, serie] of Object.entries(cambios.series ?? {})) {
     pares[CLAVES_SERIES_FISCALES[tipo as TipoSerieFiscal]] = serie as string;
@@ -321,7 +377,7 @@ export function paresParaGuardar(cambios: CambiosConfigFiscal, futuro: SnapshotC
   if (e.provincia !== undefined) pares[ce.provincia] = futuro.emisor.provincia;
   if (e.departamento !== undefined) pares[ce.departamento] = futuro.emisor.departamento;
   if (e.codigoEstablecimiento !== undefined) pares[ce.codigoEstablecimiento] = futuro.emisor.codigoEstablecimiento;
-  // La pantalla actual (/configuracion/fiscal, PDF y Nubefact) usa «DISTRITO - PROVINCIA - DEPARTAMENTO».
+  // La pantalla /configuracion/fiscal y los PDF usan «DISTRITO - PROVINCIA - DEPARTAMENTO».
   if (e.distrito !== undefined || e.provincia !== undefined || e.departamento !== undefined) {
     const { distrito, provincia, departamento } = futuro.emisor;
     if (distrito && provincia && departamento) pares[ce.ubicacion] = `${distrito} - ${provincia} - ${departamento}`;
@@ -410,6 +466,31 @@ export function eventosAuditoria(
     ['partida_codigo_establecimiento', actual.gre.partida.codigoEstablecimiento, futuro.gre.partida.codigoEstablecimiento],
   ]);
   if (Object.keys(gre).length) agregar(A.CONFIG_GRE, { cambios: gre });
+
+  const confirmaciones = diferencias(
+    CAMPOS_CONFIRMACIONES.map(([campo, nombreApi]) => [nombreApi, actual.confirmaciones[campo], futuro.confirmaciones[campo]]),
+  );
+  if (Object.keys(confirmaciones).length) agregar(A.CONFIRMACIONES_ACTIVACION, { cambios: confirmaciones });
+
+  if (futuro.certRucConfirmadoProduccion !== actual.certRucConfirmadoProduccion) {
+    agregar(A.CERT_RUC_CONFIRMADO, {
+      de: actual.certRucConfirmadoProduccion,
+      a: futuro.certRucConfirmadoProduccion,
+      ruc_emisor: futuro.emisor.ruc,
+    });
+  }
+
+  if (cambios.correlativoInicial) {
+    const correlativos = diferencias(
+      Object.keys(cambios.correlativoInicial).map((serie) => [
+        serie,
+        actual.correlativoInicialCpe[serie] ?? 1,
+        futuro.correlativoInicialCpe[serie],
+      ]),
+    );
+    // También se audita guardarlo sin cambios: deja constancia de que el administrador lo revisó.
+    agregar(A.CORRELATIVO_INICIAL_CPE, { cambios: correlativos, revisado: true });
+  }
 
   return eventos;
 }

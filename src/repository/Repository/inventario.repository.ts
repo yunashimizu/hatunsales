@@ -147,53 +147,60 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
 
     const donde = condiciones.join(' AND ');
 
-    // Los JOIN van antes del WHERE. Poner el LATERAL después del WHERE
-    // (como estaba) es SQL inválido y devolvía 500 en producción.
-    const from = `
-      FROM inventario i
-      JOIN productos p ON p.id_producto = i.id_producto
-      LEFT JOIN almacenes a ON a.id_almacen = i.id_almacen
-      LEFT JOIN sucursales s ON s.id_sucursal = a.id_sucursal
-      LEFT JOIN categorias cat ON cat.id_categoria = p.id_categoria
-      LEFT JOIN LATERAL (
-             SELECT pi.url
-               FROM productos_imagenes pi
-              WHERE pi.id_producto = p.id_producto
-              ORDER BY pi.is_primary DESC NULLS LAST,
-                       COALESCE(pi.orden, 0) ASC,
-                       pi.id_imagen ASC
-              LIMIT 1
-           ) img ON TRUE`;
+    // El conteo solo necesita inventario y productos: los filtros usan i.* y p.* (la
+    // categoría filtra por p.id_categoria). Antes contaba con todos los JOIN y con el
+    // LATERAL de la imagen evaluado para cada fila del inventario.
+    const sqlConteo = `
+      SELECT COUNT(*)::int AS total
+        FROM inventario i
+        JOIN productos p ON p.id_producto = i.id_producto
+       WHERE ${donde}`;
 
-    const totales = await this.dataSource.query(
-      `SELECT COUNT(*)::int AS total ${from} WHERE ${donde}`,
-      parametros,
-    );
+    // Primero se ordena y se corta la página; la imagen se busca después y solo para esas
+    // filas (antes el LATERAL corría para todo el inventario). `alerta` sale como columna
+    // para repetir el mismo orden afuera; id_inventario desempata (páginas estables).
+    const sqlFilas = `
+      SELECT b.*, COALESCE(img.url, '') AS imagen_url
+        FROM (
+          SELECT i.id_inventario,
+                 i.id_producto,
+                 p.nombre                          AS producto,
+                 COALESCE(p.sku, '')               AS sku,
+                 COALESCE(p.codigo_barras, '')     AS codigo_barras,
+                 COALESCE(p.unidad_medida, 'NIU')  AS unidad_medida,
+                 COALESCE(cat.nombre, '')          AS categoria,
+                 i.id_almacen,
+                 COALESCE(a.nombre, 'Sin almacén') AS almacen,
+                 COALESCE(s.nombre, '')            AS sucursal,
+                 COALESCE(i.stock, 0)              AS stock,
+                 COALESCE(i.stock_minimo, 0)       AS stock_minimo,
+                 COALESCE(p.precio_compra, 0)      AS precio_compra,
+                 COALESCE(p.precio_venta, 0)       AS precio_venta,
+                 (COALESCE(i.stock, 0) <= COALESCE(i.stock_minimo, 0)) AS alerta
+            FROM inventario i
+            JOIN productos p ON p.id_producto = i.id_producto
+            LEFT JOIN almacenes a ON a.id_almacen = i.id_almacen
+            LEFT JOIN sucursales s ON s.id_sucursal = a.id_sucursal
+            LEFT JOIN categorias cat ON cat.id_categoria = p.id_categoria
+           WHERE ${donde}
+           ORDER BY alerta DESC, p.nombre ASC, i.id_inventario ASC
+           LIMIT $${parametros.length + 1} OFFSET $${parametros.length + 2}
+        ) b
+        LEFT JOIN LATERAL (
+               SELECT pi.url
+                 FROM productos_imagenes pi
+                WHERE pi.id_producto = b.id_producto
+                ORDER BY pi.is_primary DESC NULLS LAST,
+                         COALESCE(pi.orden, 0) ASC,
+                         pi.id_imagen ASC
+                LIMIT 1
+             ) img ON TRUE
+       ORDER BY b.alerta DESC, b.producto ASC, b.id_inventario ASC`;
 
-    parametros.push(porPagina, (pagina - 1) * porPagina);
-
-    const filas = await this.dataSource.query(
-      `SELECT i.id_inventario,
-              i.id_producto,
-              p.nombre                          AS producto,
-              COALESCE(p.sku, '')               AS sku,
-              COALESCE(p.codigo_barras, '')     AS codigo_barras,
-              COALESCE(p.unidad_medida, 'NIU')  AS unidad_medida,
-              COALESCE(cat.nombre, '')          AS categoria,
-              i.id_almacen,
-              COALESCE(a.nombre, 'Sin almacén') AS almacen,
-              COALESCE(s.nombre, '')            AS sucursal,
-              COALESCE(i.stock, 0)              AS stock,
-              COALESCE(i.stock_minimo, 0)       AS stock_minimo,
-              COALESCE(p.precio_compra, 0)      AS precio_compra,
-              COALESCE(p.precio_venta, 0)       AS precio_venta,
-              COALESCE(img.url, '')             AS imagen_url
-         ${from}
-        WHERE ${donde}
-        ORDER BY (COALESCE(i.stock, 0) <= COALESCE(i.stock_minimo, 0)) DESC, p.nombre ASC
-        LIMIT $${parametros.length - 1} OFFSET $${parametros.length}`,
-      parametros,
-    );
+    const [totales, filas] = await Promise.all([
+      this.dataSource.query(sqlConteo, parametros),
+      this.dataSource.query(sqlFilas, [...parametros, porPagina, (pagina - 1) * porPagina]),
+    ]);
 
     return {
       datos: filas.map((f: any) => this.mapFila(f)),

@@ -1,7 +1,8 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 import { Proforma } from '../../models/DBModel/proforma.entity';
+import { Producto } from '../../models/DBModel/producto.entity';
 import { CrudRepository } from '../Irepository/GenericIRepository/crud.Irepository';
 
 /** Ítem ya validado y con precios del catálogo, listo para guardar. */
@@ -397,6 +398,17 @@ export class ProformaRepository extends CrudRepository<Proforma> implements OnMo
       relations: ['cliente', 'empresa', 'items', 'items.producto'],
       order: { items: { id_item: 'ASC' } },
     });
+  }
+
+  /**
+   * Productos a cotizar, en una sola consulta (antes uno por ítem: 20 líneas eran 20 viajes
+   * a la BD). Mapa id_producto → producto; los que no existen simplemente no están.
+   */
+  async productosPorId(ids: number[]): Promise<Map<number, Producto>> {
+    const unicos = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
+    if (!unicos.length) return new Map();
+    const productos = await this.proformaRepo.manager.find(Producto, { where: { id_producto: In(unicos) } });
+    return new Map(productos.map((p) => [Number(p.id_producto), p]));
   }
 
   /** Nombre de los almacenes indicados, en una sola consulta. Nunca lanza. */

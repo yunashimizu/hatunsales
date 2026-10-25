@@ -37,8 +37,9 @@ export class ContextoValidacionCpe {
   ) {
     this.hoy = resolverHoy(opciones.hoy ?? null);
     const fechaReferencia = esFechaIso(doc?.fechaEmision) ? doc.fechaEmision : this.hoy;
-    this.aplicarReglas2027 =
-      opciones.aplicarReglas2027 === true || (opciones.aplicarReglas2027 !== false && reglas2027Vigentes(fechaReferencia));
+    // Desde el 01/01/2027 (RS 000143-2026) son obligatorias: 'false' ya no las apaga, solo evita
+    // adelantarlas; true las aplica también a documentos anteriores.
+    this.aplicarReglas2027 = reglas2027Vigentes(fechaReferencia) || opciones.aplicarReglas2027 === true;
     this.montoMaximoNota = opciones.montoMaximoNota;
   }
 
