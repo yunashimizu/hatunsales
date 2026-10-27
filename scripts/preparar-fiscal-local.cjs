@@ -137,7 +137,7 @@ async function main() {
       console.log('Emisor separado de pruebas BETA guardado.');
     }
     if (process.argv.includes('--probar')) {
-      for (const tipoCpe of ['01', '03']) {
+      for (const tipoCpe of (process.env.PROBAR_TIPOS || '01,03').split(',')) {
         const resultado = await modulo
           .get(PruebaConexionFiscalService)
           .probar({ ambiente: 'beta', documento: 'cpe', tipoCpe }, actor);

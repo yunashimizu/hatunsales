@@ -1,15 +1,16 @@
 import { calcularComprobante } from '../../util/fiscal/calculo-fiscal';
 import type { EmisorFiscal } from '../config/fiscal-config.tipos';
-import type { DocumentoCpe } from '../nucleo/documento-fiscal.types';
+import type { DocumentoCpe, ReferenciaNotaCpe, TipoCpe } from '../nucleo/documento-fiscal.types';
 import { construirLineaCpe, totalesCpeDesdeLineas } from '../nucleo/linea-cpe';
 import { SERIES_BETA } from './emision.tipos';
 
 /** Documento identificado como prueba; los importes los calcula el mismo motor del POS. */
 export function crearDocumentoPruebaBeta(
   emisor: EmisorFiscal,
-  tipo: '01' | '03',
+  tipo: TipoCpe,
   numero: number,
   ahora: Date,
+  referencia?: ReferenciaNotaCpe,
 ): DocumentoCpe {
   const calculada = calcularComprobante([
     { cantidad: 1, precio_unitario: 1.18, descuento: 0, tipo_de_igv: 1 },
@@ -44,16 +45,19 @@ export function crearDocumentoPruebaBeta(
     second: '2-digit',
     hour12: false,
   }).format(ahora);
+  const esNota = tipo === '07' || tipo === '08';
+  if (esNota && !referencia) throw new Error('La nota de prueba necesita el comprobante que modifica.');
+  const sobreFactura = (esNota ? referencia!.tipoDoc : tipo) === '01';
   return {
     tipo,
-    serie: tipo === '01' ? SERIES_BETA.factura : SERIES_BETA.boleta,
+    serie: serieDePrueba(tipo, sobreFactura),
     numero,
     fechaEmision: fecha,
     horaEmision: hora,
     moneda: 'PEN',
     emisor: { ...emisor },
     cliente:
-      tipo === '01'
+      sobreFactura
         ? {
             tipoDoc: '6',
             numDoc: '20131312955',
@@ -63,6 +67,18 @@ export function crearDocumentoPruebaBeta(
         : { tipoDoc: '0', numDoc: '-', nombre: 'CLIENTES VARIOS' },
     lineas: [linea],
     totales: totalesCpeDesdeLineas([linea]),
-    formaPago: { tipo: 'Contado' },
+    ...(esNota ? { referencia } : { formaPago: { tipo: 'Contado' as const } }),
   };
+}
+
+function serieDePrueba(tipo: TipoCpe, sobreFactura: boolean): string {
+  if (tipo === '01') return SERIES_BETA.factura;
+  if (tipo === '03') return SERIES_BETA.boleta;
+  if (tipo === '07') return sobreFactura ? SERIES_BETA.nc_factura : SERIES_BETA.nc_boleta;
+  return sobreFactura ? SERIES_BETA.nd_factura : SERIES_BETA.nd_boleta;
+}
+
+/** Serie BETA de cada tipo de prueba (la de las notas depende de si modifican una factura o una boleta). */
+export function serieBetaDe(tipo: TipoCpe, sobreFactura = true): string {
+  return serieDePrueba(tipo, sobreFactura);
 }

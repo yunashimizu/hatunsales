@@ -5,14 +5,14 @@ import type {
   PasoPruebaFiscal,
   ProbadorEnvioFiscal,
 } from '../config/fiscal-tokens';
+import type { ReferenciaNotaCpe } from '../nucleo/documento-fiscal.types';
 import { RelojFiscal } from '../config/reloj-fiscal';
-import { crearDocumentoPruebaBeta } from './documento-prueba-beta';
-import { SERIES_BETA } from './emision.tipos';
+import { crearDocumentoPruebaBeta, serieBetaDe } from './documento-prueba-beta';
 import { EnvioFiscalRepository } from './envio-fiscal.repository';
 import { SunatEmisionService } from './sunat-emision.service';
 
 /**
- * «Probar conexión» de factura/boleta en SUNAT BETA: envía un documento de prueba (S/ 1.18) sin crear
+ * «Probar conexión» de factura, boleta y notas de crédito/débito en SUNAT BETA: envía un documento de prueba (S/ 1.18) sin crear
  * ventas ni comprobantes, con un número posterior a todo lo ya enviado en esa serie de BETA. En
  * PRODUCCIÓN no envía nada (cada comprobante sería real).
  */
@@ -37,12 +37,38 @@ export class ProbadorEnvioCpeService implements ProbadorEnvioFiscal {
       ];
     await this.esquema.exigir('emision', 'secretos');
     const tipo = ctx.tipoCpe ?? '01';
-    const numero = await this.envios.siguienteNumeroPruebaBeta(tipo === '01' ? SERIES_BETA.factura : SERIES_BETA.boleta);
+    const esNota = tipo === '07' || tipo === '08';
+    const pasosBase: PasoPruebaFiscal[] = [];
+    let referencia: ReferenciaNotaCpe | undefined;
+    if (esNota) {
+      // SUNAT BETA exige que la nota modifique un comprobante real: se envía antes una factura de prueba.
+      const numeroBase = await this.envios.siguienteNumeroPruebaBeta(serieBetaDe('01'));
+      const base = crearDocumentoPruebaBeta(ctx.emisor, '01', numeroBase, this.reloj.ahora());
+      const enviado = await this.emision.emitirPrueba(base, ctx.material, ctx.idUsuario);
+      pasosBase.push({
+        paso: 'comprobante_base',
+        ok: enviado.aceptado,
+        codigo: enviado.codigo ?? undefined,
+        detalle: `Factura ${base.serie}-${numeroBase} enviada como comprobante a modificar: ${enviado.mensaje ?? ''}`,
+        envio_id: enviado.id_envio,
+      });
+      if (!enviado.aceptado) return pasosBase;
+      referencia = {
+        tipoDoc: '01',
+        serie: base.serie,
+        numero: numeroBase,
+        motivo: '01',
+        sustento: tipo === '07' ? 'PRUEBA BETA - ANULACION DE LA OPERACION' : 'PRUEBA BETA - INTERESES POR MORA',
+      };
+    }
+    const serie = serieBetaDe(tipo, referencia ? referencia.tipoDoc === '01' : true);
+    const numero = await this.envios.siguienteNumeroPruebaBeta(serie);
     const documento = crearDocumentoPruebaBeta(
       ctx.emisor,
       tipo,
       numero,
       this.reloj.ahora(),
+      referencia,
     );
     const resultado = await this.emision.emitirPrueba(
       documento,
@@ -50,6 +76,7 @@ export class ProbadorEnvioCpeService implements ProbadorEnvioFiscal {
       ctx.idUsuario,
     );
     return [
+      ...pasosBase,
       {
         paso: 'xml',
         ok: true,

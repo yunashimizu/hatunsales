@@ -57,7 +57,7 @@ export interface PasoPruebaFiscal {
 export interface ContextoPruebaEnvio {
   ambiente: AmbienteFiscal;
   documento: 'cpe' | 'gre';
-  tipoCpe?: '01' | '03';
+  tipoCpe?: '01' | '03' | '07' | '08';
   material: MaterialFirma;
   emisor: EmisorFiscal;
   /** Siempre presente para cpe; para gre viene dentro de credencialesGre. */

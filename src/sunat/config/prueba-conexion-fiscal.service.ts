@@ -68,7 +68,7 @@ export class PruebaConexionFiscalService {
   ) {}
 
   async probar(
-    opciones: { ambiente?: AmbienteFiscal; documento?: DocumentoPrueba; tipoCpe?: '01' | '03' },
+    opciones: { ambiente?: AmbienteFiscal; documento?: DocumentoPrueba; tipoCpe?: '01' | '03' | '07' | '08' },
     actor: ActorFiscal,
   ): Promise<ResultadoPruebaConexion> {
     const inicio = this.reloj.ms();

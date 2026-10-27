@@ -414,8 +414,8 @@ export type DocumentoPrueba = (typeof DOCUMENTOS_PRUEBA)[number];
 
 export class ProbarConexionDto {
   @IsOptional()
-  @IsIn(['01', '03'], { message: 'tipo_cpe debe ser 01 (factura) o 03 (boleta).' })
-  tipo_cpe?: '01' | '03';
+  @IsIn(['01', '03', '07', '08'], { message: 'tipo_cpe debe ser 01 (factura), 03 (boleta), 07 (nota de crédito) o 08 (nota de débito).' })
+  tipo_cpe?: '01' | '03' | '07' | '08';
 
   @IsOptional()
   @Transform(minusculas)
