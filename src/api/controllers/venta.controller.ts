@@ -53,6 +53,23 @@ export class VentaController {
     );
   }
 
+  /**
+   * Búsqueda por código con el código en la query (`?codigo=`): los códigos Code 39/128 pueden traer
+   * `/`, `?`, `#` o `%`, que rompen la ruta. Se declara ANTES de `productos/barcode/:codigo`.
+   */
+  @Get('productos/barcode')
+  porCodigoBarrasQuery(
+    @Query('codigo') codigo?: string,
+    @Query('id_almacen') idAlmacen?: string,
+  ) {
+    const alm = idAlmacen ? Number(idAlmacen) : undefined;
+    return this.service.buscarPorCodigoBarras(
+      codigo ?? '',
+      Number.isFinite(alm) && (alm as number) > 0 ? alm : undefined,
+    );
+  }
+
+  /** Ruta anterior (código en la URL); se conserva para clientes ya desplegados. */
   @Get('productos/barcode/:codigo')
   porCodigoBarras(
     @Param('codigo') codigo: string,

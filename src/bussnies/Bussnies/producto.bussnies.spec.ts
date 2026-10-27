@@ -1,4 +1,5 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException, InternalServerErrorException } from '@nestjs/common';
+import { ean13Interno, esEan13Valido } from '../../util/codigo-barras.util';
 import { ProductoBussnies } from './producto.bussnies';
 
 /** Dobles de repositorio y transacción: nada de esto toca la base de datos. */
@@ -91,5 +92,131 @@ describe('ProductoBussnies.unidadesMedida', () => {
     expect(r.unidades.find((u) => u.codigo === 'MLL')).toBeDefined();
     expect(r.alias['UND']).toBe('NIU');
     expect(r.alias['CJ']).toBeUndefined();
+  });
+});
+
+describe('ProductoBussnies · unicidad de código de barras y SKU', () => {
+  it('rechaza un código de barras que ya tiene otro producto y dice cuál', async () => {
+    const { servicio, repo, guardados } = armar();
+    repo.buscarPorCodigoBarras.mockResolvedValue({ id_producto: 3, nombre: 'CEMENTO', codigo_barras: ' 7501 ' });
+    await expect(servicio.create({ nombre: 'X', codigo_barras: '7501' } as any)).rejects.toThrow(
+      'Ya existe un producto con ese código de barras (CEMENTO)',
+    );
+    expect(guardados).toHaveLength(0);
+  });
+
+  it('rechaza un código de barras que es el SKU de otro (la consulta cae a SKU)', async () => {
+    const { servicio, repo } = armar();
+    repo.buscarPorCodigoBarras.mockResolvedValue({ id_producto: 3, nombre: 'CEMENTO', codigo_barras: '', sku: 'CEM-01' });
+    const error: any = await servicio.create({ nombre: 'X', codigo_barras: 'CEM-01' } as any).catch((e) => e);
+    expect(error).toBeInstanceOf(ConflictException);
+    expect(error.message).toBe('Ese código de barras ya es el SKU de otro producto (CEMENTO)');
+  });
+
+  it('rechaza un código de barras que coincide con el SKU de otro aunque la consulta por barras no lo vea', async () => {
+    const { servicio, repo } = armar();
+    repo.buscarPorSku.mockResolvedValue({ id_producto: 5, nombre: 'ARENA' });
+    await expect(servicio.create({ nombre: 'X', codigo_barras: 'ARE-9' } as any)).rejects.toThrow(
+      'Ese código de barras ya es el SKU de otro producto (ARENA)',
+    );
+    expect(repo.buscarPorSku).toHaveBeenCalledWith('ARE-9');
+  });
+
+  it('rechaza un SKU que ya es el código de barras de otro producto', async () => {
+    const { servicio, repo } = armar();
+    repo.buscarPorCodigoBarras.mockResolvedValue({ id_producto: 3, nombre: 'CEMENTO', codigo_barras: '7501234567890' });
+    const error: any = await servicio.create({ nombre: 'X', sku: '7501234567890' } as any).catch((e) => e);
+    expect(error).toBeInstanceOf(ConflictException);
+    expect(error.message).toBe('Ese SKU ya es el código de barras de otro producto (CEMENTO)');
+    expect(repo.buscarPorCodigoBarras).toHaveBeenCalledWith('7501234567890');
+  });
+
+  it('rechaza un SKU repetido', async () => {
+    const { servicio, repo } = armar();
+    repo.buscarPorSku.mockResolvedValue({ id_producto: 3, nombre: 'CEMENTO' });
+    await expect(servicio.create({ nombre: 'X', sku: 'CEM-01' } as any)).rejects.toThrow(
+      'Ya existe un producto con ese SKU (CEMENTO)',
+    );
+  });
+
+  it('un SKU hallado solo por la caída a SKU de la consulta de barras no se toma por código de barras', async () => {
+    const { servicio, repo } = armar();
+    // buscarPorCodigoBarras cae a SKU y devuelve un producto cuyo código de barras es distinto del SKU pedido.
+    repo.buscarPorCodigoBarras.mockResolvedValue({ id_producto: 3, nombre: 'CEMENTO', codigo_barras: '999', sku: 'CEM-01' });
+    await expect(servicio.create({ nombre: 'X', sku: 'CEM-01' } as any)).resolves.toBeDefined();
+  });
+
+  it('al editar, el propio producto no cuenta como choque', async () => {
+    const { servicio, repo } = armar();
+    repo.buscarPorCodigoBarras.mockResolvedValue({ id_producto: 7, nombre: 'YO', codigo_barras: '7501' });
+    repo.buscarPorSku.mockResolvedValue({ id_producto: 7, nombre: 'YO' });
+    await expect(servicio.update({ codigo_barras: '7501', sku: 'YO-1' } as any, 7)).resolves.toBeDefined();
+  });
+
+  it('sin choques crea normalmente', async () => {
+    const { servicio, guardados } = armar();
+    await servicio.create({ nombre: 'X', codigo_barras: '111', sku: 'X-1' } as any);
+    expect(guardados).toHaveLength(1);
+  });
+});
+
+describe('ProductoBussnies · generarCodigoInterno', () => {
+  function conSecuencia(numeros: number[]) {
+    const ctx = armar();
+    const repo = ctx.repo as any;
+    repo.siguienteCodigoInterno = jest.fn();
+    for (const n of numeros) repo.siguienteCodigoInterno.mockResolvedValueOnce(n);
+    return { ...ctx, repo };
+  }
+
+  it('devuelve un EAN-13 válido que empieza en 2 con la secuencia rellenada', async () => {
+    const { servicio, repo } = conSecuencia([42]);
+    const { codigo } = await servicio.generarCodigoInterno();
+    expect(codigo).toHaveLength(13);
+    expect(codigo.startsWith('20000000004')).toBe(true);
+    expect(esEan13Valido(codigo)).toBe(true);
+    expect(repo.buscarPorCodigoBarras).toHaveBeenCalledWith(codigo);
+  });
+
+  it('si el candidato ya existe, toma el siguiente número', async () => {
+    const { servicio, repo } = conSecuencia([1, 2]);
+    repo.buscarPorCodigoBarras.mockResolvedValueOnce({ id_producto: 9 });
+    const { codigo } = await servicio.generarCodigoInterno();
+    expect(codigo).toBe(ean13Interno(2));
+    expect(repo.siguienteCodigoInterno).toHaveBeenCalledTimes(2);
+  });
+
+  it('tras 5 candidatos ocupados responde 500 sin seguir', async () => {
+    const { servicio, repo } = conSecuencia([1, 2, 3, 4, 5, 6]);
+    repo.buscarPorCodigoBarras.mockResolvedValue({ id_producto: 9 });
+    const intento = servicio.generarCodigoInterno();
+    await expect(intento).rejects.toBeInstanceOf(InternalServerErrorException);
+    expect(repo.siguienteCodigoInterno).toHaveBeenCalledTimes(5);
+  });
+
+  it('si la secuencia no existe (42P01) responde 500 con el aviso del SQL', async () => {
+    const { servicio, repo } = conSecuencia([]);
+    repo.siguienteCodigoInterno.mockRejectedValue({ code: '42P01', message: 'relation does not exist' });
+    const intento = servicio.generarCodigoInterno();
+    await expect(intento).rejects.toBeInstanceOf(InternalServerErrorException);
+    await expect(intento).rejects.toThrow('Falta correr sql/codigo_interno_secuencia.sql');
+  });
+
+  it('42P01 dentro de driverError también se reconoce', async () => {
+    const { servicio, repo } = conSecuencia([]);
+    repo.siguienteCodigoInterno.mockRejectedValue({ driverError: { code: '42P01' } });
+    await expect(servicio.generarCodigoInterno()).rejects.toThrow('Falta correr sql/codigo_interno_secuencia.sql');
+  });
+
+  it('otro error de la base sube tal cual', async () => {
+    const { servicio, repo } = conSecuencia([]);
+    const falla = new Error('conexión caída');
+    repo.siguienteCodigoInterno.mockRejectedValue(falla);
+    await expect(servicio.generarCodigoInterno()).rejects.toBe(falla);
+  });
+
+  it('si la secuencia superó los 11 dígitos responde 500', async () => {
+    const { servicio } = conSecuencia([100_000_000_000]);
+    await expect(servicio.generarCodigoInterno()).rejects.toThrow('agotó los 11 dígitos');
   });
 });

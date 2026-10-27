@@ -53,6 +53,17 @@ export class ProductoController {
     return this.service.buscarPorCodigoBarras(codigo);
   }
 
+  /**
+   * Código EAN-13 interno para productos sin código de fábrica. Va antes de cualquier ruta `:id`
+   * y con los mismos permisos que el alta de producto.
+   */
+  @Post('codigo-interno')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin', 'vendedor')
+  generarCodigoInterno() {
+    return this.service.generarCodigoInterno();
+  }
+
   @Get(':id')
   @UseGuards(OptionalJwtGuard)
   async getById(@Param('id') id: string, @UsuarioActual() usuario?: UsuarioToken) {

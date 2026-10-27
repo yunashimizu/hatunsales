@@ -94,9 +94,23 @@ export class VentaBussnies {
   }
 
   async buscarPorCodigoBarras(codigo: string, idAlmacen?: number) {
-    const producto = await this.repo.buscarPorCodigoBarras(codigo, idAlmacen);
-    if (!producto) throw new NotFoundException(`No hay ningún producto con el código ${codigo}`);
-    return producto;
+    // Mismo criterio que el front: sin caracteres de control (\r \n \t...) ni espacios en los bordes.
+    // eslint-disable-next-line no-control-regex
+    const limpio = String(codigo ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
+    if (!limpio) throw new BadRequestException('Indique el código a buscar');
+    const producto = await this.repo.buscarPorCodigoBarras(limpio, idAlmacen);
+    if (producto) return producto;
+
+    // Inactivo ≠ inexistente: así el mostrador no ofrece «crear» un producto que ya existe.
+    const inactivo = await this.repo.buscarInactivoPorCodigo(limpio);
+    if (inactivo) {
+      throw new ConflictException({
+        codigo: 'PRODUCTO_INACTIVO',
+        id_producto: inactivo.id_producto,
+        message: `El producto "${inactivo.nombre}" existe pero está inactivo`,
+      });
+    }
+    throw new NotFoundException(`No hay ningún producto con el código ${limpio}`);
   }
 
   /**

@@ -6,6 +6,7 @@ import { EsquemaCajaService, SnapshotEsquema } from '../../caja/esquema/esquema-
 import { planificarSalidas, SalidaStock } from '../../caja/ventas/plan-salida-stock';
 import { Dinero } from '../../caja/dominio/dinero';
 import { filasDe } from '../../caja/bd/resultado-consulta';
+import { variantesCodigo } from '../../util/codigo-barras.util';
 import { SQL_HOY_LIMA, sqlFinExclusivoDiaLima, sqlInicioDiaLima } from '../../util/fecha-lima';
 import { TIPO_NOTA_CREDITO } from '../../util/fiscal/tipos-comprobante';
 import type { EstadoSunat } from '../../sunat/nucleo/documento-fiscal.types';
@@ -333,7 +334,9 @@ export class VentaRepository {
 
   /**
    * Match exacto para el lector USB (HID): primero codigo_barras, luego SKU.
-   * No usa LIKE para no agregar un producto equivocado.
+   * No usa LIKE para no agregar un producto equivocado. Compara el código de barras recortado
+   * (`btrim`) y tolera la variante UPC-A (12 dígitos) / EAN-13 (con 0 delante). Si dos productos
+   * coinciden, gana el que coincide por barras y luego el de menor id (resultado determinista).
    */
   async buscarPorCodigoBarras(
     codigo: string,
@@ -342,6 +345,7 @@ export class VentaRepository {
     const valor = codigo.trim().slice(0, LARGO_MAXIMO_BUSQUEDA);
     if (!valor) return null;
 
+    const variantes = variantesCodigo(valor);
     const stock = this.joinStock(idAlmacen);
     const offset = stock.params.length;
     const joinSql = stock.sql.replace('$ALM', `$${offset || 1}`);
@@ -373,15 +377,44 @@ export class VentaRepository {
               ) img ON TRUE
         WHERE COALESCE(p.estado, TRUE) = TRUE
           AND (
-                COALESCE(p.codigo_barras, '') = $${offset + 1}
-             OR LOWER(COALESCE(p.sku, '')) = LOWER($${offset + 1})
+                btrim(COALESCE(p.codigo_barras, '')) = ANY($${offset + 1})
+             OR LOWER(COALESCE(p.sku, '')) = LOWER($${offset + 2})
           )
-        ORDER BY (COALESCE(p.codigo_barras, '') = $${offset + 1}) DESC
+        ORDER BY (btrim(COALESCE(p.codigo_barras, '')) = ANY($${offset + 1})) DESC,
+                 p.id_producto ASC
         LIMIT 1`,
-      [...stock.params, valor],
+      [...stock.params, variantes, valor],
     );
 
     return filas[0] ? this.mapProducto(filas[0]) : null;
+  }
+
+  /**
+   * Producto INACTIVO que coincide con el código (mismo criterio que `buscarPorCodigoBarras`).
+   * Sirve para responder «existe pero está inactivo» en vez de «no existe».
+   */
+  async buscarInactivoPorCodigo(codigo: string): Promise<{ id_producto: number; nombre: string } | null> {
+    const valor = codigo.trim().slice(0, LARGO_MAXIMO_BUSQUEDA);
+    if (!valor) return null;
+    const variantes = variantesCodigo(valor);
+
+    const filas = await this.dataSource.query(
+      `SELECT p.id_producto, p.nombre
+         FROM productos p
+        WHERE COALESCE(p.estado, TRUE) = FALSE
+          AND (
+                btrim(COALESCE(p.codigo_barras, '')) = ANY($1)
+             OR LOWER(COALESCE(p.sku, '')) = LOWER($2)
+          )
+        ORDER BY (btrim(COALESCE(p.codigo_barras, '')) = ANY($1)) DESC,
+                 p.id_producto ASC
+        LIMIT 1`,
+      [variantes, valor],
+    );
+
+    return filas[0]
+      ? { id_producto: Number(filas[0].id_producto), nombre: String(filas[0].nombre ?? '') }
+      : null;
   }
 
   /**

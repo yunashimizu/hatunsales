@@ -1,5 +1,6 @@
 import {
-  BadRequestException, ConflictException, HttpException, Injectable, Logger, NotFoundException,
+  BadRequestException, ConflictException, HttpException, Injectable, InternalServerErrorException, Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, DeepPartial, EntityManager } from 'typeorm';
@@ -13,6 +14,10 @@ import { traducirErrorStock } from './inventario.bussnies';
 import { ALIAS_UNIDADES, normalizarUnidad } from '../../sunat/catalogos/sunat.catalogos';
 import { GRUPOS_UNIDADES, UNIDADES_AMIGABLES } from '../../sunat/catalogos/unidades-amigables';
 import type { UnidadAmigable } from '../../sunat/catalogos/unidades-amigables';
+import { ean13Interno } from '../../util/codigo-barras.util';
+
+/** Intentos máximos al buscar un código interno que no exista ya en productos. */
+const MAX_INTENTOS_CODIGO_INTERNO = 5;
 
 @Injectable()
 export class ProductoBussnies implements IProductoBussniees {
@@ -245,14 +250,56 @@ export class ProductoBussnies implements IProductoBussniees {
     return this.getById(producto.id_producto);
   }
 
+  /**
+   * Genera un código EAN-13 interno («2» + secuencia + verificador) que no exista ya como barras ni SKU
+   * de algún producto. Reintenta con el siguiente número hasta MAX_INTENTOS_CODIGO_INTERNO veces.
+   */
+  async generarCodigoInterno(): Promise<{ codigo: string }> {
+    for (let intento = 0; intento < MAX_INTENTOS_CODIGO_INTERNO; intento++) {
+      let numero: number;
+      try {
+        numero = await this.repo.siguienteCodigoInterno();
+      } catch (error: any) {
+        const codigo = String(error?.code ?? error?.driverError?.code ?? '');
+        if (codigo === '42P01') {
+          throw new InternalServerErrorException('Falta correr sql/codigo_interno_secuencia.sql');
+        }
+        throw error;
+      }
+      let candidato: string;
+      try {
+        candidato = ean13Interno(numero);
+      } catch {
+        throw new InternalServerErrorException('La secuencia de códigos internos agotó los 11 dígitos');
+      }
+      if (!(await this.repo.buscarPorCodigoBarras(candidato))) return { codigo: candidato };
+    }
+    throw new InternalServerErrorException('No se pudo generar un código interno libre; intente de nuevo');
+  }
+
   // ── Auxiliares ───────────────────────────────────────────────
 
+  /**
+   * Barras y SKU deben ser únicos entre sí y entre ellos: el lector busca por barras y cae a SKU,
+   * así que un código no puede ser barras de un producto y SKU de otro. La carrera entre dos altas
+   * simultáneas la cubre el índice único (`traducirErrorBd` traduce el 23505).
+   */
   private async verificarUnicidad(codigoBarras?: string, sku?: string, idActual?: number): Promise<void> {
     const codigo = codigoBarras?.trim();
     if (codigo) {
+      // Con la caída a SKU de la consulta, un choque puede ser por barras o por SKU de otro producto.
       const existe = await this.repo.buscarPorCodigoBarras(codigo);
       if (existe && existe.id_producto !== idActual) {
-        throw new ConflictException('Ya existe un producto con ese código de barras');
+        const porBarras = (existe.codigo_barras ?? '').trim() === codigo;
+        throw new ConflictException(
+          porBarras
+            ? `Ya existe un producto con ese código de barras${this.nombreDe(existe)}`
+            : `Ese código de barras ya es el SKU de otro producto${this.nombreDe(existe)}`,
+        );
+      }
+      const conSku = await this.repo.buscarPorSku(codigo);
+      if (conSku && conSku.id_producto !== idActual) {
+        throw new ConflictException(`Ese código de barras ya es el SKU de otro producto${this.nombreDe(conSku)}`);
       }
     }
 
@@ -260,9 +307,21 @@ export class ProductoBussnies implements IProductoBussniees {
     if (codigoInterno) {
       const existe = await this.repo.buscarPorSku(codigoInterno);
       if (existe && existe.id_producto !== idActual) {
-        throw new ConflictException('Ya existe un producto con ese SKU');
+        throw new ConflictException(`Ya existe un producto con ese SKU${this.nombreDe(existe)}`);
+      }
+      const conBarras = await this.repo.buscarPorCodigoBarras(codigoInterno);
+      if (
+        conBarras &&
+        conBarras.id_producto !== idActual &&
+        (conBarras.codigo_barras ?? '').trim().toLowerCase() === codigoInterno.toLowerCase()
+      ) {
+        throw new ConflictException(`Ese SKU ya es el código de barras de otro producto${this.nombreDe(conBarras)}`);
       }
     }
+  }
+
+  private nombreDe(producto: { nombre?: string | null }): string {
+    return producto.nombre ? ` (${producto.nombre})` : '';
   }
 
   private generarSlug(nombre?: string): string {

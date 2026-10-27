@@ -624,3 +624,70 @@ describe('VentaBussnies: anular venta (D9, la resuelve el negocio de notas de cr
     expect((error as Error).message).toContain('no está disponible');
   });
 });
+
+describe('VentaBussnies: buscarPorCodigoBarras normaliza el código', () => {
+  const crear = (resultado: unknown, inactivo: unknown = null) => {
+    const repo = {
+      buscarPorCodigoBarras: jest.fn().mockResolvedValue(resultado),
+      buscarInactivoPorCodigo: jest.fn().mockResolvedValue(inactivo),
+    };
+    const servicio = new VentaBussnies(
+      repo as unknown as VentaRepository,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    return { repo, servicio };
+  };
+
+  it('quita caracteres de control y espacios de los bordes antes de buscar', async () => {
+    const { repo, servicio } = crear({ id_producto: 1 });
+    await servicio.buscarPorCodigoBarras('  7501234567890\r\n', 3);
+    expect(repo.buscarPorCodigoBarras).toHaveBeenCalledWith('7501234567890', 3);
+  });
+
+  it('conserva los símbolos legítimos del código', async () => {
+    const { repo, servicio } = crear({ id_producto: 1 });
+    await servicio.buscarPorCodigoBarras('\tAB/12-%3\n');
+    expect(repo.buscarPorCodigoBarras).toHaveBeenCalledWith('AB/12-%3', undefined);
+  });
+
+  it('un código vacío tras limpiar responde 400 sin consultar', async () => {
+    const { repo, servicio } = crear(null);
+    await expect(servicio.buscarPorCodigoBarras(' \r\n ')).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.buscarPorCodigoBarras).not.toHaveBeenCalled();
+  });
+
+  it('sin producto responde 404 con el código limpio', async () => {
+    const { servicio } = crear(null);
+    await expect(servicio.buscarPorCodigoBarras('999\r')).rejects.toThrow('No hay ningún producto con el código 999');
+  });
+
+  it('si hay un producto activo no consulta los inactivos', async () => {
+    const { repo, servicio } = crear({ id_producto: 1 }, { id_producto: 2, nombre: 'X' });
+    await servicio.buscarPorCodigoBarras('123');
+    expect(repo.buscarInactivoPorCodigo).not.toHaveBeenCalled();
+  });
+
+  it('sin activo pero con un inactivo responde 409 PRODUCTO_INACTIVO con el nombre y el id', async () => {
+    const { repo, servicio } = crear(null, { id_producto: 12, nombre: 'CLAVO 2"' });
+    const error: any = await servicio.buscarPorCodigoBarras('777\r').catch((e) => e);
+
+    expect(error).toBeInstanceOf(ConflictException);
+    expect(error.getResponse()).toEqual({
+      codigo: 'PRODUCTO_INACTIVO',
+      id_producto: 12,
+      message: 'El producto "CLAVO 2"" existe pero está inactivo',
+    });
+    expect(repo.buscarInactivoPorCodigo).toHaveBeenCalledWith('777');
+  });
+
+  it('sin activo ni inactivo sigue siendo 404', async () => {
+    const { servicio } = crear(null, null);
+    await expect(servicio.buscarPorCodigoBarras('555')).rejects.toBeInstanceOf(NotFoundException);
+  });
+});

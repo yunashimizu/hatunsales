@@ -47,8 +47,34 @@ export class ProductoRepository extends CrudRepository<Producto> {
     return this.productoRepo.findOne({ where: { id_producto: id } });
   }
 
+  /**
+   * Búsqueda exacta por código de barras (recortado con `btrim`) y, si no hay, por SKU sin distinguir
+   * mayúsculas. No filtra por estado: el panel ve también los inactivos. Si varios coinciden gana el
+   * que coincide por barras y luego el de menor id.
+   */
   async buscarPorCodigoBarras(codigo_barras: string): Promise<Producto | null> {
-    return this.productoRepo.findOne({ where: { codigo_barras } });
+    const codigo = String(codigo_barras ?? '').trim();
+    if (!codigo) return null;
+    return this.productoRepo
+      .createQueryBuilder('p')
+      .where("btrim(COALESCE(p.codigo_barras, '')) = :codigo", { codigo })
+      .orWhere("LOWER(COALESCE(p.sku, '')) = LOWER(:codigo)", { codigo })
+      .orderBy("(btrim(COALESCE(p.codigo_barras, '')) = :codigo)", 'DESC')
+      .addOrderBy('p.id_producto', 'ASC')
+      .getOne();
+  }
+
+  /**
+   * Siguiente número de la secuencia de códigos internos. Si la secuencia no existe, Postgres
+   * responde 42P01 y el error sube tal cual para que el negocio lo traduzca.
+   */
+  async siguienteCodigoInterno(): Promise<number> {
+    const filas = await this.productoRepo.query(`SELECT nextval('productos_codigo_interno_seq')::bigint AS n`);
+    const numero = Number(filas?.[0]?.n);
+    if (!Number.isSafeInteger(numero) || numero <= 0) {
+      throw new Error(`La secuencia de códigos internos devolvió un número inválido: ${filas?.[0]?.n}`);
+    }
+    return numero;
   }
 
   async buscarPorSku(sku: string): Promise<Producto | null> {

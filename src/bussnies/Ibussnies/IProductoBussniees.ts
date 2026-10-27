@@ -8,4 +8,5 @@ export interface IProductoBussniees {
   update(entity: ActualizarProductoRequest, id: number): Promise<ProductoResponse>;
   delete(id: number): Promise<number>;
   buscarPorCodigoBarras(codigo_barras: string): Promise<ProductoResponse>;
+  generarCodigoInterno(): Promise<{ codigo: string }>;
 }
