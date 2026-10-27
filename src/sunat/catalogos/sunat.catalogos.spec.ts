@@ -16,8 +16,15 @@ describe('normalizarUnidad', () => {
     ['día', 'DAY'],
     ['pz', 'C62'],
     ['Cuarto de galón', 'QT'],
+    ['millar', 'MLL'],
+    ['Millares', 'MLL'],
   ])('«%s» → %s sin advertencia', (entrada, codigo) => {
     expect(normalizarUnidad(entrada)).toEqual({ codigo });
+  });
+
+  it('MIL sigue aceptado como código oficial (oculto en el selector)', () => {
+    expect(normalizarUnidad('MIL')).toEqual({ codigo: 'MIL' });
+    expect(normalizarUnidad('MLL')).toEqual({ codigo: 'MLL' });
   });
 
   it('«m.l.» pierde los puntos y queda ML (mililitro), nunca metro lineal', () => {
