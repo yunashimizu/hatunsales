@@ -346,10 +346,22 @@ export const UNIDADES_CATALOGO_03: Readonly<Record<string, string>> = {
   CJ: 'CONO',
   KWH: 'KILOVATIO HORA',
   MWH: 'MEGAVATIO HORA',
+  // Ferretería, gasfitería y construcción (UN/ECE rec 20). Bloque aislado: si la boleta de
+  // prueba en BETA rechaza alguno, se quita de aquí y de unidades-amigables.ts.
+  SA: 'SACO',
+  RD: 'VARILLA',
+  BR: 'BARRA',
+  SR: 'TIRA',
+  BD: 'TABLA',
+  CO: 'BIDON',
+  QT: 'CUARTO DE GALON',
+  PT: 'PINTA',
+  HUR: 'HORA',
+  DAY: 'DIA',
 };
 
 /** Sinónimos con los que suelen cargarse las unidades en el sistema. */
-const ALIAS_UNIDADES: Readonly<Record<string, string>> = {
+export const ALIAS_UNIDADES: Readonly<Record<string, string>> = {
   UND: 'NIU', UNID: 'NIU', UNIDAD: 'NIU', UNIDADES: 'NIU', UN: 'NIU', U: 'NIU', UNI: 'NIU', PZA: 'NIU', PIEZA: 'NIU', PIEZAS: 'NIU',
   SERVICIO: 'ZZ', SERV: 'ZZ', SERVICIOS: 'ZZ',
   KG: 'KGM', KGS: 'KGM', KILO: 'KGM', KILOS: 'KGM', KILOGRAMO: 'KGM', KILOGRAMOS: 'KGM',
@@ -362,12 +374,30 @@ const ALIAS_UNIDADES: Readonly<Record<string, string>> = {
   M2: 'MTK', MT2: 'MTK', 'METRO CUADRADO': 'MTK', M3: 'MTQ', MT3: 'MTQ', 'METRO CUBICO': 'MTQ',
   L: 'LTR', LT: 'LTR', LTS: 'LTR', LITRO: 'LTR', LITROS: 'LTR', ML: 'MLT', MILILITRO: 'MLT', MILILITROS: 'MLT',
   GL: 'GLL', GLN: 'GLL', GAL: 'GLL', GALON: 'GLL', GALONES: 'GLL',
-  CAJA: 'BX', CAJAS: 'BX', CJA: 'BX', CJ: 'BX', PAQUETE: 'PK', PAQUETES: 'PK', PQT: 'PK', PAQ: 'PK',
+  CAJA: 'BX', CAJAS: 'BX', CJA: 'BX', PAQUETE: 'PK', PAQUETES: 'PK', PQT: 'PK', PAQ: 'PK',
   JUEGO: 'SET', JUEGOS: 'SET', KIT: 'KT', PAR: 'PR', PARES: 'PR', DOCENA: 'DZN', DOCENAS: 'DZN', DOC: 'DZN',
   CIENTO: 'CEN', CIENTOS: 'CEN', MILLAR: 'MIL', MILLARES: 'MIL',
   BOLSA: 'BG', BOLSAS: 'BG', BOTELLA: 'BO', BOTELLAS: 'BO', ROLLO: 'RO', ROLLOS: 'RO', BOBINA: '4A', BOBINAS: '4A',
   BALDE: 'BJ', BALDES: 'BJ', FARDO: 'BE', LATA: 'CA', LATAS: 'CA', CILINDRO: 'CY', TAMBOR: 'DR', FRASCO: 'JR',
   PLANCHA: 'ST', PLANCHAS: 'ST', PLIEGO: 'ST', HOJA: 'LEF', HOJAS: 'LEF', RESMA: 'RM', TUBO: 'TU', TUBOS: 'TU',
+  // Ferretería, gasfitería y construcción.
+  SACO: 'SA', SACOS: 'SA', SCO: 'SA',
+  VARILLA: 'RD', VARILLAS: 'RD', VAR: 'RD', VRL: 'RD', FIERRO: 'RD',
+  BARRA: 'BR', BARRAS: 'BR',
+  TIRA: 'SR', TIRAS: 'SR', LISTON: 'SR', LISTONES: 'SR',
+  TABLA: 'BD', TABLAS: 'BD', TABLON: 'BD', TABLONES: 'BD',
+  BIDON: 'CO', BIDONES: 'CO', GARRAFA: 'CO', GARRAFON: 'CO',
+  CUARTO: 'QT', '1/4': 'QT', '1/4 GL': 'QT', '1/4 GLN': 'QT', '1/4 GALON': 'QT', 'CUARTO DE GALON': 'QT',
+  PINTA: 'PT', '1/8': 'PT', '1/8 GL': 'PT', '1/8 GALON': 'PT',
+  HORA: 'HUR', HORAS: 'HUR', HR: 'HUR', HRS: 'HUR',
+  DIA: 'DAY', DIAS: 'DAY',
+  // Variantes de unidades que ya estaban en el catálogo. Nunca 'ML' → metro lineal: ML es mililitro.
+  MTL: 'MTR', 'METRO LINEAL': 'MTR', 'ML LINEAL': 'MTR',
+  GLS: 'GLL', JGO: 'SET', JGOS: 'SET', PQTE: 'PK', ROL: 'RO', RLL: 'RO', BLD: 'BJ', CIL: 'CY', PLG: 'INH',
+  'C/U': 'NIU', CU: 'NIU', PZ: 'C62',
+  CALAMINA: 'ST', CALAMINAS: 'ST', PLACA: 'PG', PLACAS: 'PG', CUBETA: 'PL', CUBETAS: 'PL',
+  CONO: 'CJ', CONOS: 'CJ', PALETA: 'PF', PALETAS: 'PF', PALLET: 'PF',
+  KITS: 'KT', GRUESA: 'GRO', BARRIL: 'BLL', BARRILES: 'BLL', HL: 'HLT',
 };
 
 export function esUnidadCatalogo03(codigo: string): boolean {

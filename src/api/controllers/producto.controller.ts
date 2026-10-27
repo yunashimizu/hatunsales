@@ -32,6 +32,13 @@ export class ProductoController {
     return productos.map((producto) => this.visiblePara(producto, usuario));
   }
 
+  /** Debe ir antes de `:id`, o Nest lo toma como un id. */
+  @Get('unidades')
+  @UseGuards(OptionalJwtGuard)
+  unidades() {
+    return this.service.unidadesMedida();
+  }
+
   @Get('barcode')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin', 'vendedor', 'caja')
