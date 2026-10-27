@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ProductoImagenRepository } from '../../repository/Repository/producto-imagen.repository';
 import { ProductoRepository } from '../../repository/Repository/producto.repository';
 import { ALMACEN_ARCHIVOS } from '../../util/storage/almacen.interface';
@@ -15,6 +15,8 @@ export interface ArchivoSubido {
 
 @Injectable()
 export class ProductoImagenBussnies {
+
+  private readonly logger = new Logger(ProductoImagenBussnies.name);
 
   constructor(
     private readonly repo: ProductoImagenRepository,
@@ -39,33 +41,111 @@ export class ProductoImagenBussnies {
     let orden = await this.repo.siguienteOrden(id_producto);
 
     const guardadas: ProductoImagen[] = [];
+    // Archivos ya enviados al almacén en este lote, con o sin fila creada todavía.
+    const clavesSubidas: string[] = [];
 
-    for (const [indice, archivo] of archivos.entries()) {
-      const subida = await this.almacen.guardar({
-        buffer: archivo.buffer,
-        nombre_original: archivo.originalname,
-        mime: archivo.mimetype,
-        carpeta: String(id_producto),
-      });
+    try {
+      for (const [indice, archivo] of archivos.entries()) {
+        const subida = await this.almacen.guardar({
+          buffer: archivo.buffer,
+          nombre_original: archivo.originalname,
+          mime: archivo.mimetype,
+          carpeta: String(id_producto),
+        });
+        clavesSubidas.push(subida.clave);
 
-      const imagen = new ProductoImagen();
-      imagen.producto = producto as any;
-      imagen.url = subida.url;
-      imagen.thumb_url = subida.thumb_url;
-      imagen.mime = subida.mime;
-      imagen.size = subida.size;
-      imagen.width = subida.width as number;
-      imagen.height = subida.height as number;
-      imagen.clave_almacen = subida.clave;
-      imagen.proveedor = subida.proveedor;
-      imagen.orden = orden++;
-      // La primera imagen que tenga el producto queda como principal.
-      imagen.is_primary = yaTiene === 0 && indice === 0;
+        const imagen = new ProductoImagen();
+        imagen.producto = producto as any;
+        imagen.url = subida.url;
+        imagen.thumb_url = subida.thumb_url;
+        imagen.mime = subida.mime;
+        imagen.size = subida.size;
+        imagen.width = subida.width as number;
+        imagen.height = subida.height as number;
+        imagen.clave_almacen = subida.clave;
+        imagen.proveedor = subida.proveedor;
+        imagen.orden = orden++;
+        // La primera imagen que tenga el producto queda como principal.
+        imagen.is_primary = yaTiene === 0 && indice === 0;
 
-      guardadas.push(await this.repo.create(imagen));
+        guardadas.push(await this.repo.create(imagen));
+      }
+    } catch (error) {
+      // Todo o nada: sin esto, un fallo a medias deja archivos huérfanos en el almacén
+      // y el reintento del usuario los duplicaría en la galería.
+      await this.deshacerLote(guardadas, clavesSubidas);
+      throw error;
     }
 
     return guardadas;
+  }
+
+  /**
+   * Cambia el archivo de una foto sin mover su lugar: conserva `orden` e `is_primary`.
+   * El archivo nuevo se guarda primero; si algo falla antes de actualizar la fila, la foto
+   * vieja queda intacta. El archivo viejo se borra del almacén al final.
+   */
+  async reemplazar(id_producto: number, id_imagen: number, archivo: ArchivoSubido): Promise<ProductoImagen[]> {
+    const imagen = await this.repo.findOneById(id_imagen);
+    if (!imagen || imagen.producto?.id_producto !== id_producto) {
+      throw new NotFoundException('Imagen no encontrada');
+    }
+    if (!archivo?.buffer?.length) throw new BadRequestException('No se seleccionó ninguna imagen');
+    this.validar(archivo);
+
+    const claveVieja = imagen.clave_almacen;
+
+    const subida = await this.almacen.guardar({
+      buffer: archivo.buffer,
+      nombre_original: archivo.originalname,
+      mime: archivo.mimetype,
+      carpeta: String(id_producto),
+    });
+
+    try {
+      await this.repo.actualizarArchivo(id_imagen, {
+        url: subida.url,
+        thumb_url: subida.thumb_url,
+        mime: subida.mime,
+        size: subida.size,
+        width: subida.width as number,
+        height: subida.height as number,
+        clave_almacen: subida.clave,
+        proveedor: subida.proveedor,
+      });
+    } catch (error) {
+      // La fila sigue apuntando al archivo viejo: se descarta el nuevo.
+      await this.borrarDelAlmacen(subida.clave);
+      throw error;
+    }
+
+    // Si la foto es idéntica, el almacén reutiliza el mismo archivo: no hay nada que borrar.
+    if (claveVieja && claveVieja !== subida.clave) {
+      await this.borrarDelAlmacen(claveVieja);
+    }
+
+    return this.repo.findByProducto(id_producto);
+  }
+
+  /** Quita las filas ya creadas del lote y los archivos que subió; nunca oculta el error original. */
+  private async deshacerLote(guardadas: ProductoImagen[], claves: string[]): Promise<void> {
+    for (const imagen of guardadas) {
+      try {
+        await this.repo.eliminar(imagen.id_imagen);
+      } catch (error: any) {
+        this.logger.warn(`No se pudo deshacer la imagen ${imagen.id_imagen} del lote: ${error?.message ?? error}`);
+      }
+    }
+    // Primero las filas y después los archivos: el almacén solo borra lo que nadie referencia.
+    for (const clave of claves) await this.borrarDelAlmacen(clave);
+  }
+
+  private async borrarDelAlmacen(clave: string): Promise<void> {
+    try {
+      await this.almacen.eliminar(clave);
+    } catch (error: any) {
+      this.logger.warn(`No se pudo borrar el archivo ${clave} del almacén: ${error?.message ?? error}`);
+    }
   }
 
   /** Compatibilidad con la subida de una sola imagen. */
