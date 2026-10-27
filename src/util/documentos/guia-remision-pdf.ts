@@ -1,5 +1,5 @@
 import { imagenSoportada } from './logo-emisor';
-import { PALETA } from './proforma-documento';
+import { PALETA, dibujarFranjaMarca } from './proforma-documento';
 import { textoPdf } from './proforma-pdf';
 import { generarQrPng } from './qr';
 
@@ -156,6 +156,7 @@ class DibujoGuia {
   }
 
   dibujar(): void {
+    dibujarFranjaMarca(this.doc);
     this.cabecera();
     if (this.marca) this.banner(this.marca);
     this.bloque('DATOS DEL TRASLADO', this.filasTraslado());
@@ -407,6 +408,7 @@ class DibujoGuia {
 
   private nuevaPagina(): void {
     this.doc.addPage();
+    dibujarFranjaMarca(this.doc);
     this.y = MARGEN;
   }
 }

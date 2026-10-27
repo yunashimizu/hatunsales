@@ -21,6 +21,7 @@ import {
   precioLista,
   textoMultilinea,
   textoPlano,
+  dibujarFranjaMarca,
 } from './proforma-documento';
 
 // pdfkit no trae tipos en este proyecto (mismo uso que en reportes).
@@ -172,6 +173,7 @@ class DibujoProforma {
   }
 
   dibujar(): void {
+    dibujarFranjaMarca(this.doc);
     this.cabecera();
     this.datosGenerales();
     this.tabla();
@@ -277,6 +279,7 @@ class DibujoProforma {
 
   private nuevaPagina(): void {
     this.doc.addPage();
+    dibujarFranjaMarca(this.doc);
     this.y = MARGEN;
     this.cabeceraContinuacion();
   }
