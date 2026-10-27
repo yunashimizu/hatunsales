@@ -29,8 +29,12 @@ function comprobante(id: number, datos: Record<string, unknown> = {}) {
   };
 }
 
-function armar(lista: any[] = []) {
-  const repo = { obtenerVentasPorPeriodo: jest.fn().mockResolvedValue(lista) };
+function armar(lista: any[] = [], vendidos: any[] = [], cotizados: any[] = []) {
+  const repo = {
+    obtenerVentasPorPeriodo: jest.fn().mockResolvedValue(lista),
+    obtenerProductosVendidos: jest.fn().mockResolvedValue(vendidos),
+    obtenerProductosCotizados: jest.fn().mockResolvedValue(cotizados),
+  };
   return { servicio: new ReportesBussnies(repo as any), repo };
 }
 
@@ -192,7 +196,7 @@ describe('ReportesBussnies · ventas netas', () => {
     const { buffer } = await servicio.exportVentasExcel('mensual', {});
     const libro = new ExcelJS.Workbook();
     await libro.xlsx.load(buffer);
-    const hoja = libro.getWorksheet('Ventas');
+    const hoja = libro.getWorksheet('Resumen');
     const resumen: Record<string, unknown> = {};
     hoja.eachRow((fila: any) => {
       const etiqueta = fila.getCell(1).value;
@@ -211,5 +215,257 @@ describe('diaLimaComprobante', () => {
     expect(diaLimaComprobante({ fecha_de_emision: '21-10-2026' })).toBe('2026-10-21');
     expect(diaLimaComprobante({ fecha_de_emision: null, creado_en: new Date('2026-10-22T04:59:00Z') })).toBe('2026-10-21');
     expect(diaLimaComprobante({ fecha_de_emision: '', creado_en: null })).toBe('');
+  });
+});
+
+
+describe('ReportesBussnies · por tipo de comprobante', () => {
+  // factura 100, boleta 50, nota de crédito 30, nota de débito 10 y cuatro que no cuentan (facturas).
+  const lista = [
+    comprobante(1, { total: '100.00' }),
+    comprobante(2, { total: '50.00', serie: 'B001', tipo: { id_tipo: 2 } }),
+    comprobante(3, { total: '30.00', serie: 'FC01', tipo: { id_tipo: 7 } }),
+    comprobante(4, { total: '10.00', serie: 'FD01', tipo: { id_tipo: 8 } }),
+    comprobante(5, { total: '999.00', anulado: true }),
+    comprobante(6, { total: '500.00', ambiente_fiscal: 'beta' }),
+    comprobante(7, { total: '70.00', estado: 'error', estado_sunat: null }),
+    comprobante(8, { total: '80.00', estado_sunat: 'RECHAZADO' }),
+  ];
+
+  it('solo boletas: el tipo se filtra en memoria (no en SQL) y el reporte cuenta solo esas', async () => {
+    const { servicio, repo } = armar(lista);
+
+    const r = await servicio.reporteVentas('mensual', { id_tipo: 2 });
+
+    expect(repo.obtenerVentasPorPeriodo.mock.calls[0][2]).toEqual({ id_cliente: undefined, id_moneda: undefined });
+    expect(r.total_vendido).toBe(50);
+    expect(r.cantidad_comprobantes).toBe(1);
+    expect(r.detalle.map((d) => [d.id_comprobante, d.id_tipo])).toEqual([[2, 2]]);
+    expect(r.excluidos).toEqual({ anulados: 0, con_error: 0, rechazados: 0 }); // los excluidos eran facturas
+    expect(r.filtro_tipo).toEqual({ id_tipo: 2, nombre: 'Boletas' });
+    expect(r.estadisticas.serie).toEqual([{ clave: '2026-10-21', etiqueta: '21 oct', total: 50, cantidad: 1 }]);
+  });
+
+  it('solo facturas: los anulados, con error y rechazados que se informan son los de facturas', async () => {
+    const { servicio } = armar(lista);
+
+    const r = await servicio.reporteVentas('mensual', { id_tipo: 1 });
+
+    expect(r.total_vendido).toBe(100);
+    expect(r.excluidos).toEqual({ anulados: 1, con_error: 1, rechazados: 1 });
+  });
+
+  it('sin filtro el resultado es el de siempre y filtro_tipo es null', async () => {
+    const { servicio } = armar(lista);
+
+    const r = await servicio.reporteVentas('mensual', {});
+
+    expect(r.total_vendido).toBe(130);
+    expect(r.filtro_tipo).toBeNull();
+    expect(r.productos_modo).toBe('vendidos');
+  });
+
+  it('por_tipo reparte lo vendido entre TODOS los tipos aunque se filtre por uno (la nota de crédito va en negativo)', async () => {
+    const { servicio } = armar(lista);
+
+    const filtrado = await servicio.reporteVentas('mensual', { id_tipo: 2 });
+    const todos = await servicio.reporteVentas('mensual', {});
+
+    const esperado = [
+      { id_tipo: 1, tipo: 'Facturas', cantidad: 1, total: 100 },
+      { id_tipo: 2, tipo: 'Boletas', cantidad: 1, total: 50 },
+      { id_tipo: 7, tipo: 'Notas de crédito', cantidad: 1, total: -30 },
+      { id_tipo: 8, tipo: 'Notas de débito', cantidad: 1, total: 10 },
+    ];
+    expect(todos.por_tipo).toEqual(esperado);
+    expect(filtrado.por_tipo).toEqual(esperado);
+  });
+
+  it('un tipo filtrado sin comprobantes aparece con ceros; un id inválido (NaN, 0, decimal) no filtra', async () => {
+    const { servicio } = armar([comprobante(1, { total: '100.00' })]);
+
+    const sinBoletas = await servicio.reporteVentas('mensual', { id_tipo: 2 });
+    expect(sinBoletas.detalle).toEqual([]);
+    expect(sinBoletas.por_tipo.find((t) => t.id_tipo === 2)).toEqual({ id_tipo: 2, tipo: 'Boletas', cantidad: 0, total: 0 });
+
+    for (const invalido of [Number.NaN, 0, 1.5, -2]) {
+      const r = await servicio.reporteVentas('mensual', { id_tipo: invalido });
+      expect(r.filtro_tipo).toBeNull();
+      expect(r.total_vendido).toBe(100);
+    }
+  });
+
+  it('solo notas de crédito: los rankings pasan a «devueltos» y piden los números en positivo', async () => {
+    const { servicio, repo } = armar(lista);
+
+    const r = await servicio.reporteVentas('mensual', { id_tipo: 7 });
+
+    expect(r.productos_modo).toBe('devueltos');
+    expect(repo.obtenerProductosVendidos).toHaveBeenCalledWith([3], 10, true);
+  });
+});
+
+describe('ReportesBussnies · productos más vendidos y más cotizados', () => {
+  const lista = [
+    comprobante(1, { total: '100.00' }),
+    comprobante(2, { total: '50.00', tipo: { id_tipo: 2 } }),
+    comprobante(5, { total: '999.00', anulado: true }),
+  ];
+
+  it('pide los ítems solo de los comprobantes que cuentan y mapea los dos rankings', async () => {
+    const { servicio, repo } = armar(
+      lista,
+      [
+        { id_producto: 2, codigo: '0002', descripcion: 'Cemento', cantidad: '119.00', total: '3865.00', comprobantes: '4' },
+        { id_producto: null, codigo: null, descripcion: null, cantidad: '2', total: '10.00', comprobantes: '1' },
+        { id_producto: 9, codigo: 'X', descripcion: 'Devuelto del todo', cantidad: '0', total: '0', comprobantes: '2' },
+      ],
+      [{ id_producto: 10, sku: '0009', descripcion: 'acero', cotizaciones: '2', cantidad: '2', total: '30.00', convertidas: '1' }],
+    );
+
+    const r = await servicio.reporteVentas('mensual', {});
+
+    expect(repo.obtenerProductosVendidos).toHaveBeenCalledWith([1, 2], 10, false);
+    expect(repo.obtenerProductosCotizados.mock.calls[0].slice(2)).toEqual([10, undefined]);
+    expect(r.top_productos_vendidos).toEqual([
+      { id_producto: 2, codigo: '0002', producto: 'Cemento', cantidad: 119, total: 3865, comprobantes: 4 },
+      { id_producto: null, codigo: '', producto: 'Producto sin descripción', cantidad: 2, total: 10, comprobantes: 1 },
+    ]); // el que quedó en cero neto no sale
+    expect(r.top_productos_cotizados).toEqual([
+      { id_producto: 10, sku: '0009', producto: 'acero', cotizaciones: 2, cantidad: 2, total: 30, convertidas: 1 },
+    ]);
+  });
+
+  it('si los rankings fallan, el reporte de ventas sale completo con los rankings vacíos', async () => {
+    const { servicio, repo } = armar(lista);
+    repo.obtenerProductosVendidos.mockRejectedValue(new Error('relation does not exist'));
+    const aviso = jest.spyOn((servicio as any).logger, 'warn').mockImplementation(() => undefined);
+
+    const r = await servicio.reporteVentas('mensual', {});
+
+    expect(r.total_vendido).toBe(150);
+    expect(r.top_productos_vendidos).toEqual([]);
+    expect(r.top_productos_cotizados).toEqual([]);
+    expect(aviso).toHaveBeenCalled();
+  });
+
+  it('los límites de la pantalla (10) y del Excel (50) se piden al repositorio', async () => {
+    const { servicio, repo } = armar(lista);
+
+    await servicio.exportVentasExcel('mensual', {});
+
+    expect(repo.obtenerProductosVendidos).toHaveBeenLastCalledWith([1, 2], 50, false);
+  });
+});
+
+describe('ReportesBussnies · exportes profesionales', () => {
+  const lista = [
+    comprobante(1, { total: '100.00', cliente_denominacion: 'ACME' }),
+    comprobante(2, { total: '50.00', serie: 'B001', tipo: { id_tipo: 2 } }),
+    comprobante(3, { total: '30.00', serie: 'FC01', tipo: { id_tipo: 7 } }),
+  ];
+  const vendidos = [{ id_producto: 2, codigo: '0002', descripcion: 'Cemento', cantidad: '5', total: '120.00', comprobantes: '2' }];
+  const cotizados = [{ id_producto: 10, sku: '0009', descripcion: 'acero', cotizaciones: '2', cantidad: '2', total: '30.00', convertidas: '1' }];
+
+  async function leer(buffer: Buffer) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ExcelJS = require('exceljs');
+    const libro = new ExcelJS.Workbook();
+    await libro.xlsx.load(buffer);
+    return libro;
+  }
+
+  it('el Excel trae las hojas del reporte y el nombre de archivo lleva el tipo', async () => {
+    const { servicio } = armar(lista, vendidos, cotizados);
+
+    const { buffer, filename } = await servicio.exportVentasExcel('mensual', { id_tipo: 2 });
+    const libro = await leer(buffer);
+
+    expect(filename).toMatch(/^ventas_boletas_mensual_\d{8}\.xlsx$/);
+    expect(libro.worksheets.map((h: any) => h.name)).toEqual([
+      'Resumen', 'Detalle', 'Tendencia', 'Productos vendidos', 'Productos cotizados', 'Clientes',
+    ]);
+  });
+
+  it('el Detalle usa fechas y montos reales, tipo legible, autofiltro, cabecera inmovilizada y total con fórmula', async () => {
+    const { servicio } = armar(lista, vendidos, cotizados);
+
+    const { buffer } = await servicio.exportVentasExcel('mensual', {});
+    const detalle = (await leer(buffer)).getWorksheet('Detalle');
+
+    const cabecera = detalle.getRow(5).values.slice(1);
+    expect(cabecera).toEqual(['N.º', 'Fecha', 'Tipo', 'Comprobante', 'Cliente', 'Documento', 'Estado', 'Total']);
+    const primera = detalle.getRow(6);
+    expect(primera.getCell(2).value).toBeInstanceOf(Date);
+    expect((primera.getCell(2).value as Date).toISOString().slice(0, 10)).toBe('2026-10-21');
+    expect(detalle.getRow(6).getCell(3).value).toBe('Factura');
+    expect(detalle.getRow(7).getCell(3).value).toBe('Boleta');
+    expect(detalle.getRow(8).getCell(3).value).toBe('Nota de crédito');
+    expect(detalle.getRow(8).getCell(8).value).toBe(-30);
+    const total = detalle.getRow(9).getCell(8).value as { formula: string; result: number };
+    expect(total.formula).toBe('SUBTOTAL(109,H6:H8)');
+    expect(total.result).toBe(120);
+    expect(detalle.views[0]).toMatchObject({ state: 'frozen', ySplit: 5 });
+    expect(detalle.autoFilter).toBeTruthy();
+  });
+
+  it('las hojas de productos llevan sus columnas y la conversión de cotizaciones', async () => {
+    const { servicio } = armar(lista, vendidos, cotizados);
+
+    const { buffer } = await servicio.exportVentasExcel('mensual', {});
+    const libro = await leer(buffer);
+
+    const vendidosHoja = libro.getWorksheet('Productos vendidos');
+    expect(vendidosHoja.getRow(5).values.slice(1)).toEqual([
+      '#', 'Código', 'Producto', 'Cantidad vendida', 'Importe', '% de las ventas', 'Comprobantes',
+    ]);
+    expect(vendidosHoja.getRow(6).values.slice(1, 6)).toEqual([1, '0002', 'Cemento', 5, 120]);
+
+    const cotizadosHoja = libro.getWorksheet('Productos cotizados');
+    const fila = cotizadosHoja.getRow(6).values.slice(1);
+    expect(fila.slice(0, 7)).toEqual([1, '0009', 'acero', 2, 2, 30, 1]);
+    expect(fila[7]).toBeCloseTo(0.5); // 1 de 2 cotizaciones llegó a venta
+  });
+
+  it('con un filtro, el resumen lo dice y el reparto por tipo marca el filtro aplicado', async () => {
+    const { servicio } = armar(lista);
+
+    const { buffer } = await servicio.exportVentasExcel('mensual', { id_tipo: 2 });
+    const resumen = (await leer(buffer)).getWorksheet('Resumen');
+    const textos: string[] = [];
+    resumen.eachRow((fila: any) => {
+      fila.eachCell((celda: any) => {
+        if (typeof celda.value === 'string') textos.push(celda.value);
+      });
+    });
+
+    expect(textos.some((t) => t.includes('Tipo: Boletas'))).toBe(true);
+    expect(textos.some((t) => t.includes('filtro aplicado'))).toBe(true);
+  });
+
+  it('el PDF es un PDF válido con varias secciones, también para un reporte vacío', async () => {
+    const lleno = armar(lista, vendidos, cotizados);
+    const { buffer, filename } = await lleno.servicio.exportVentasPdf('mensual', { id_tipo: 2 });
+
+    expect(buffer.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(buffer.subarray(-8).toString()).toContain('%%EOF');
+    expect(buffer.length).toBeGreaterThan(5_000);
+    expect(filename).toMatch(/^ventas_boletas_mensual_\d{8}\.pdf$/);
+
+    const vacio = armar([]);
+    const pdfVacio = await vacio.servicio.exportVentasPdf('diario', {});
+    expect(pdfVacio.buffer.subarray(0, 5).toString()).toBe('%PDF-');
+  });
+
+  it('un detalle largo se reparte en páginas con la cabecera repetida y no revienta', async () => {
+    const muchos = Array.from({ length: 220 }, (_, i) =>
+      comprobante(i + 1, { total: '10.00', cliente_denominacion: 'CLIENTE CON UN NOMBRE MUY LARGO ' + i }),
+    );
+    const { servicio } = armar(muchos, vendidos, cotizados);
+
+    const { buffer } = await servicio.exportVentasPdf('anual', {});
+
+    const paginas = (buffer.toString('latin1').match(/\/Type \/Page\b/g) ?? []).length;
+    expect(paginas).toBeGreaterThan(5);
   });
 });

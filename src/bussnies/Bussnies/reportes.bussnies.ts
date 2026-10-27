@@ -1,24 +1,28 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { ReportesRepository } from '../../repository/Repository/reportes.repository';
 import { IReportesBussniees } from '../Ibussnies/IReportesBussniees';
 import {
   VentasEstadisticas,
+  VentasPorTipo,
   VentasReportDetalle,
   VentasReportResponse,
   VentasSeriePunto,
   VentasTopCliente,
+  VentasTopProducto,
+  VentasTopProductoCotizado,
 } from '../../models/model/ventas-report.response';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { emisorConfig } from '../../config/emisor.config';
 import {
   CabeceraReporte,
-  FilaDetalleReporte,
-  REPORTE_COLUMNAS_DETALLE,
-  capitalizarEstado,
+  REPORTE_TIPOS,
+  claveTipoReporte,
   etiquetaPeriodo,
-  formatearMonedaEs,
+  etiquetaTipoReporte,
   nombreArchivoReporte,
 } from '../../util/reporte-export';
+import { generarReporteVentasExcel } from '../../util/documentos/reporte-ventas-excel';
+import { generarReporteVentasPdf } from '../../util/documentos/reporte-ventas-pdf';
 import {
   FechaLimaInvalidaError,
   aFechaLima,
@@ -44,6 +48,17 @@ type ReportesFilters = {
   id_tipo?: number;
   id_moneda?: number;
 };
+
+/** Cuántas filas de cada ranking: la pantalla y el PDF muestran pocas; el Excel lleva más. */
+interface OpcionesReporte {
+  limiteProductos?: number;
+  limiteClientes?: number;
+}
+
+const LIMITE_PRODUCTOS_PANTALLA = 10;
+const LIMITE_PRODUCTOS_EXPORT = 50;
+const LIMITE_CLIENTES_PANTALLA = 5;
+const LIMITE_CLIENTES_EXPORT = 20;
 
 /**
  * Qué cuenta en el reporte de ventas y con qué signo.
@@ -71,6 +86,11 @@ export interface ComprobanteReporte {
   id_tipo?: number | null;
 }
 
+/** Identificador de `tipos_comprobante` del comprobante (NaN si no se pudo leer). */
+function idTipoDe(c: ComprobanteReporte): number {
+  return Number(c.tipo?.id_tipo ?? c.id_tipo);
+}
+
 export function clasificarComprobanteReporte(c: ComprobanteReporte): ClaseReporte {
   const estado = String(c.estado ?? '').trim().toLowerCase();
   const estadoSunat = String(c.estado_sunat ?? '').trim().toUpperCase();
@@ -90,6 +110,8 @@ export function clasificarComprobanteReporte(c: ComprobanteReporte): ClaseReport
 /** Fila del detalle: total_vendido ya lleva el signo (la nota de crédito va en negativo). */
 export interface DetalleReporteVentas extends VentasReportDetalle {
   tipo_documento: 'venta' | 'nota_credito' | 'nota_debito';
+  /** Tipo de comprobante (1 factura, 2 boleta, 7 nota de crédito, 8 nota de débito). */
+  id_tipo?: number;
 }
 
 /** Respuesta con el neto y lo que lo explica (campos nuevos: un front anterior los ignora). */
@@ -101,6 +123,16 @@ export interface ReporteVentasNeto extends VentasReportResponse {
   notas_debito: { cantidad: number; total: number };
   /** Comprobantes del periodo que no suman: anulados, con error o rechazados (sin pruebas BETA). */
   excluidos: { anulados: number; con_error: number; rechazados: number };
+  /** Reparto por tipo de comprobante: siempre de TODOS los tipos, aunque se filtre por uno. */
+  por_tipo: VentasPorTipo[];
+  /** Tipo por el que se filtró; null = todos. */
+  filtro_tipo: { id_tipo: number; nombre: string } | null;
+  /** «vendidos»; «devueltos» cuando el reporte es solo de notas de crédito. */
+  productos_modo: 'vendidos' | 'devueltos';
+  /** Ranking neto de lo vendido (con el mismo filtro de tipo del reporte). */
+  top_productos_vendidos: VentasTopProducto[];
+  /** Ranking de las cotizaciones del periodo (no depende del tipo de comprobante). */
+  top_productos_cotizados: VentasTopProductoCotizado[];
 }
 
 interface RangoReporte {
@@ -145,18 +177,10 @@ const PLANES: Record<string, string> = {
   anual: 'Año calendario desde enero: visión de tendencia y estacionalidad.',
 };
 
-const EXCEL = {
-  headerBg: '1F4E79',
-  headerFg: 'FFFFFF',
-  sectionBg: 'D6E3F0',
-  kpiLabelBg: 'F2F2F2',
-  altRow: 'F7F9FC',
-  border: 'B0B0B0',
-  titleFg: '1F4E79',
-};
-
 @Injectable()
 export class ReportesBussnies implements IReportesBussniees {
+  private readonly logger = new Logger(ReportesBussnies.name);
+
   constructor(private readonly repo: ReportesRepository) {}
 
   /**
@@ -167,6 +191,7 @@ export class ReportesBussnies implements IReportesBussniees {
   async reporteVentas(
     periodo: string,
     filters: ReportesFilters,
+    opciones: OpcionesReporte = {},
   ): Promise<ReporteVentasNeto> {
     const periodoNormalizado = (periodo || 'diario').toLowerCase().trim();
     if (!filters.fecha_inicio && !filters.fecha_fin && !PERIODOS_VALIDOS.has(periodoNormalizado)) {
@@ -179,15 +204,21 @@ export class ReportesBussnies implements IReportesBussniees {
     }
 
     const rango = this.resolverRango(periodoNormalizado, filters);
+    const limiteProductos = opciones.limiteProductos ?? LIMITE_PRODUCTOS_PANTALLA;
+    const limiteClientes = opciones.limiteClientes ?? LIMITE_CLIENTES_PANTALLA;
+    // Solo un id entero y positivo filtra por tipo; cualquier otra cosa (NaN, 0) es «todos los tipos».
+    const idTipoFiltro =
+      Number.isInteger(filters.id_tipo) && Number(filters.id_tipo) > 0 ? Number(filters.id_tipo) : undefined;
 
+    // El tipo se filtra aquí y no en SQL: así se puede repartir lo vendido entre TODOS los tipos.
     const lista = await this.repo.obtenerVentasPorPeriodo(rango.desde, rango.hasta, {
       id_cliente: filters.id_cliente,
-      id_tipo: filters.id_tipo,
       id_moneda: filters.id_moneda,
     });
 
     const detalle: DetalleReporteVentas[] = [];
     const excluidos = { anulados: 0, con_error: 0, rechazados: 0 };
+    const porTipo = new Map<number, { cantidad: number; total: Dinero }>();
     let ventas = Dinero.cero();
     let notasCredito = Dinero.cero();
     let notasDebito = Dinero.cero();
@@ -197,6 +228,19 @@ export class ReportesBussnies implements IReportesBussniees {
 
     for (const item of lista) {
       const clase = clasificarComprobanteReporte(item);
+      const idTipo = idTipoDe(item);
+      const importe = clase.cuenta ? Dinero.desdeBd(item.total) : Dinero.cero();
+
+      if (clase.cuenta) {
+        const clave = Number.isFinite(idTipo) ? idTipo : 0;
+        const acumulado = porTipo.get(clave) ?? { cantidad: 0, total: Dinero.cero() };
+        acumulado.cantidad += 1;
+        acumulado.total = acumulado.total.sumar(clase.signo < 0 ? importe.negar() : importe);
+        porTipo.set(clave, acumulado);
+      }
+
+      if (idTipoFiltro !== undefined && idTipo !== idTipoFiltro) continue;
+
       if (!clase.cuenta) {
         if (clase.motivo === 'anulado') excluidos.anulados += 1;
         else if (clase.motivo === 'error') excluidos.con_error += 1;
@@ -204,7 +248,6 @@ export class ReportesBussnies implements IReportesBussniees {
         continue;
       }
 
-      const importe = Dinero.desdeBd(item.total);
       if (clase.tipo === 'nota_credito') {
         notasCredito = notasCredito.sumar(importe);
         cantidadNc += 1;
@@ -232,12 +275,20 @@ export class ReportesBussnies implements IReportesBussniees {
         cantidad_comprobantes: 1,
         total_vendido: clase.signo < 0 ? importe.negar().aNumero() : importe.aNumero(),
         tipo_documento: clase.tipo,
+        id_tipo: Number.isFinite(idTipo) ? idTipo : undefined,
       });
     }
 
     const bruto = ventas.sumar(notasDebito);
     const neto = bruto.restar(notasCredito);
     const ticketPromedio = cantidadVentas > 0 ? Math.round(neto.centimos / cantidadVentas) / 100 : 0;
+    const productos = await this.rankingsProductos(
+      detalle.map((d) => d.id_comprobante),
+      rango,
+      idTipoFiltro,
+      limiteProductos,
+      filters.id_cliente,
+    );
 
     return {
       periodo: periodoNormalizado,
@@ -247,12 +298,91 @@ export class ReportesBussnies implements IReportesBussniees {
       total_vendido: neto.aNumero(),
       ticket_promedio: ticketPromedio,
       detalle,
-      estadisticas: this.construirEstadisticas(periodoNormalizado, detalle, excluidos),
+      estadisticas: this.construirEstadisticas(periodoNormalizado, detalle, excluidos, limiteClientes),
       total_bruto: bruto.aNumero(),
       notas_credito: { cantidad: cantidadNc, total: notasCredito.aNumero() },
       notas_debito: { cantidad: cantidadNd, total: notasDebito.aNumero() },
       excluidos,
+      por_tipo: this.armarPorTipo(porTipo, idTipoFiltro),
+      filtro_tipo:
+        idTipoFiltro === undefined
+          ? null
+          : { id_tipo: idTipoFiltro, nombre: etiquetaTipoReporte(idTipoFiltro, true) },
+      productos_modo: idTipoFiltro === TIPO_NOTA_CREDITO ? 'devueltos' : 'vendidos',
+      top_productos_vendidos: productos.vendidos,
+      top_productos_cotizados: productos.cotizados,
     };
+  }
+
+  /** Reparto por tipo en el orden factura, boleta, nota de crédito, nota de débito (y otros al final). */
+  private armarPorTipo(
+    porTipo: Map<number, { cantidad: number; total: Dinero }>,
+    idTipoFiltro?: number,
+  ): VentasPorTipo[] {
+    const ids = new Set<number>(porTipo.keys());
+    if (idTipoFiltro !== undefined) ids.add(idTipoFiltro);
+    const orden = (id: number) => {
+      const i = REPORTE_TIPOS.findIndex((t) => t.id_tipo === id);
+      return i < 0 ? REPORTE_TIPOS.length : i;
+    };
+    return Array.from(ids)
+      .sort((a, b) => orden(a) - orden(b) || a - b)
+      .map((id) => {
+        const acumulado = porTipo.get(id);
+        return {
+          id_tipo: id,
+          tipo: etiquetaTipoReporte(id, true),
+          cantidad: acumulado?.cantidad ?? 0,
+          total: acumulado ? acumulado.total.aNumero() : 0,
+        };
+      });
+  }
+
+  /**
+   * Rankings de productos del periodo: lo VENDIDO (neto, con el mismo filtro de tipo del
+   * reporte) y lo COTIZADO (proformas no anuladas). Son un complemento: si alguna consulta
+   * falla se registra y el reporte de ventas sale completo, con los rankings vacíos.
+   */
+  private async rankingsProductos(
+    idsComprobante: Array<number | undefined>,
+    rango: RangoReporte,
+    idTipoFiltro: number | undefined,
+    limite: number,
+    idCliente?: number,
+  ): Promise<{ vendidos: VentasTopProducto[]; cotizados: VentasTopProductoCotizado[] }> {
+    const ids = idsComprobante.filter((id): id is number => typeof id === 'number');
+    try {
+      const [vendidos, cotizados] = await Promise.all([
+        this.repo.obtenerProductosVendidos(ids, limite, idTipoFiltro === TIPO_NOTA_CREDITO),
+        this.repo.obtenerProductosCotizados(rango.desde, rango.hasta, limite, idCliente),
+      ]);
+      return {
+        vendidos: vendidos
+          .map((f) => ({
+            id_producto: f.id_producto === null || f.id_producto === undefined ? null : Number(f.id_producto),
+            codigo: String(f.codigo ?? '').trim(),
+            producto: String(f.descripcion ?? '').trim() || 'Producto sin descripción',
+            cantidad: Number(f.cantidad ?? 0),
+            total: Dinero.desdeBd(f.total).aNumero(),
+            comprobantes: Number(f.comprobantes ?? 0),
+          }))
+          .filter((p) => p.cantidad > 0 || p.total > 0),
+        cotizados: cotizados.map((f) => ({
+          id_producto: f.id_producto === null || f.id_producto === undefined ? null : Number(f.id_producto),
+          sku: String(f.sku ?? '').trim(),
+          producto: String(f.descripcion ?? '').trim() || 'Producto sin descripción',
+          cotizaciones: Number(f.cotizaciones ?? 0),
+          cantidad: Number(f.cantidad ?? 0),
+          total: Dinero.desdeBd(f.total).aNumero(),
+          convertidas: Number(f.convertidas ?? 0),
+        })),
+      };
+    } catch (error) {
+      this.logger.warn(
+        `No se pudieron calcular los rankings de productos del reporte: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { vendidos: [], cotizados: [] };
+    }
   }
 
   async reportePorCategoria(filters: any = {}) {
@@ -265,242 +395,21 @@ export class ReportesBussnies implements IReportesBussniees {
     };
   }
 
-  async exportVentasExcel(periodo: string, filters: any): Promise<{ buffer: Buffer; filename: string }> {
+  /** Excel profesional del reporte (varias hojas). Respeta periodo, rango y tipo de comprobante. */
+  async exportVentasExcel(periodo: string, filters: ReportesFilters = {}): Promise<{ buffer: Buffer; filename: string }> {
     try {
-      const report = await this.reporteVentas(periodo, filters);
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const ExcelJS = require('exceljs');
-      const wb = new ExcelJS.Workbook();
-      wb.creator = emisorConfig.razon_social;
-      wb.created = new Date();
-
-      const ws = wb.addWorksheet('Ventas', {
-        views: [{ state: 'frozen', ySplit: 12 }],
-        properties: { defaultRowHeight: 18 },
+      const report = await this.reporteVentas(periodo, filters, {
+        limiteProductos: LIMITE_PRODUCTOS_EXPORT,
+        limiteClientes: LIMITE_CLIENTES_EXPORT,
       });
-
-      const cabecera = this.armarCabecera(report);
-      const filas = this.filasDetalle(report);
-      const stats = report.estadisticas;
-      const thin = {
-        style: 'thin',
-        color: { argb: `FF${EXCEL.border}` },
-      };
-
-      ws.mergeCells('A1:F1');
-      const title = ws.getCell('A1');
-      title.value = cabecera.empresa;
-      title.font = { bold: true, size: 16, color: { argb: `FF${EXCEL.titleFg}` } };
-      title.alignment = { vertical: 'middle', horizontal: 'left' };
-
-      ws.mergeCells('A2:F2');
-      ws.getCell('A2').value = `RUC ${cabecera.ruc}`;
-      ws.getCell('A2').font = { size: 10, color: { argb: 'FF555555' } };
-
-      ws.mergeCells('A3:F3');
-      ws.getCell('A3').value = cabecera.titulo;
-      ws.getCell('A3').font = { bold: true, size: 13, color: { argb: `FF${EXCEL.titleFg}` } };
-
-      ws.mergeCells('A4:F4');
-      ws.getCell('A4').value =
-        `Periodo: ${etiquetaPeriodo(report.periodo)}  |  ${cabecera.fechaInicio} — ${cabecera.fechaFin}`;
-      ws.getCell('A4').font = { size: 10 };
-
-      ws.mergeCells('A5:F5');
-      ws.getCell('A5').value = `Generado: ${cabecera.generadoEl}`;
-      ws.getCell('A5').font = { size: 9, italic: true, color: { argb: 'FF666666' } };
-
-      if (cabecera.nota) {
-        ws.mergeCells('A6:F6');
-        ws.getCell('A6').value = cabecera.nota;
-        ws.getCell('A6').font = { size: 9, color: { argb: 'FF666666' } };
-      }
-
-      const kpiStart = 8;
-      const kpis: Array<[string, string | number]> = [
-        ['Total vendido', report.total_vendido],
-        ['Ventas brutas', report.total_bruto],
-        ['Notas de crédito', report.notas_credito.total ? -report.notas_credito.total : 0],
-        ['Comprobantes', report.cantidad_comprobantes],
-        ['Ticket promedio', report.ticket_promedio],
-        ['Venta máxima', stats.venta_maxima],
-        ['Venta mínima', stats.venta_minima],
-        ['Emitidos', stats.emitidos],
-        ['Anulados', stats.anulados],
-        ['Con error', stats.con_error],
-        ['Días con venta', stats.dias_con_venta],
-      ];
-
-      ws.getCell(`A${kpiStart}`).value = 'Resumen';
-      ws.getCell(`A${kpiStart}`).font = { bold: true, size: 11 };
-      ws.mergeCells(`A${kpiStart}:B${kpiStart}`);
-      ws.getCell(`A${kpiStart}`).fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: `FF${EXCEL.sectionBg}` },
-      };
-
-      const kpiMoneda = new Set([
-        'Total vendido', 'Ventas brutas', 'Notas de crédito', 'Ticket promedio', 'Venta máxima', 'Venta mínima',
-      ]);
-      kpis.forEach(([label, value], i) => {
-        const row = kpiStart + 1 + i;
-        const cLabel = ws.getCell(`A${row}`);
-        const cVal = ws.getCell(`B${row}`);
-        cLabel.value = label;
-        cLabel.fill = {
-          type: 'pattern',
-          pattern: 'solid',
-          fgColor: { argb: `FF${EXCEL.kpiLabelBg}` },
-        };
-        cLabel.border = { top: thin, left: thin, bottom: thin, right: thin };
-        cVal.border = { top: thin, left: thin, bottom: thin, right: thin };
-        cVal.value = value;
-        if (kpiMoneda.has(label) && typeof value === 'number') {
-          cVal.numFmt = '"S/"#,##0.00';
-        }
-        cVal.alignment = { horizontal: 'right' };
-      });
-
-      let rowIdx = kpiStart + 1 + kpis.length + 1;
-      ws.mergeCells(`A${rowIdx}:F${rowIdx}`);
-      ws.getCell(`A${rowIdx}`).value = 'Detalle de comprobantes';
-      ws.getCell(`A${rowIdx}`).font = { bold: true, size: 11 };
-      ws.getCell(`A${rowIdx}`).fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: `FF${EXCEL.sectionBg}` },
-      };
-
-      rowIdx += 1;
-      const headerRow = ws.getRow(rowIdx);
-      REPORTE_COLUMNAS_DETALLE.forEach((col, i) => {
-        const cell = headerRow.getCell(i + 1);
-        cell.value = col.label;
-        cell.font = { bold: true, color: { argb: `FF${EXCEL.headerFg}` } };
-        cell.fill = {
-          type: 'pattern',
-          pattern: 'solid',
-          fgColor: { argb: `FF${EXCEL.headerBg}` },
-        };
-        cell.alignment = { vertical: 'middle', horizontal: i === 5 ? 'right' : 'left' };
-        cell.border = { top: thin, left: thin, bottom: thin, right: thin };
-      });
-      headerRow.height = 20;
-      const freezeAt = rowIdx;
-      ws.views = [{ state: 'frozen', ySplit: freezeAt }];
-
-      if (!filas.length) {
-        rowIdx += 1;
-        ws.mergeCells(`A${rowIdx}:F${rowIdx}`);
-        ws.getCell(`A${rowIdx}`).value = 'Sin movimientos en el periodo seleccionado.';
-        ws.getCell(`A${rowIdx}`).font = { italic: true, color: { argb: 'FF666666' } };
-      } else {
-        filas.forEach((f, idx) => {
-          rowIdx += 1;
-          const row = ws.getRow(rowIdx);
-          const values = [f.comprobante, f.fecha, f.cliente, f.documento, f.estado, f.total];
-          values.forEach((v, i) => {
-            const cell = row.getCell(i + 1);
-            cell.value = v;
-            cell.border = { top: thin, left: thin, bottom: thin, right: thin };
-            if (idx % 2 === 1) {
-              cell.fill = {
-                type: 'pattern',
-                pattern: 'solid',
-                fgColor: { argb: `FF${EXCEL.altRow}` },
-              };
-            }
-            if (i === 5) {
-              cell.numFmt = '"S/"#,##0.00';
-              cell.alignment = { horizontal: 'right' };
-            }
-          });
-        });
-      }
-
-      if (stats.serie?.length) {
-        rowIdx += 2;
-        ws.mergeCells(`A${rowIdx}:C${rowIdx}`);
-        ws.getCell(`A${rowIdx}`).value = 'Serie temporal';
-        ws.getCell(`A${rowIdx}`).font = { bold: true, size: 11 };
-        ws.getCell(`A${rowIdx}`).fill = {
-          type: 'pattern',
-          pattern: 'solid',
-          fgColor: { argb: `FF${EXCEL.sectionBg}` },
-        };
-        rowIdx += 1;
-        ['Etiqueta', 'Cantidad', 'Total'].forEach((label, i) => {
-          const cell = ws.getRow(rowIdx).getCell(i + 1);
-          cell.value = label;
-          cell.font = { bold: true, color: { argb: `FF${EXCEL.headerFg}` } };
-          cell.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: `FF${EXCEL.headerBg}` },
-          };
-          cell.border = { top: thin, left: thin, bottom: thin, right: thin };
-        });
-        stats.serie.forEach((p) => {
-          rowIdx += 1;
-          const row = ws.getRow(rowIdx);
-          row.getCell(1).value = p.etiqueta;
-          row.getCell(2).value = p.cantidad;
-          row.getCell(3).value = p.total;
-          row.getCell(3).numFmt = '"S/"#,##0.00';
-          for (let i = 1; i <= 3; i++) {
-            row.getCell(i).border = { top: thin, left: thin, bottom: thin, right: thin };
-          }
-        });
-      }
-
-      if (stats.top_clientes?.length) {
-        rowIdx += 2;
-        ws.mergeCells(`A${rowIdx}:D${rowIdx}`);
-        ws.getCell(`A${rowIdx}`).value = 'Top clientes';
-        ws.getCell(`A${rowIdx}`).font = { bold: true, size: 11 };
-        ws.getCell(`A${rowIdx}`).fill = {
-          type: 'pattern',
-          pattern: 'solid',
-          fgColor: { argb: `FF${EXCEL.sectionBg}` },
-        };
-        rowIdx += 1;
-        ['Cliente', 'Documento', 'Cantidad', 'Total'].forEach((label, i) => {
-          const cell = ws.getRow(rowIdx).getCell(i + 1);
-          cell.value = label;
-          cell.font = { bold: true, color: { argb: `FF${EXCEL.headerFg}` } };
-          cell.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: `FF${EXCEL.headerBg}` },
-          };
-          cell.border = { top: thin, left: thin, bottom: thin, right: thin };
-        });
-        stats.top_clientes.forEach((c) => {
-          rowIdx += 1;
-          const row = ws.getRow(rowIdx);
-          row.getCell(1).value = c.cliente;
-          row.getCell(2).value = c.documento || '';
-          row.getCell(3).value = c.cantidad;
-          row.getCell(4).value = c.total;
-          row.getCell(4).numFmt = '"S/"#,##0.00';
-          for (let i = 1; i <= 4; i++) {
-            row.getCell(i).border = { top: thin, left: thin, bottom: thin, right: thin };
-          }
-        });
-      }
-
-      REPORTE_COLUMNAS_DETALLE.forEach((col, i) => {
-        ws.getColumn(i + 1).width = col.excelWidth;
-      });
-
-      const buf = await wb.xlsx.writeBuffer();
+      const buffer = await generarReporteVentasExcel({ cabecera: this.armarCabecera(report), reporte: report });
       return {
-        buffer: Buffer.from(buf),
-        filename: nombreArchivoReporte('ventas', report.periodo, 'xlsx'),
+        buffer,
+        filename: nombreArchivoReporte('ventas', report.periodo, 'xlsx', claveTipoReporte(report.filtro_tipo?.id_tipo)),
       };
     } catch (e) {
       if (e instanceof BadRequestException) throw e;
+      this.logger.error(`No se pudo generar el Excel del reporte de ventas: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
       throw new BadRequestException(
         cuerpoError(
           CodigoError.REPORTE_EXPORT_FALLIDA,
@@ -510,178 +419,21 @@ export class ReportesBussnies implements IReportesBussniees {
     }
   }
 
-  async exportVentasPdf(periodo: string, filters: any): Promise<{ buffer: Buffer; filename: string }> {
+  /** PDF profesional del reporte. Respeta periodo, rango y tipo de comprobante. */
+  async exportVentasPdf(periodo: string, filters: ReportesFilters = {}): Promise<{ buffer: Buffer; filename: string }> {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const PDFDocument = require('pdfkit');
-      const report = await this.reporteVentas(periodo, filters);
-      const cabecera = this.armarCabecera(report);
-      const filas = this.filasDetalle(report);
-      const stats = report.estadisticas;
-
-      const doc = new PDFDocument({
-        size: 'A4',
-        margin: 40,
-        bufferPages: true,
-        info: {
-          Title: cabecera.titulo,
-          Author: cabecera.empresa,
-        },
+      const report = await this.reporteVentas(periodo, filters, {
+        limiteProductos: LIMITE_PRODUCTOS_PANTALLA,
+        limiteClientes: LIMITE_CLIENTES_PANTALLA * 2,
       });
-      const chunks: Uint8Array[] = [];
-      doc.on('data', (chunk: Uint8Array) => chunks.push(chunk));
-
-      const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-      const left = doc.page.margins.left;
-      const bottomLimit = doc.page.height - 50;
-
-      doc.fillColor('#1F4E79').font('Helvetica-Bold').fontSize(16).text(cabecera.empresa, left, 40, {
-        width: pageWidth,
-      });
-      doc.fillColor('#555555').font('Helvetica').fontSize(9).text(`RUC ${cabecera.ruc}`, { width: pageWidth });
-      doc.moveDown(0.4);
-      doc.fillColor('#1F4E79').font('Helvetica-Bold').fontSize(13).text(cabecera.titulo, { width: pageWidth });
-      doc.fillColor('#333333').font('Helvetica').fontSize(9);
-      doc.text(
-        `Periodo: ${etiquetaPeriodo(report.periodo)}   |   ${cabecera.fechaInicio} — ${cabecera.fechaFin}`,
-      );
-      doc.fillColor('#666666').fontSize(8).text(`Generado: ${cabecera.generadoEl}`);
-      if (cabecera.nota) {
-        doc.text(cabecera.nota);
-      }
-      doc.moveDown(0.6);
-
-      doc.fillColor('#333333').font('Helvetica-Bold').fontSize(10).text('Resumen');
-      doc.moveDown(0.2);
-      doc.font('Helvetica').fontSize(9);
-      const kpiLines = [
-        `Total vendido: ${formatearMonedaEs(report.total_vendido)}`,
-        `Ventas brutas: ${formatearMonedaEs(report.total_bruto)}   |   Notas de crédito (${report.notas_credito.cantidad}): ${formatearMonedaEs(report.notas_credito.total ? -report.notas_credito.total : 0)}`,
-        `Comprobantes: ${report.cantidad_comprobantes}   |   Ticket promedio: ${formatearMonedaEs(report.ticket_promedio)}`,
-        `Máx / Mín: ${formatearMonedaEs(stats.venta_maxima)} / ${formatearMonedaEs(stats.venta_minima)}`,
-        `Emitidos: ${stats.emitidos}   |   Anulados: ${stats.anulados}   |   Con error: ${stats.con_error}`,
-      ];
-      kpiLines.forEach((line) => doc.text(line));
-      doc.moveDown(0.7);
-
-      const colWidths = REPORTE_COLUMNAS_DETALLE.map((c) => c.pdfWidth);
-      const rowH = 18;
-
-      const dibujarHeaderTabla = () => {
-        const y = doc.y;
-        doc.save();
-        doc.rect(left, y, pageWidth, rowH).fill('#1F4E79');
-        doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(8);
-        let x = left;
-        REPORTE_COLUMNAS_DETALLE.forEach((col, i) => {
-          const align = i === 5 ? 'right' : 'left';
-          doc.text(col.label, x + 3, y + 5, { width: colWidths[i] - 6, align });
-          x += colWidths[i];
-        });
-        doc.restore();
-        doc.y = y + rowH;
-      };
-
-      const asegurarEspacio = (alto: number) => {
-        if (doc.y + alto > bottomLimit) {
-          doc.addPage();
-          dibujarHeaderTabla();
-        }
-      };
-
-      doc.fillColor('#333333').font('Helvetica-Bold').fontSize(10).text('Detalle de comprobantes');
-      doc.moveDown(0.3);
-      dibujarHeaderTabla();
-
-      if (!filas.length) {
-        asegurarEspacio(24);
-        doc.fillColor('#666666').font('Helvetica-Oblique').fontSize(9)
-          .text('Sin movimientos en el periodo seleccionado.', left + 4, doc.y + 6);
-        doc.moveDown(1);
-      } else {
-        filas.forEach((f, idx) => {
-          asegurarEspacio(rowH);
-          const y = doc.y;
-          if (idx % 2 === 1) {
-            doc.save();
-            doc.rect(left, y, pageWidth, rowH).fill('#F7F9FC');
-            doc.restore();
-          }
-          doc.save();
-          doc.strokeColor('#B0B0B0').lineWidth(0.4);
-          doc.rect(left, y, pageWidth, rowH).stroke();
-          doc.restore();
-
-          const cells = [
-            f.comprobante,
-            f.fecha,
-            f.cliente,
-            f.documento,
-            f.estado,
-            formatearMonedaEs(f.total),
-          ];
-          doc.fillColor('#222222').font('Helvetica').fontSize(8);
-          let x = left;
-          cells.forEach((text, i) => {
-            const align = i === 5 ? 'right' : 'left';
-            const maxLen = i === 2 ? 28 : 40;
-            const t = String(text || '—');
-            doc.text(t.length > maxLen ? `${t.slice(0, maxLen - 1)}…` : t, x + 3, y + 5, {
-              width: colWidths[i] - 6,
-              align,
-              lineBreak: false,
-            });
-            x += colWidths[i];
-          });
-          doc.y = y + rowH;
-        });
-      }
-
-      if (stats.top_clientes?.length) {
-        doc.moveDown(0.8);
-        asegurarEspacio(40);
-        doc.fillColor('#333333').font('Helvetica-Bold').fontSize(10).text('Top clientes');
-        doc.moveDown(0.2);
-        doc.font('Helvetica').fontSize(8).fillColor('#222222');
-        stats.top_clientes.forEach((c, i) => {
-          asegurarEspacio(14);
-          doc.text(
-            `${i + 1}. ${c.cliente}${c.documento ? ` (${c.documento})` : ''} — ${c.cantidad} doc. — ${formatearMonedaEs(c.total)}`,
-          );
-        });
-      }
-
-      const range = doc.bufferedPageRange();
-      for (let i = 0; i < range.count; i++) {
-        doc.switchToPage(range.start + i);
-        const pieY = doc.page.height - 32;
-        doc.font('Helvetica').fontSize(8).fillColor('#666666');
-        doc.text(
-          `${cabecera.empresa} · Reporte de ventas`,
-          left,
-          pieY,
-          { width: pageWidth / 2, align: 'left', lineBreak: false },
-        );
-        doc.text(
-          `Página ${i + 1} de ${range.count}`,
-          left + pageWidth / 2,
-          pieY,
-          { width: pageWidth / 2, align: 'right', lineBreak: false },
-        );
-      }
-
-      doc.end();
-      await new Promise<void>((resolve, reject) => {
-        doc.on('end', () => resolve());
-        doc.on('error', reject);
-      });
-
+      const buffer = await generarReporteVentasPdf({ cabecera: this.armarCabecera(report), reporte: report });
       return {
-        buffer: Buffer.concat(chunks.map((c) => Buffer.from(c))),
-        filename: nombreArchivoReporte('ventas', report.periodo, 'pdf'),
+        buffer,
+        filename: nombreArchivoReporte('ventas', report.periodo, 'pdf', claveTipoReporte(report.filtro_tipo?.id_tipo)),
       };
     } catch (e) {
       if (e instanceof BadRequestException) throw e;
+      this.logger.error(`No se pudo generar el PDF del reporte de ventas: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
       throw new BadRequestException(
         cuerpoError(
           CodigoError.REPORTE_EXPORT_FALLIDA,
@@ -691,39 +443,36 @@ export class ReportesBussnies implements IReportesBussniees {
     }
   }
 
-  private armarCabecera(report: VentasReportResponse): CabeceraReporte {
+  private armarCabecera(report: ReporteVentasNeto): CabeceraReporte {
+    // Días y hora de Lima: el servidor corre en UTC.
+    const fechaInicio = ymdLegible(aFechaLima(new Date(report.fecha_inicio)));
+    const fechaFin = ymdLegible(aFechaLima(new Date(report.fecha_fin)));
+    const tipo = report.filtro_tipo ? report.filtro_tipo.nombre : 'Todos los comprobantes';
     return {
       empresa: emisorConfig.razon_social || 'HATUNSALES S.A.C.',
       ruc: emisorConfig.ruc || '—',
-      titulo: 'Reporte de ventas',
+      direccion: [emisorConfig.direccion, emisorConfig.ubicacion].filter(Boolean).join(' · '),
+      titulo: report.filtro_tipo ? `Reporte de ventas · ${tipo}` : 'Reporte de ventas',
       periodo: report.periodo,
-      // Días y hora de Lima: el servidor corre en UTC.
-      fechaInicio: ymdLegible(aFechaLima(new Date(report.fecha_inicio))),
-      fechaFin: ymdLegible(aFechaLima(new Date(report.fecha_fin))),
+      fechaInicio,
+      fechaFin,
       generadoEl: fechaHoraLimaLegible(new Date()),
       nota:
         'Ventas netas: facturas y boletas más notas de débito, menos notas de crédito. ' +
         'No incluye anulados, rechazados por SUNAT, con error ni pruebas BETA.',
+      filtros: [
+        { etiqueta: 'Periodo', valor: etiquetaPeriodo(report.periodo) },
+        { etiqueta: 'Rango', valor: `${fechaInicio} — ${fechaFin}` },
+        { etiqueta: 'Tipo', valor: tipo },
+      ],
     };
-  }
-
-  private filasDetalle(report: VentasReportResponse): FilaDetalleReporte[] {
-    return (report.detalle || []).map((d) => ({
-      comprobante:
-        d.numero_formateado ||
-        (d.serie || d.numero != null ? `${d.serie ?? ''}-${d.numero ?? ''}` : '—'),
-      fecha: ymdLegible(d.fecha),
-      cliente: d.cliente || '—',
-      documento: d.documento_cliente || '—',
-      estado: capitalizarEstado(d.estado),
-      total: Number(d.total_vendido ?? 0),
-    }));
   }
 
   private construirEstadisticas(
     periodo: string,
     detalle: DetalleReporteVentas[],
     excluidos: { anulados: number; con_error: number; rechazados: number },
+    limiteClientes = LIMITE_CLIENTES_PANTALLA,
   ): VentasEstadisticas {
     // Máximo, mínimo y días con venta miran solo facturas y boletas: una nota no es una venta.
     const ventas = detalle.filter((d) => d.tipo_documento === 'venta');
@@ -732,7 +481,7 @@ export class ReportesBussnies implements IReportesBussniees {
     const ventaMinima = totales.length ? Math.min(...totales) : 0;
 
     const serie = this.agruparSerie(periodo, detalle);
-    const topClientes = this.topClientes(detalle, 5);
+    const topClientes = this.topClientes(detalle, limiteClientes);
     const diasConVenta = new Set(ventas.map((d) => d.fecha).filter(Boolean)).size;
 
     return {

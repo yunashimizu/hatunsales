@@ -1,7 +1,9 @@
-import { Body, Controller, Get, HttpCode, Param, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Header, HttpCode, Param, ParseIntPipe, Post, Query, ServiceUnavailableException, UseGuards } from '@nestjs/common';
 import { VentaBussnies } from '../../bussnies/Bussnies/venta.bussnies';
+import { VentaDocumentosBussnies } from '../../bussnies/Bussnies/venta-documentos.bussnies';
 import { CrearVentaRequest, EmitirComprobanteVentaRequest } from '../../models/model/venta/venta.request';
 import { AnularVentaRequest } from '../../models/model/venta/anular-venta.request';
+import { ListarVentasRequest, ListarVentasSinComprobanteRequest } from '../../models/model/venta/listar-ventas.request';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
 import { Roles } from '../../guards/roles.decorator';
@@ -13,7 +15,10 @@ import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 @Roles('admin', 'vendedor', 'caja')
 export class VentaController {
 
-  constructor(private readonly service: VentaBussnies) {}
+  constructor(
+    private readonly service: VentaBussnies,
+    private readonly documentosVenta?: VentaDocumentosBussnies,
+  ) {}
 
   /** Autocompletado de productos del punto de venta. */
   @Get('productos')
@@ -30,8 +35,13 @@ export class VentaController {
     );
   }
 
-  /** Catálogo activo para cache local del mostrador. */
+  /**
+   * Catálogo activo para cache local del mostrador. Sin max-age (stock y precio cambian):
+   * el navegador revalida cada vez con el ETag que Express calcula y, si nada cambió,
+   * recibe un 304 sin cuerpo en lugar del catálogo entero (D14).
+   */
   @Get('productos/catalogo')
+  @Header('Cache-Control', 'private, no-cache')
   catalogoProductos(
     @Query('limite') limite?: string,
     @Query('id_almacen') idAlmacen?: string,
@@ -77,23 +87,27 @@ export class VentaController {
     return this.service.registrar(body, usuario);
   }
 
+  /**
+   * Historial de ventas: cliente, documento o serie-número (texto), días de Lima, estado, con o sin
+   * comprobante y origen; cada fila trae su comprobante vigente y cuántas notas y guías tiene.
+   */
   @Get()
-  listar(
-    @Query('texto') texto?: string,
-    @Query('desde') desde?: string,
-    @Query('hasta') hasta?: string,
-    @Query('origen') origen?: string,
-    @Query('pagina') pagina?: string,
-    @Query('por_pagina') porPagina?: string,
-  ) {
-    return this.service.listar({
-      texto,
-      desde,
-      hasta,
-      origen,
-      pagina: Number(pagina) || 1,
-      por_pagina: Number(porPagina) || 20,
-    });
+  listar(@Query() filtro: ListarVentasRequest) {
+    return this.service.listar(filtro);
+  }
+
+  /** Ventas activas sin factura ni boleta vigente (pestaña «Ventas sin comprobante» de Documentos). Va antes de ':id'. */
+  @Get('sin-comprobante')
+  @Roles('admin', 'vendedor', 'caja')
+  ventasSinComprobante(@Query() filtro: ListarVentasSinComprobanteRequest) {
+    return this.negocioDocumentos().sinComprobante(filtro);
+  }
+
+  /** Comprobante, notas de crédito y guías de la venta, con lo que se puede hacer y los avisos (D10). */
+  @Get(':id/documentos')
+  @Roles('admin', 'vendedor', 'caja')
+  documentos(@Param('id', ParseIntPipe) id: number, @UsuarioActual() usuario: UsuarioToken) {
+    return this.negocioDocumentos().documentos(id, usuario);
   }
 
   @Get(':id')
@@ -126,5 +140,13 @@ export class VentaController {
     @UsuarioActual() usuario: UsuarioToken,
   ) {
     return this.service.anular(id, body ?? {}, usuario);
+  }
+
+  /** Nest siempre lo inyecta; el parámetro es opcional para que las pruebas que solo usan VentaBussnies no lo armen. */
+  private negocioDocumentos(): VentaDocumentosBussnies {
+    if (!this.documentosVenta) {
+      throw new ServiceUnavailableException('Los documentos de la venta no están disponibles en este momento. Intente de nuevo en unos minutos.');
+    }
+    return this.documentosVenta;
   }
 }

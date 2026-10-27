@@ -79,7 +79,9 @@ export function opcionesPoolPostgres(): Record<string, unknown> {
   const lockTimeout = numeroEntorno('DB_LOCK_TIMEOUT_MS', 0, { min: 0, max: 600_000 });
   return {
     max: Math.floor(numeroEntorno('DB_POOL_MAX', 15, { min: 1, max: 100 })),
-    idleTimeoutMillis: numeroEntorno('DB_IDLE_MS', 60_000, { min: 1_000, max: 3_600_000 }),
+    // 5 min: reabrir una conexión por el proxy público de Railway (TCP + TLS + login) cuesta
+    // más que mantenerla abierta entre ráfagas de peticiones (auditoría R13).
+    idleTimeoutMillis: numeroEntorno('DB_IDLE_MS', 300_000, { min: 1_000, max: 3_600_000 }),
     connectionTimeoutMillis: numeroEntorno('DB_CONNECT_TIMEOUT_MS', 10_000, { min: 1_000, max: 120_000 }),
     keepAlive: true,
     keepAliveInitialDelayMillis: 10_000,

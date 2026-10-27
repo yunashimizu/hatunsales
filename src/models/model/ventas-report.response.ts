@@ -29,6 +29,38 @@ export class VentasTopCliente {
   cantidad!: number;
 }
 
+/** Reparto de lo vendido por tipo de comprobante. `total` lleva signo: la nota de crédito resta. */
+export class VentasPorTipo {
+  id_tipo!: number;
+  tipo!: string;
+  cantidad!: number;
+  total!: number;
+}
+
+/** Producto del ranking de lo vendido en el periodo (neto de notas de crédito). */
+export class VentasTopProducto {
+  id_producto!: number | null;
+  codigo!: string;
+  producto!: string;
+  cantidad!: number;
+  total!: number;
+  /** En cuántos comprobantes aparece. */
+  comprobantes!: number;
+}
+
+/** Producto del ranking de cotizaciones (proformas no anuladas) del periodo. */
+export class VentasTopProductoCotizado {
+  id_producto!: number | null;
+  sku!: string;
+  producto!: string;
+  /** En cuántas cotizaciones aparece. */
+  cotizaciones!: number;
+  cantidad!: number;
+  total!: number;
+  /** Cuántas de esas cotizaciones llegaron a ser una venta. */
+  convertidas!: number;
+}
+
 export class VentasEstadisticas {
   venta_maxima!: number;
   venta_minima!: number;

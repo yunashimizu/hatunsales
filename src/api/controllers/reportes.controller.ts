@@ -13,6 +13,13 @@ import { RolesGuard } from '../../guards/roles.guard';
 import { Roles } from '../../guards/roles.decorator';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 
+/** Entero positivo de un parámetro de la URL; cualquier otra cosa (vacío, texto, 0) es «sin filtro». */
+function enteroPositivo(valor?: string): number | undefined {
+  if (valor === undefined || valor === '') return undefined;
+  const n = Number(valor);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
 @Controller('reportes')
 export class ReportesController {
   constructor(private readonly service: ReportesBussnies) {}
@@ -31,9 +38,9 @@ export class ReportesController {
     return this.service.reporteVentas(periodo, {
       fecha_inicio,
       fecha_fin,
-      id_cliente: id_cliente ? Number(id_cliente) : undefined,
-      id_tipo: id_tipo ? Number(id_tipo) : undefined,
-      id_moneda: id_moneda ? Number(id_moneda) : undefined,
+      id_cliente: enteroPositivo(id_cliente),
+      id_tipo: enteroPositivo(id_tipo),
+      id_moneda: enteroPositivo(id_moneda),
     });
   }
 
@@ -44,6 +51,7 @@ export class ReportesController {
     return this.service.reportePorCategoria({ periodo });
   }
 
+  /** Excel del reporte: respeta los mismos filtros que la pantalla (periodo, rango, tipo de comprobante). */
   @Get('ventas/excel')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin', 'vendedor', 'caja')
@@ -52,11 +60,17 @@ export class ReportesController {
     @Query('periodo') periodo = 'diario',
     @Query('fecha_inicio') fecha_inicio?: string,
     @Query('fecha_fin') fecha_fin?: string,
+    @Query('id_cliente') id_cliente?: string,
+    @Query('id_tipo') id_tipo?: string,
+    @Query('id_moneda') id_moneda?: string,
   ) {
     try {
       const { buffer, filename } = await this.service.exportVentasExcel(periodo, {
         fecha_inicio,
         fecha_fin,
+        id_cliente: enteroPositivo(id_cliente),
+        id_tipo: enteroPositivo(id_tipo),
+        id_moneda: enteroPositivo(id_moneda),
       });
       res.setHeader(
         'Content-Type',
@@ -69,6 +83,7 @@ export class ReportesController {
     }
   }
 
+  /** PDF del reporte: respeta los mismos filtros que la pantalla (periodo, rango, tipo de comprobante). */
   @Get('ventas/pdf')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin', 'vendedor', 'caja')
@@ -77,11 +92,17 @@ export class ReportesController {
     @Query('periodo') periodo = 'diario',
     @Query('fecha_inicio') fecha_inicio?: string,
     @Query('fecha_fin') fecha_fin?: string,
+    @Query('id_cliente') id_cliente?: string,
+    @Query('id_tipo') id_tipo?: string,
+    @Query('id_moneda') id_moneda?: string,
   ) {
     try {
       const { buffer, filename } = await this.service.exportVentasPdf(periodo, {
         fecha_inicio,
         fecha_fin,
+        id_cliente: enteroPositivo(id_cliente),
+        id_tipo: enteroPositivo(id_tipo),
+        id_moneda: enteroPositivo(id_moneda),
       });
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

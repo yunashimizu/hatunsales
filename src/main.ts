@@ -11,6 +11,7 @@ import { booleanoEntorno, esProduccion } from './config/runtime.config';
 import { postgresConfigurado } from './config/database.config';
 import { opcionesCors, origenesPermitidos } from './util/http/cors.config';
 import { crearMiddlewareCabecerasSeguridad } from './util/http/cabeceras-seguridad.middleware';
+import { crearMiddlewareCompresion } from './util/http/compresion';
 import { crearMiddlewareRegistroPeticiones } from './util/http/registro-peticiones.middleware';
 import { crearValidationPipe } from './util/http/validacion/validation-pipe.factory';
 import { configServidorDesdeEntorno, configurarTiemposServidor } from './util/http/servidor-http';
@@ -94,9 +95,10 @@ async function bootstrap() {
   app.set('trust proxy', servidor.confiarEnProxy);
   app.disable('x-powered-by');
 
-  // Orden: id de petición y log → cabeceras → CORS (responde los preflight) → cookies → cuerpo.
+  // Orden: id de petición y log → cabeceras → compresión → CORS (responde los preflight) → cookies → cuerpo.
   app.use(crearMiddlewareRegistroPeticiones({ umbralLentoMs: servidor.umbralPeticionLentaMs }));
   app.use(crearMiddlewareCabecerasSeguridad({ hsts: esProd }));
+  app.use(crearMiddlewareCompresion());
   app.enableCors(opcionesCors(origenesPermitidos({ corsOrigin: process.env.CORS_ORIGIN, produccion: esProd })));
   app.use(cookieParser());
   // JSON y formularios; las subidas multipart (imágenes, certificado .pfx) las limita multer en cada ruta.

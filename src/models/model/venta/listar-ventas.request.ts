@@ -28,6 +28,24 @@ const diaLima = (campo: string) =>
     },
   });
 
+/** Un rango al revés no es un error del servidor ni una lista vacía sin explicación: se avisa. */
+const noAntesDeDesde = () =>
+  ValidateBy({
+    name: 'noAntesDeDesde',
+    validator: {
+      validate: (hasta: unknown, argumentos) => {
+        const desde = (argumentos?.object as { desde?: unknown } | undefined)?.desde;
+        return !esFechaYmd(hasta) || !esFechaYmd(desde) || desde <= hasta;
+      },
+      defaultMessage: () => 'La fecha «desde» no puede ser posterior a «hasta».',
+    },
+  });
+
+/*
+ * Con stopAtFirstError solo sale el primer mensaje de cada campo y class-validator valida en el orden en que
+ * se aplican los decoradores (de abajo hacia arriba): el del tipo va al final para que «diez» diga «número
+ * entero» y no «1 o más».
+ */
 class PaginaVentasRequest {
   @IsOptional()
   @recortar()
@@ -36,19 +54,20 @@ class PaginaVentasRequest {
 
   @IsOptional()
   @recortar()
+  @noAntesDeDesde()
   @diaLima('hasta')
   hasta?: string;
 
   @IsOptional()
   @Type(() => Number)
-  @IsInt({ message: 'pagina debe ser un número entero.' })
   @Min(1, { message: 'pagina debe ser 1 o más.' })
+  @IsInt({ message: 'pagina debe ser un número entero.' })
   pagina?: number;
 
   @IsOptional()
   @Type(() => Number)
-  @IsInt({ message: 'por_pagina debe ser un número entero.' })
   @Min(1, { message: 'por_pagina debe ser 1 o más.' })
+  @IsInt({ message: 'por_pagina debe ser un número entero.' })
   por_pagina?: number;
 }
 
@@ -57,8 +76,8 @@ export class ListarVentasRequest extends PaginaVentasRequest {
   /** Cliente (nombre o documento), número de venta o serie-número de sus comprobantes. */
   @IsOptional()
   @recortar()
-  @IsString({ message: 'texto debe ser un texto.' })
   @MaxLength(100, { message: 'La búsqueda admite hasta 100 caracteres.' })
+  @IsString({ message: 'texto debe ser un texto.' })
   texto?: string;
 
   @IsOptional()
@@ -75,8 +94,8 @@ export class ListarVentasRequest extends PaginaVentasRequest {
   /** 'mostrador' | 'tienda'. */
   @IsOptional()
   @recortar()
-  @IsString({ message: 'origen debe ser un texto.' })
   @MaxLength(30, { message: 'origen admite hasta 30 caracteres.' })
+  @IsString({ message: 'origen debe ser un texto.' })
   origen?: string;
 }
 

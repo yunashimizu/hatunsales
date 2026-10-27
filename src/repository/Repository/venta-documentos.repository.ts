@@ -3,11 +3,12 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { EsquemaCajaService, SnapshotEsquema } from '../../caja/esquema/esquema-caja.service';
 import { sqlFinExclusivoDiaLima, sqlInicioDiaLima, ZONA_LIMA } from '../../util/fecha-lima';
-import { TIPO_BOLETA, TIPO_FACTURA, TIPO_NOTA_CREDITO } from '../../util/fiscal/tipos-comprobante';
+import { esComprobantePrincipal, TIPO_BOLETA, TIPO_FACTURA, TIPO_NOTA_CREDITO } from '../../util/fiscal/tipos-comprobante';
 import type { CabeceraComprobante } from './nota-credito.repository';
 
-/** Tope de filas por página de los listados de ventas (D13). */
+/** Tope de filas por página de los listados de ventas (D13): un valor mayor se recorta, no da error. */
 export const MAXIMO_VENTAS_POR_PAGINA = 100;
+export const VENTAS_POR_PAGINA_DEFECTO = 20;
 
 const CLIENTE_VARIOS = 'CLIENTES VARIOS';
 
@@ -20,12 +21,36 @@ export function sqlPrincipalVigente(alias: string): string {
   return `${alias}.id_tipo IN (${TIPO_FACTURA}, ${TIPO_BOLETA}) AND COALESCE(${alias}.anulado, FALSE) = FALSE AND COALESCE(${alias}.estado, '') <> 'error'`;
 }
 
+/** sqlPrincipalVigente sobre una fila ya leída. */
+export function esPrincipalVigente(c: Pick<CabeceraComprobante, 'id_tipo' | 'anulado' | 'estado'>): boolean {
+  return esComprobantePrincipal(c.id_tipo) && !c.anulado && c.estado !== 'error';
+}
+
 /**
  * Hora de Lima en ISO 8601 de una columna `timestamp without time zone` que guarda la hora UTC (la BD está en
  * Etc/UTC). Se arma en SQL para no depender de la zona del proceso; Perú no tiene horario de verano: -05:00 fijo.
  */
 export function sqlIsoLima(columna: string): string {
   return `to_char((${columna} AT TIME ZONE 'UTC') AT TIME ZONE '${ZONA_LIMA}', 'YYYY-MM-DD"T"HH24:MI:SS"-05:00"')`;
+}
+
+/** Patrón de ILIKE que busca el texto tal cual: `%`, `_` y `\` escritos por el usuario no son comodines (ESCAPE '\'). */
+export function patronContiene(texto: string): string {
+  return `%${texto.replace(/[\\%_]/g, '\\$&')}%`;
+}
+
+/** Estado de la venta en minúsculas ('activa' si la columna no existe o está vacía). */
+export function sqlEstadoVenta(snapshot: SnapshotEsquema, alias = 'v'): string {
+  return snapshot.tieneColumna('ventas', 'estado')
+    ? `LOWER(COALESCE(NULLIF(TRIM(${alias}.estado), ''), 'activa'))`
+    : `'activa'`;
+}
+
+/** Sin la columna ventas.id_empresa la venta no tiene empresa: el JOIN no la referencia. */
+export function sqlJoinEmpresa(snapshot: SnapshotEsquema, alias = 'v'): string {
+  return snapshot.tieneColumna('ventas', 'id_empresa')
+    ? `LEFT JOIN empresas e ON e.id_empresa = ${alias}.id_empresa`
+    : 'LEFT JOIN empresas e ON FALSE';
 }
 
 /** Nombre y documento de quien compró (alias c = clientes, e = empresas); los arma `clienteDe`. */
@@ -40,6 +65,7 @@ export interface VentaDeDocumentos {
   /** ISO 8601 con -05:00. */
   fecha: string;
   total: number;
+  /** 'activa' | 'anulada' (en minúsculas). */
   estado: string;
   cliente: { nombre: string; documento: string | null };
   pagos: { metodo: string; monto: number }[];
@@ -74,6 +100,7 @@ export interface GuiaDeLaVenta {
   id_guia: number;
   serie: string | null;
   numero: number | null;
+  /** Como lo lee el negocio de guías: vacío o nulo = 'borrador'. */
   estado: string;
   /** aaaa-mm-dd. */
   fecha_emision: string | null;
@@ -120,6 +147,14 @@ function booleano(valor: unknown): boolean {
   return valor === true || valor === 't' || valor === 'true';
 }
 
+/** Página pedida y tamaño de página dentro de los topes (D13). */
+export function paginaDe(filtro: { pagina?: number; por_pagina?: number }): { pagina: number; porPagina: number } {
+  return {
+    pagina: Math.max(1, Number(filtro.pagina) || 1),
+    porPagina: Math.min(MAXIMO_VENTAS_POR_PAGINA, Math.max(1, Number(filtro.por_pagina) || VENTAS_POR_PAGINA_DEFECTO)),
+  };
+}
+
 /** El cliente si la venta tiene uno con nombre; si no, la empresa; si no, clientes varios (como en el resto del sistema). */
 function clienteDe(f: Record<string, unknown>): { nombre: string; documento: string | null } {
   if (f.cliente_nombre) {
@@ -134,7 +169,7 @@ function clienteDe(f: Record<string, unknown>): { nombre: string; documento: str
 /**
  * Lectura de los documentos de una venta (PLAN V3, D10): la venta, sus comprobantes (factura, boleta y
  * notas de crédito) y sus guías, una consulta por tipo de documento; y las ventas que se quedaron sin
- * comprobante. Solo lectura. Las columnas de fase12/13/14 se leen como JSON (to_jsonb): sin la migración
+ * comprobante. Solo lectura. Las columnas de fase9/12/14 se leen como JSON (to_jsonb): sin la migración
  * llegan null y nada falla; las opcionales de ventas y del crédito se usan solo si el esquema las reporta.
  */
 @Injectable()
@@ -146,6 +181,11 @@ export class VentaDocumentosRepository {
     private readonly esquema: EsquemaCajaService,
   ) {}
 
+  /** ¿Está sql/fase14_notas_credito_enlace.sql? Sin ella las rutas de notas de crédito responden 503. */
+  notasCreditoHabilitadas(): Promise<boolean> {
+    return this.esquema.tiene('notasCredito');
+  }
+
   /** La venta con su cliente, pagos y cuenta por cobrar. null si no existe. */
   async venta(idVenta: number): Promise<VentaDeDocumentos | null> {
     const snapshot = await this.esquema.snapshot();
@@ -153,7 +193,7 @@ export class VentaDocumentosRepository {
       `SELECT v.id_venta,
               ${sqlIsoLima('v.fecha')} AS fecha,
               COALESCE(v.total, 0)::text AS total,
-              ${this.estadoVenta(snapshot)} AS estado,
+              ${sqlEstadoVenta(snapshot)} AS estado,
               ${SQL_PARTES_CLIENTE},
               (SELECT COUNT(*)::int FROM detalle_venta d WHERE d.id_venta = v.id_venta) AS cantidad_lineas,
               COALESCE((
@@ -173,7 +213,7 @@ export class VentaDocumentosRepository {
                 : `FALSE AS a_credito, '0' AS saldo_cxc`}
          FROM ventas v
          LEFT JOIN clientes c ON c.id_cliente = v.id_cliente
-         ${this.joinEmpresa(snapshot)}
+         ${sqlJoinEmpresa(snapshot)}
         WHERE v.id_venta = $1`,
       [idVenta],
     );
@@ -182,7 +222,7 @@ export class VentaDocumentosRepository {
     const pagos: any[] = Array.isArray(f.pagos) ? f.pagos : [];
     return {
       id_venta: Number(f.id_venta),
-      fecha: String(f.fecha),
+      fecha: String(f.fecha ?? ''),
       total: numero(f.total),
       estado: String(f.estado ?? 'activa'),
       cliente: clienteDe(f),
@@ -216,7 +256,7 @@ export class VentaDocumentosRepository {
          LEFT JOIN fiscal_envios e ON e.id_envio = c.id_envio_ultimo
         WHERE c.id_venta = $1
           AND c.id_tipo = ANY($2::int[])
-        ORDER BY c.creado_en DESC, c.id_comprobante DESC`,
+        ORDER BY c.creado_en DESC NULLS LAST, c.id_comprobante DESC`,
       [idVenta, [TIPO_FACTURA, TIPO_BOLETA, TIPO_NOTA_CREDITO]],
     );
     return filas.map((f) => ({
@@ -260,10 +300,13 @@ export class VentaDocumentosRepository {
     }));
   }
 
-  /** Guías de remisión de la venta, en el orden en que se crearon (solo columnas de guia_remision_directa_v1). */
+  /**
+   * Guías de remisión de la venta, en el orden en que se crearon (solo columnas de guia_remision_directa_v1).
+   * El estado vacío se lee como 'borrador', igual que el negocio de guías.
+   */
   async guias(idVenta: number): Promise<GuiaDeLaVenta[]> {
     const filas: any[] = await this.dataSource.query(
-      `SELECT g.id_guia, g.serie, g.numero, COALESCE(g.estado, 'legacy') AS estado,
+      `SELECT g.id_guia, g.serie, g.numero, COALESCE(NULLIF(TRIM(g.estado), ''), 'borrador') AS estado,
               to_char(g.fecha_emision, 'YYYY-MM-DD') AS fecha_emision,
               NULLIF(TRIM(g.motivo_traslado_codigo), '') AS motivo_codigo,
               NULLIF(TRIM(g.motivo_traslado), '') AS motivo_texto
@@ -290,12 +333,13 @@ export class VentaDocumentosRepository {
   async sinComprobante(
     filtro: FiltroVentasSinComprobante,
   ): Promise<{ filas: VentaSinComprobanteGuardada[]; total: number; pagina: number; por_pagina: number }> {
-    const pagina = Math.max(1, Number(filtro.pagina) || 1);
-    const porPagina = Math.min(MAXIMO_VENTAS_POR_PAGINA, Math.max(1, Number(filtro.por_pagina) || 20));
+    const { pagina, porPagina } = paginaDe(filtro);
     const snapshot = await this.esquema.snapshot();
 
-    const condiciones = [`NOT EXISTS (SELECT 1 FROM comprobantes p WHERE p.id_venta = v.id_venta AND ${sqlPrincipalVigente('p')})`];
-    if (snapshot.tieneColumna('ventas', 'estado')) condiciones.push(`COALESCE(v.estado, 'activa') = 'activa'`);
+    const condiciones = [
+      `NOT EXISTS (SELECT 1 FROM comprobantes p WHERE p.id_venta = v.id_venta AND ${sqlPrincipalVigente('p')})`,
+      `${sqlEstadoVenta(snapshot)} = 'activa'`,
+    ];
     const parametros: unknown[] = [];
     // Días de Lima: ventas.fecha guarda la hora UTC.
     if (filtro.desde) {
@@ -319,7 +363,7 @@ export class VentaDocumentosRepository {
                 u.serie AS ultimo_serie, u.numero AS ultimo_numero, u.anulado AS ultimo_anulado, u.mensaje AS ultimo_mensaje
            FROM ventas v
            LEFT JOIN clientes c ON c.id_cliente = v.id_cliente
-           ${this.joinEmpresa(snapshot)}
+           ${sqlJoinEmpresa(snapshot)}
            LEFT JOIN LATERAL (
                   SELECT p.serie, p.numero, COALESCE(p.anulado, FALSE) AS anulado,
                          CASE WHEN COALESCE(p.anulado, FALSE) THEN NULLIF(TRIM(p.motivo_anulacion), '')
@@ -327,11 +371,11 @@ export class VentaDocumentosRepository {
                          END AS mensaje
                     FROM comprobantes p
                    WHERE p.id_venta = v.id_venta AND p.id_tipo IN (${TIPO_FACTURA}, ${TIPO_BOLETA})
-                   ORDER BY p.creado_en DESC, p.id_comprobante DESC
+                   ORDER BY p.creado_en DESC NULLS LAST, p.id_comprobante DESC
                    LIMIT 1
                 ) u ON TRUE
           WHERE ${donde}
-          ORDER BY v.fecha DESC, v.id_venta DESC
+          ORDER BY v.fecha DESC NULLS LAST, v.id_venta DESC
           LIMIT $${paramsDatos.length - 1} OFFSET $${paramsDatos.length}`,
         paramsDatos,
       ),
@@ -340,7 +384,7 @@ export class VentaDocumentosRepository {
     return {
       filas: (filas as any[]).map((f) => ({
         id_venta: Number(f.id_venta),
-        fecha: String(f.fecha),
+        fecha: String(f.fecha ?? ''),
         total: numero(f.total),
         cliente: clienteDe(f),
         ultimo: f.ultimo_serie === null || f.ultimo_serie === undefined
@@ -351,16 +395,5 @@ export class VentaDocumentosRepository {
       pagina,
       por_pagina: porPagina,
     };
-  }
-
-  private estadoVenta(snapshot: SnapshotEsquema): string {
-    return snapshot.tieneColumna('ventas', 'estado') ? "COALESCE(v.estado, 'activa')" : "'activa'";
-  }
-
-  /** Sin la columna ventas.id_empresa la venta no tiene empresa: el JOIN no la referencia. */
-  private joinEmpresa(snapshot: SnapshotEsquema): string {
-    return snapshot.tieneColumna('ventas', 'id_empresa')
-      ? 'LEFT JOIN empresas e ON e.id_empresa = v.id_empresa'
-      : 'LEFT JOIN empresas e ON FALSE';
   }
 }

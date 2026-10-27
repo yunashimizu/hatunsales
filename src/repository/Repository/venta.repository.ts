@@ -7,6 +7,17 @@ import { planificarSalidas, SalidaStock } from '../../caja/ventas/plan-salida-st
 import { Dinero } from '../../caja/dominio/dinero';
 import { filasDe } from '../../caja/bd/resultado-consulta';
 import { SQL_HOY_LIMA, sqlFinExclusivoDiaLima, sqlInicioDiaLima } from '../../util/fecha-lima';
+import { TIPO_NOTA_CREDITO } from '../../util/fiscal/tipos-comprobante';
+import type { EstadoSunat } from '../../sunat/nucleo/documento-fiscal.types';
+import type { Paginado, VentaHistorialFila } from '../../models/model/venta/venta-documentos.response';
+import {
+  paginaDe,
+  patronContiene,
+  sqlEstadoVenta,
+  sqlIsoLima,
+  sqlJoinEmpresa,
+  sqlPrincipalVigente,
+} from './venta-documentos.repository';
 
 export interface LineaVentaPersistida {
   id_producto: number;
@@ -92,12 +103,17 @@ export interface VentaParaComprobante {
   credito: { monto_total: number; saldo: number; fecha_vencimiento: string | null; estado: string } | null;
 }
 
-/** Filtro ya validado por la capa bussnies: desde/hasta son 'YYYY-MM-DD' (días de Lima). */
+/** Filtro ya validado (ListarVentasRequest): desde/hasta son 'YYYY-MM-DD' (días de Lima). */
 export interface FiltroVentas {
+  /** Cliente (nombre o documento), número de venta o serie-número de cualquiera de sus comprobantes. */
   texto?: string;
   desde?: string;
   hasta?: string;
   origen?: string;
+  /** 'activa' | 'anulada'. */
+  estado?: string;
+  /** 'si': con factura o boleta vigente; 'no': sin ninguna (o solo anuladas o con error). */
+  tiene_comprobante?: string;
   pagina?: number;
   por_pagina?: number;
 }
@@ -1069,21 +1085,38 @@ export class VentaRepository {
     return filas[0] ?? null;
   }
 
-  async listar(filtro: FiltroVentas): Promise<{ datos: any[]; total: number; pagina: number; por_pagina: number }> {
-    const pagina = Math.max(1, Number(filtro.pagina) || 1);
-    const porPagina = Math.min(100, Math.max(1, Number(filtro.por_pagina) || 20));
+  /**
+   * Historial de ventas (GET /venta): cada fila con su comprobante principal VIGENTE (el mismo que cuenta para
+   * D10: factura o boleta no anulada ni en error), los medios de pago y cuántas notas de crédito y guías tiene
+   * (todas, en cualquier estado: las mismas que lista GET /venta/:id/documentos). El texto busca, sin comodines,
+   * en el cliente (nombre, DNI, razón social, RUC), el número de venta y la serie-número de cualquiera de sus
+   * comprobantes ('F001-00000012' o 'F001-12'). Sin comprobante vigente no van comprobante, id_comprobante,
+   * serie ni número.
+   */
+  async listar(filtro: FiltroVentas): Promise<Paginado<VentaHistorialFila>> {
+    const { pagina, porPagina } = paginaDe(filtro);
+    const snapshot = await this.esquema.snapshot();
+    const estado = sqlEstadoVenta(snapshot);
 
     const condiciones: string[] = ['1 = 1'];
-    const parametros: any[] = [];
+    const parametros: unknown[] = [];
 
-    if (filtro.texto?.trim()) {
-      parametros.push(`%${filtro.texto.trim().toLowerCase().slice(0, LARGO_MAXIMO_BUSQUEDA)}%`);
+    const texto = filtro.texto?.trim().slice(0, LARGO_MAXIMO_BUSQUEDA);
+    if (texto) {
+      parametros.push(patronContiene(texto));
+      const p = `$${parametros.length}`;
       condiciones.push(
-        `(LOWER(TRIM(CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno))) LIKE $${parametros.length}
-          OR LOWER(COALESCE(e.razon_social, '')) LIKE $${parametros.length}
-          OR LOWER(COALESCE(e.nombre_comercial, '')) LIKE $${parametros.length}
-          OR LOWER(COALESCE(e.ruc, '')) LIKE $${parametros.length}
-          OR CAST(v.id_venta AS TEXT) LIKE $${parametros.length})`,
+        `(TRIM(CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno)) ILIKE ${p} ESCAPE '\\'
+          OR c.dni::text ILIKE ${p} ESCAPE '\\'
+          OR LPAD(c.dni::text, 8, '0') ILIKE ${p} ESCAPE '\\'
+          OR COALESCE(e.razon_social, '') ILIKE ${p} ESCAPE '\\'
+          OR COALESCE(e.nombre_comercial, '') ILIKE ${p} ESCAPE '\\'
+          OR COALESCE(e.ruc, '') ILIKE ${p} ESCAPE '\\'
+          OR CAST(v.id_venta AS TEXT) ILIKE ${p} ESCAPE '\\'
+          OR EXISTS (SELECT 1 FROM comprobantes s
+                      WHERE s.id_venta = v.id_venta
+                        AND ((s.serie || '-' || LPAD(s.numero::text, 8, '0')) ILIKE ${p} ESCAPE '\\'
+                             OR (s.serie || '-' || s.numero::text) ILIKE ${p} ESCAPE '\\')))`,
       );
     }
     // Días de Lima: las fechas se guardan en UTC sin zona (la BD está en Etc/UTC).
@@ -1099,52 +1132,102 @@ export class VentaRepository {
       parametros.push(filtro.origen);
       condiciones.push(`COALESCE(v.origen, 'mostrador') = $${parametros.length}`);
     }
+    if (filtro.estado) {
+      parametros.push(filtro.estado);
+      condiciones.push(`${estado} = $${parametros.length}`);
+    }
+    if (filtro.tiene_comprobante === 'si' || filtro.tiene_comprobante === 'no') {
+      const vigente = `EXISTS (SELECT 1 FROM comprobantes p WHERE p.id_venta = v.id_venta AND ${sqlPrincipalVigente('p')})`;
+      condiciones.push(filtro.tiene_comprobante === 'si' ? vigente : `NOT ${vigente}`);
+    }
 
     const donde = condiciones.join(' AND ');
+    const tablas = `ventas v
+           LEFT JOIN clientes c ON c.id_cliente = v.id_cliente
+           ${sqlJoinEmpresa(snapshot)}`;
     const paramsDatos = [...parametros, porPagina, (pagina - 1) * porPagina];
 
-    const [totales, datos] = await Promise.all([
+    const [totales, filas] = await Promise.all([
+      this.dataSource.query(`SELECT COUNT(*)::int AS total FROM ${tablas} WHERE ${donde}`, parametros),
       this.dataSource.query(
-        `SELECT COUNT(*)::int AS total FROM ventas v
-         LEFT JOIN clientes c ON c.id_cliente = v.id_cliente
-         LEFT JOIN empresas e ON e.id_empresa = v.id_empresa
-         WHERE ${donde}`,
-        parametros,
-      ),
-      this.dataSource.query(
-        `SELECT v.id_venta, v.fecha, v.total,
+        `SELECT v.id_venta,
+                ${sqlIsoLima('v.fecha')} AS fecha,
+                COALESCE(v.total, 0)::text AS total,
                 COALESCE(v.origen, 'mostrador') AS origen,
                 v.id_cliente,
-                v.id_empresa,
+                ${snapshot.tieneColumna('ventas', 'id_empresa') ? 'v.id_empresa' : 'NULL::int AS id_empresa'},
                 COALESCE(
                   NULLIF(TRIM(CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno)), ''),
                   NULLIF(TRIM(COALESCE(e.razon_social, e.nombre_comercial, e.ruc)), ''),
                   'CLIENTES VARIOS'
                 ) AS cliente_denominacion,
                 (SELECT COUNT(*)::int FROM detalle_venta d WHERE d.id_venta = v.id_venta) AS cantidad_items,
-                cp.id_comprobante,
-                cp.serie,
-                cp.numero,
-                cp.estado AS comprobante_estado,
-                cp.anulado AS comprobante_anulado
-           FROM ventas v
-           LEFT JOIN clientes c ON c.id_cliente = v.id_cliente
-           LEFT JOIN empresas e ON e.id_empresa = v.id_empresa
+                ${estado} AS estado,
+                COALESCE((
+                  SELECT string_agg(m.nombre, ', ' ORDER BY m.primero)
+                    FROM (SELECT COALESCE(NULLIF(TRIM(mp.nombre), ''), 'Pago') AS nombre, MIN(p.id_metodo) AS primero
+                            FROM venta_pago p
+                            LEFT JOIN metodos_pago mp ON mp.id_metodo = p.id_metodo
+                           WHERE p.id_venta = v.id_venta
+                           GROUP BY 1) m
+                ), '') AS metodos_pago,
+                cp.id_comprobante, cp.serie, cp.numero, cp.id_tipo AS comprobante_tipo,
+                cp.estado AS comprobante_estado, cp.estado_sunat AS comprobante_estado_sunat,
+                (SELECT COUNT(*)::int FROM comprobantes n WHERE n.id_venta = v.id_venta AND n.id_tipo = ${TIPO_NOTA_CREDITO}) AS cantidad_notas,
+                (SELECT COUNT(*)::int FROM guias_remision g WHERE g.id_venta = v.id_venta) AS cantidad_guias
+           FROM ${tablas}
            LEFT JOIN LATERAL (
-                  SELECT id_comprobante, serie, numero, estado, anulado
-                    FROM comprobantes
-                   WHERE id_venta = v.id_venta
-                   ORDER BY creado_en DESC
+                  SELECT p.id_comprobante, p.serie, p.numero, p.id_tipo, p.estado, p.estado_sunat
+                    FROM comprobantes p
+                   WHERE p.id_venta = v.id_venta AND ${sqlPrincipalVigente('p')}
+                   ORDER BY p.id_comprobante
                    LIMIT 1
                 ) cp ON TRUE
           WHERE ${donde}
-          ORDER BY v.fecha DESC
+          ORDER BY v.fecha DESC NULLS LAST, v.id_venta DESC
           LIMIT $${paramsDatos.length - 1} OFFSET $${paramsDatos.length}`,
         paramsDatos,
       ),
     ]);
 
-    return { datos, total: totales[0]?.total ?? 0, pagina, por_pagina: porPagina };
+    return {
+      datos: (filas as any[]).map((f) => this.filaHistorial(f)),
+      total: Number((totales as any[])[0]?.total ?? 0),
+      pagina,
+      por_pagina: porPagina,
+    };
+  }
+
+  /** Fila del historial con los tipos del contrato (VentaHistorialFila): números como número, ausentes sin clave. */
+  private filaHistorial(f: any): VentaHistorialFila {
+    const conComprobante = f.id_comprobante !== null && f.id_comprobante !== undefined;
+    const serie = conComprobante ? String(f.serie ?? '') : '';
+    const numero = conComprobante ? Number(f.numero) : 0;
+    return {
+      id_venta: Number(f.id_venta),
+      fecha: String(f.fecha ?? ''),
+      origen: String(f.origen ?? 'mostrador'),
+      ...(f.id_cliente !== null && f.id_cliente !== undefined ? { id_cliente: Number(f.id_cliente) } : {}),
+      ...(f.id_empresa !== null && f.id_empresa !== undefined ? { id_empresa: Number(f.id_empresa) } : {}),
+      cliente_denominacion: String(f.cliente_denominacion ?? 'CLIENTES VARIOS'),
+      total: Number(f.total ?? 0),
+      cantidad_items: Number(f.cantidad_items ?? 0),
+      estado: String(f.estado ?? 'activa'),
+      metodos_pago: String(f.metodos_pago ?? ''),
+      ...(conComprobante
+        ? {
+            comprobante: `${serie}-${String(numero).padStart(8, '0')}`,
+            ...(f.comprobante_estado ? { comprobante_estado: String(f.comprobante_estado) } : {}),
+            id_comprobante: Number(f.id_comprobante),
+            serie,
+            numero,
+          }
+        : {}),
+      comprobante_tipo: conComprobante ? Number(f.comprobante_tipo) : null,
+      comprobante_estado_sunat: conComprobante && f.comprobante_estado_sunat ? (String(f.comprobante_estado_sunat) as EstadoSunat) : null,
+      cantidad_notas: Number(f.cantidad_notas ?? 0),
+      cantidad_guias: Number(f.cantidad_guias ?? 0),
+    };
   }
 
   /**
