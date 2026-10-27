@@ -198,6 +198,18 @@ describe('CorreoComprobanteService', () => {
       expect(omitido).toMatchObject({ estado: 'OMITIDO', puede_reenviar: false });
     });
 
+    it('sin filas, lo que nunca se enviará sale OMITIDO con su motivo y no «Pendiente» para siempre', async () => {
+      const { servicio } = montar();
+      const rechazado = await servicio.estadoResumen(detalle({ estado_sunat: 'RECHAZADO' }) as any);
+      expect(rechazado).toMatchObject({ estado: 'OMITIDO', motivo_omision: 'comprobante rechazado o anulado', puede_reenviar: false });
+      const anulado = await servicio.estadoResumen(detalle({ anulado: true }) as any);
+      expect(anulado).toMatchObject({ estado: 'OMITIDO', motivo_omision: 'comprobante rechazado o anulado' });
+      const sinCorreo = await servicio.estadoResumen(detalle({ receptor: { email: '' } }) as any);
+      expect(sinCorreo).toMatchObject({ estado: 'OMITIDO', motivo_omision: 'el cliente no tiene correo', puede_reenviar: true });
+      const malEscrito = await servicio.estadoResumen(detalle({ receptor: { email: 'no-es-correo' } }) as any);
+      expect(malEscrito).toMatchObject({ estado: 'OMITIDO', motivo_omision: 'correo del cliente no válido' });
+    });
+
     it('con filas usa la última y puede_reenviar solo para aceptados sunat_directo no anulados', async () => {
       const { servicio, repo } = montar();
       repo.ultimo.mockResolvedValue(fila({ estado: 'ERROR', ultimo_error: 'timeout' }));

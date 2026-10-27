@@ -182,6 +182,66 @@ describe('VentaBussnies: recargo por pago con tarjeta', () => {
     expect(config.obtenerNumero).not.toHaveBeenCalledWith('pos_recargo_tarjeta_pct', expect.anything());
   });
 
+  describe('forma de pago de la vista previa', () => {
+    const CREDITO = 9;
+    const conCredito = () => {
+      const creado = crearServicio();
+      creado.creditoRepo.metodosConTipo.mockResolvedValue([
+        { id_metodo: EFECTIVO, nombre: 'Efectivo', tipo: 'efectivo' },
+        { id_metodo: TARJETA, nombre: 'Tarjeta', tipo: 'tarjeta' },
+        { id_metodo: CREDITO, nombre: 'Crédito', tipo: 'credito' },
+      ]);
+      creado.creditoRepo.idMetodoCredito.mockResolvedValue(CREDITO);
+      return creado;
+    };
+
+    it('contado cuando solo hay medios al contado', async () => {
+      const { servicio } = conCredito();
+      const preview: any = await servicio.previsualizar(venta([{ id_metodo: EFECTIVO, monto: 19.6 }]));
+      expect(preview.forma_pago).toBe('Contado');
+    });
+
+    it('crédito cuando algún medio con monto es el crédito, también en un pago mixto', async () => {
+      const { servicio } = conCredito();
+      const mixto: any = await servicio.previsualizar(
+        venta([{ id_metodo: EFECTIVO, monto: 10 }, { id_metodo: CREDITO, monto: 9.6 }]),
+      );
+      expect(mixto.forma_pago).toBe('Credito');
+    });
+
+    it('crédito elegido todavía sin monto: es lo único elegido', async () => {
+      const { servicio } = conCredito();
+      const preview: any = await servicio.previsualizar(venta([{ id_metodo: CREDITO, monto: 0 }]));
+      expect(preview.forma_pago).toBe('Credito');
+    });
+
+    it('crédito sin monto junto a un medio con monto no cuenta como crédito', async () => {
+      const { servicio } = conCredito();
+      const preview: any = await servicio.previsualizar(
+        venta([{ id_metodo: EFECTIVO, monto: 19.6 }, { id_metodo: CREDITO, monto: 0 }]),
+      );
+      expect(preview.forma_pago).toBe('Contado');
+    });
+
+    it('sin medios elegidos no afirma nada ni consulta los métodos de pago', async () => {
+      const { servicio, creditoRepo } = conCredito();
+      const preview: any = await servicio.previsualizar(venta(undefined));
+      expect(preview.forma_pago).toBeUndefined();
+      expect(creditoRepo.metodosConTipo).not.toHaveBeenCalled();
+    });
+
+    it('si falla la lectura de los métodos, la vista previa sale igual sin forma de pago', async () => {
+      const { servicio, creditoRepo } = conCredito();
+      // La primera lectura es la del recargo de tarjeta; la segunda, la de la forma de pago.
+      creditoRepo.metodosConTipo
+        .mockResolvedValueOnce([{ id_metodo: EFECTIVO, nombre: 'Efectivo', tipo: 'efectivo' }])
+        .mockRejectedValue(new Error('bd caída'));
+      const preview: any = await servicio.previsualizar(venta([{ id_metodo: EFECTIVO, monto: 19.6 }]));
+      expect(preview.forma_pago).toBeUndefined();
+      expect(preview.items).toBeDefined();
+    });
+  });
+
   it('Yape u otros medios que no son tarjeta no pagan recargo', async () => {
     const { servicio } = crearServicio();
     const preview: any = await servicio.previsualizar(venta([{ id_metodo: YAPE, monto: 19.6 }]));

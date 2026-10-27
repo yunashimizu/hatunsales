@@ -3,12 +3,17 @@ import axios from 'axios';
 import { promises as fs } from 'fs';
 import { join, normalize, sep } from 'path';
 import { deflateSync, inflateSync } from 'zlib';
+import { LOGO_EMISOR_OFICIAL } from '../../config/emisor.config';
 
 /**
- * Descarga (con caché en memoria) el logo del emisor para imprimirlo en la
- * proforma. Cualquier problema —URL caída, lenta, formato no soportado o
- * imagen corrupta— devuelve null y el documento sale sin logo: nunca debe
- * impedir que se genere el PDF.
+ * Descarga (con caché en memoria) el logo del emisor para imprimirlo en los documentos.
+ *
+ * - Un valor vacío usa el logo oficial (LOGO_EMISOR_OFICIAL).
+ * - Si el logo configurado no se puede leer (archivo retirado, URL caída, formato no soportado
+ *   o imagen corrupta) se usa también el logo oficial: así ningún documento sale sin logo por
+ *   una configuración vieja, como la ruta del PNG anterior.
+ * - Solo si tampoco se puede leer el oficial devuelve null y el documento sale sin logo: el
+ *   logo es decorativo y nunca debe impedir que se genere el PDF.
  */
 
 const TIMEOUT_MS = 3_000;
@@ -26,9 +31,13 @@ const log = new Logger('LogoEmisor');
 const cache = new Map<string, { logo: Buffer | null; expira: number }>();
 
 export async function obtenerLogoEmisor(url: string | null | undefined): Promise<Buffer | null> {
-  const origen = String(url ?? '').trim();
-  if (!origen) return null;
+  const pedido = String(url ?? '').trim() || LOGO_EMISOR_OFICIAL;
+  const logo = await leerLogoConCache(pedido);
+  if (logo || pedido === LOGO_EMISOR_OFICIAL) return logo;
+  return leerLogoConCache(LOGO_EMISOR_OFICIAL);
+}
 
+async function leerLogoConCache(origen: string): Promise<Buffer | null> {
   const enCache = cache.get(origen);
   if (enCache && enCache.expira > Date.now()) return enCache.logo;
 
@@ -38,10 +47,10 @@ export async function obtenerLogoEmisor(url: string | null | undefined): Promise
     if (datos && datos.length <= TAMANO_MAXIMO && imagenSoportada(datos)) {
       logo = await reducirLogo(datos);
     } else if (datos) {
-      log.warn(`El logo del emisor no es PNG/JPEG válido o pesa más de 2 MB; la proforma saldrá sin logo.`);
+      log.warn(`El logo del emisor (${origen.slice(0, 80)}) no es PNG/JPEG válido o pesa más de 2 MB.`);
     }
   } catch (error: any) {
-    log.warn(`No se pudo obtener el logo del emisor (${error?.message ?? error}); la proforma saldrá sin logo.`);
+    log.warn(`No se pudo obtener el logo del emisor (${origen.slice(0, 80)}): ${error?.message ?? error}`);
   }
 
   cache.set(origen, {
@@ -82,6 +91,36 @@ async function leerOrigen(origen: string): Promise<Buffer | null> {
     return fs.readFile(ruta);
   }
 
+  return null;
+}
+
+/**
+ * Ancho y alto en píxeles de un PNG o JPEG, leídos de la cabecera (sin decodificar la imagen).
+ * Sirve para dibujar el logo sin deformarlo allí donde el documento no lo escala solo (Excel).
+ */
+export function dimensionesImagen(datos: Buffer): { ancho: number; alto: number } | null {
+  if (esPng(datos) && datos.length >= 24) {
+    const ancho = datos.readUInt32BE(16);
+    const alto = datos.readUInt32BE(20);
+    return ancho > 0 && alto > 0 ? { ancho, alto } : null;
+  }
+  if (esJpeg(datos)) {
+    let i = 2;
+    while (i + 9 < datos.length) {
+      if (datos[i] !== 0xff) {
+        i++;
+        continue;
+      }
+      const marcador = datos[i + 1];
+      // SOF0..SOF15 (menos DHT 0xC4, JPG 0xC8 y DAC 0xCC) llevan alto y ancho.
+      if (marcador >= 0xc0 && marcador <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marcador)) {
+        const alto = datos.readUInt16BE(i + 5);
+        const ancho = datos.readUInt16BE(i + 7);
+        return ancho > 0 && alto > 0 ? { ancho, alto } : null;
+      }
+      i += 2 + datos.readUInt16BE(i + 2);
+    }
+  }
   return null;
 }
 

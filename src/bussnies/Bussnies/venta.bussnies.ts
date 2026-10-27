@@ -143,7 +143,9 @@ export class VentaBussnies {
    */
   async previsualizar(dto: CrearVentaRequest): Promise<PreviewComprobanteResponse> {
     const { items, itemsRecargo, recargo, totalSinRecargo } = await this.armarLineas(dto);
-    const preview = await this.comprobantes.previsualizar(this.aSolicitudComprobante(dto, items, itemsRecargo));
+    const base = await this.comprobantes.previsualizar(this.aSolicitudComprobante(dto, items, itemsRecargo));
+    const formaPago = await this.formaPagoDeVistaPrevia(dto);
+    const preview = formaPago ? { ...base, forma_pago: formaPago } : base;
     if (!recargo.aplica) return preview;
     return {
       ...preview,
@@ -154,6 +156,32 @@ export class VentaBussnies {
         total_sin_recargo: totalSinRecargo,
       },
     };
+  }
+
+  /**
+   * Forma de pago que llevará el comprobante, para que la vista previa diga lo mismo que el PDF:
+   * crédito si algún medio elegido es el crédito (con monto, o sin monto todavía cuando es lo único
+   * elegido), contado en los demás casos. Sin medios elegidos no se afirma nada. Nunca falla: es solo
+   * informativo y el registro de la venta vuelve a validarlo.
+   */
+  private async formaPagoDeVistaPrevia(dto: CrearVentaRequest): Promise<'Contado' | 'Credito' | undefined> {
+    const pagos = (dto.pagos ?? []).filter((p) => p.id_metodo != null);
+    if (!pagos.length) return undefined;
+    try {
+      const metodos = await this.creditoRepo.metodosConTipo();
+      const idCredito = await this.creditoRepo.idMetodoCredito();
+      const esCredito = (idMetodo: unknown) => {
+        const tipo = String(metodos.find((m) => Number(m.id_metodo) === Number(idMetodo))?.tipo ?? '').toLowerCase();
+        return tipo === 'credito' || (idCredito != null && Number(idMetodo) === idCredito);
+      };
+      const hayMontos = pagos.some((p) => Number(p.monto) > 0);
+      const elegidosCredito = pagos.filter((p) => esCredito(p.id_metodo));
+      const credito = hayMontos ? elegidosCredito.some((p) => Number(p.monto) > 0) : elegidosCredito.length === pagos.length;
+      return credito ? 'Credito' : 'Contado';
+    } catch (error) {
+      this.logger.warn(`No se pudo derivar la forma de pago de la vista previa: ${(error as Error)?.message ?? error}`);
+      return undefined;
+    }
   }
 
   // ── Registrar ────────────────────────────────────────────────

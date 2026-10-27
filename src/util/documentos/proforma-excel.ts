@@ -1,5 +1,6 @@
 import * as ExcelJS from 'exceljs';
 import { montoEnLetras } from '../fiscal/numero-letras';
+import { dimensionesImagen } from './logo-emisor';
 import {
   argb,
   avisoEstadoCliente,
@@ -189,8 +190,13 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
         base64: d.emisor.logo.toString('base64'),
         extension: extensionImagen(d.emisor.logo),
       });
-      // El logo es apaisado (3:2): se dibuja con esa proporción para no deformarlo.
-      ws.addImage(imagenId, { tl: { col: 0.1, row: 0.1 }, ext: { width: 120, height: 80 } });
+      // Se dibuja dentro de una caja de 120x80 con la proporción real del logo, sin deformarlo.
+      const medida = dimensionesImagen(d.emisor.logo) ?? { ancho: 3, alto: 2 };
+      const escala = Math.min(120 / medida.ancho, 80 / medida.alto);
+      ws.addImage(imagenId, {
+        tl: { col: 0.1, row: 0.1 },
+        ext: { width: Math.round(medida.ancho * escala), height: Math.round(medida.alto * escala) },
+      });
     } catch {
       // El documento sigue siendo válido si ExcelJS no acepta la imagen.
     }

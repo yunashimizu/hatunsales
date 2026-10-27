@@ -289,6 +289,8 @@ export interface PreviewComprobanteResponse {
   advertencias: string[];
   proveedor_fiscal?: 'sunat_directo';
   ambiente_fiscal?: 'beta' | 'produccion';
+  /** Solo en la vista previa del POS y si ya hay medios de pago elegidos: lo que dirá el comprobante. */
+  forma_pago?: 'Contado' | 'Credito';
   /** false si hoy la venta se registraría sin comprobante (el motivo va en `advertencias`). */
   emision_activa?: boolean;
   /** Aviso del ambiente (p. ej. «Prueba SUNAT BETA: sin validez tributaria»). */

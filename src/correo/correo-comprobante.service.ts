@@ -213,9 +213,17 @@ export class CorreoComprobanteService {
     if (!detalle.enviar_cliente) {
       return { estado: 'SIN_SOLICITAR', destino, enviado_en: null, ultimo_error: null, motivo_omision: null, puede_reenviar: puedeReenviar };
     }
-    if (detalle.proveedor_fiscal !== 'sunat_directo') {
-      return { estado: 'OMITIDO', destino, enviado_en: null, ultimo_error: null, motivo_omision: 'sin comprobante electrónico', puede_reenviar: false };
+    // Sin fila, el estado se deriva igual que lo decidiría la siembra de la tarea: lo que nunca se va a enviar
+    // se muestra como OMITIDO con su motivo, no como un «Pendiente» que no termina.
+    const omitido = (motivo: string, reenviar: boolean): ResumenCorreoComprobante => ({
+      estado: 'OMITIDO', destino, enviado_en: null, ultimo_error: null, motivo_omision: motivo, puede_reenviar: reenviar,
+    });
+    if (detalle.proveedor_fiscal !== 'sunat_directo') return omitido('sin comprobante electrónico', false);
+    if (detalle.anulado || detalle.estado_sunat === 'RECHAZADO' || detalle.estado_sunat === 'ANULADO') {
+      return omitido('comprobante rechazado o anulado', false);
     }
+    if (!destino) return omitido('el cliente no tiene correo', puedeReenviar);
+    if (!correoValido(destino)) return omitido('correo del cliente no válido', puedeReenviar);
     return { estado: 'PENDIENTE', destino, enviado_en: null, ultimo_error: null, motivo_omision: null, puede_reenviar: puedeReenviar };
   }
 

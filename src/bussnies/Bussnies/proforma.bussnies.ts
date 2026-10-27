@@ -443,12 +443,8 @@ export class ProformaBussnies implements IProformaBussniees {
   }
 
   private async resolverEmisor(cfg: ConfigEmisor): Promise<EmisorDocumento> {
-    // obtenerLogoEmisor nunca lanza: si falla devuelve null y el PDF sale sin logo.
-    const logoLeido = await obtenerLogoEmisor(cfg.logo_url);
-    const logo =
-      logoLeido || (cfg.logo_url !== emisorConfig.logo_url
-        ? await obtenerLogoEmisor(emisorConfig.logo_url)
-        : null);
+    // obtenerLogoEmisor nunca lanza y ya cae al logo oficial si el configurado no se puede leer.
+    const logo = await obtenerLogoEmisor(cfg.logo_url);
 
     return {
       ruc: cfg.ruc,

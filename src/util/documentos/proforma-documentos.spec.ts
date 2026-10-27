@@ -193,6 +193,31 @@ describe('generarProformaExcel', () => {
   });
 });
 
+describe('generarProformaExcel: logo', () => {
+  async function imagenesDeLaHoja(logo: Buffer) {
+    const d = datos();
+    d.emisor = { ...d.emisor!, logo };
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load((await generarProformaExcel(d)) as any);
+    return wb.worksheets[0].getImages();
+  }
+
+  it('dibuja el logo con su proporción real, sin deformarlo, dentro de la caja de 120x80', async () => {
+    for (const [ancho, alto] of [[600, 300], [300, 300], [300, 600], [680, 555]]) {
+      const rgba = Buffer.alloc(ancho * alto * 4, 255);
+      const imagenes = await imagenesDeLaHoja(codificarPng(rgba, ancho, alto));
+      expect(imagenes).toHaveLength(1);
+      const rango: any = imagenes[0].range;
+      // ExcelJS devuelve la medida en EMU (9525 por píxel) cuando el ancla es de una sola celda.
+      const w = Number(rango.ext?.width ?? rango.ext?.cx / 9525);
+      const h = Number(rango.ext?.height ?? rango.ext?.cy / 9525);
+      expect(w).toBeLessThanOrEqual(120.5);
+      expect(h).toBeLessThanOrEqual(80.5);
+      expect(w / h).toBeCloseTo(ancho / alto, 1);
+    }
+  });
+});
+
 describe('reducirLogo', () => {
   function pngSintetico(ancho: number, alto: number): Buffer {
     const rgba = Buffer.alloc(ancho * alto * 4);
