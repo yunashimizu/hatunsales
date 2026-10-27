@@ -1,5 +1,5 @@
 import {
-  IsInt, IsString, IsOptional, IsBoolean,
+  IsEmail, IsInt, IsString, IsOptional, IsBoolean,
   IsNumber, IsArray, ValidateNested, IsIn, Min, MaxLength, MinLength,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -227,6 +227,12 @@ export class GenerarComprobanteRequest {
   @IsBoolean()
   @IsOptional()
   enviar_cliente?: boolean;
+
+  /** Correo del cliente escrito al cobrar; tiene prioridad sobre el del receptor. */
+  @IsEmail()
+  @MaxLength(254)
+  @IsOptional()
+  correo_cliente?: string;
 
   @IsArray()
   @ValidateNested({ each: true })

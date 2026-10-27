@@ -148,13 +148,14 @@ export class ComprobanteCorreosRepository {
     return filas[0] ?? null;
   }
 
-  async marcarEnviado(idCorreo: number, idMensaje: string | null): Promise<void> {
+  /** `destino` solo se pasa cuando el correo salió a otra dirección (BETA: la de pruebas). */
+  async marcarEnviado(idCorreo: number, idMensaje: string | null, destino: string | null = null): Promise<void> {
     await this.bd.query(
       `UPDATE comprobante_correos
-          SET estado = 'ENVIADO', id_mensaje_proveedor = $2, enviado_en = NOW(), ultimo_error = NULL,
+          SET estado = 'ENVIADO', id_mensaje_proveedor = $2, destino = COALESCE($3, destino), enviado_en = NOW(), ultimo_error = NULL,
               proximo_intento_en = NULL, bloqueado_hasta = NULL, actualizado_en = NOW()
         WHERE id_correo = $1`,
-      [idCorreo, idMensaje ? idMensaje.slice(0, 120) : null],
+      [idCorreo, idMensaje ? idMensaje.slice(0, 120) : null, destino],
     );
   }
 

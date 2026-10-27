@@ -87,7 +87,7 @@ describe('ComprobanteCorreosRepository', () => {
     const { repositorio, bd } = crear();
     await repositorio.marcarEnviado(4, 'msg-1');
     expect(bd.llamadas[0].sql).toContain("estado = 'ENVIADO'");
-    expect(bd.llamadas[0].parametros).toEqual([4, 'msg-1']);
+    expect(bd.llamadas[0].parametros).toEqual([4, 'msg-1', null]);
 
     await repositorio.marcarError(4, 'timeout', 5);
     expect(bd.llamadas[1].sql).toContain("THEN 'ERROR' ELSE 'PENDIENTE'");

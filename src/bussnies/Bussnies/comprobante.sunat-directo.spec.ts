@@ -159,6 +159,21 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
       expect(bd.consultas.some((c) => /setval|DO \$seq\$/.test(c.sql))).toBe(false);
     });
 
+    it('guarda en cliente_email el correo escrito en el POS (correo_cliente) y enviar_cliente', async () => {
+      const bd = crearBdFalsa({ maximos: { F001: [0] } });
+      const { servicio } = crearMotor({ bd, contexto: CONTEXTO_PRODUCCION });
+
+      await servicio.generar(
+        boleta({ id_tipo: 1, documento: '20123456789', enviar_cliente: true, correo_cliente: ' caja@cliente.pe ' }),
+        8,
+      );
+
+      const insert = bd.consultas.find((c) => /^\s*INSERT INTO comprobantes/.test(c.sql))!;
+      const columnas = insert.sql.slice(insert.sql.indexOf('(') + 1, insert.sql.indexOf(')')).split(',').map((c) => c.trim());
+      expect(insert.parametros[columnas.indexOf('cliente_email')]).toBe('caja@cliente.pe');
+      expect(insert.parametros[columnas.indexOf('enviar_cliente')]).toBe(true);
+    });
+
     it('si registrarEnvio falla se revierte todo y no se llama a SUNAT', async () => {
       const bd = crearBdFalsa({ maximos: { BB01: [0] } });
       const { servicio, emision } = crearMotor({ bd });

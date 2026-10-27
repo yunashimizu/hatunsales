@@ -154,6 +154,8 @@ interface ComprobantePreparado {
   importeEnLetras: string;
   observaciones: string;
   enviarCliente: boolean;
+  /** Correo escrito en el POS: tiene prioridad sobre el del receptor. */
+  correoCliente?: string | null;
   /** Forma de pago pedida; el monto al crédito se valida al armar el documento. */
   credito: { monto: number } | null;
   advertencias: string[];
@@ -723,6 +725,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       },
       importe_en_letras: c.importe_en_letras ?? numeroALetras(Number(c.total ?? 0), idMoneda),
       observaciones: c.observaciones ?? '',
+      enviar_cliente: Boolean(c.enviar_cliente),
       estado: this.estadoVisible(c),
       anulado: Boolean(c.anulado),
       motivo_anulacion: c.motivo_anulacion,
@@ -1041,6 +1044,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       importeEnLetras: numeroALetras(resumen.total, idMoneda),
       observaciones: dto.observaciones ?? '',
       enviarCliente: dto.enviar_cliente ?? false,
+      correoCliente: dto.correo_cliente?.trim() || null,
       credito: this.esCredito(dto) ? { monto: Number(dto.monto_credito ?? 0) } : null,
       advertencias,
     };
@@ -1262,7 +1266,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       cliente_numero_doc: receptor.numero_documento,
       cliente_denominacion: receptor.denominacion,
       cliente_direccion: receptor.direccion ?? null,
-      cliente_email: receptor.email ?? null,
+      cliente_email: preparado.correoCliente || receptor.email || null,
       fecha_de_emision: preparado.fechaEmision,
       fecha_de_vencimiento: preparado.fechaVencimiento,
       porcentaje_igv: resumen.porcentaje_igv,
