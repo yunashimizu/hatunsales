@@ -1,6 +1,6 @@
 import { esConsumidorFinal } from '../../sunat/catalogos/sunat.catalogos';
 import { imagenSoportada } from './logo-emisor';
-import { PALETA } from './proforma-documento';
+import { PALETA, dibujarFranjaMarca } from './proforma-documento';
 import { textoPdf } from './proforma-pdf';
 import { generarQrPng } from './qr';
 
@@ -438,12 +438,18 @@ class DibujoComprobante {
   }
 
   dibujar(): void {
+    this.franjaMarca();
     this.marcaAgua();
     if (this.ticket) this.dibujarTicket();
     else this.dibujarA4();
   }
 
   // ── Primitivas ──────────────────────────────────────────────────
+
+  /** Franja de marca en el borde superior de cada hoja A4. */
+  private franjaMarca(): void {
+    if (!this.ticket) dibujarFranjaMarca(this.doc);
+  }
 
   private estilo(
     fuente: Fuente,
@@ -467,6 +473,7 @@ class DibujoComprobante {
     if (this.y + alto <= this.limite()) return false;
     this.doc.addPage();
     this.y = this.margen;
+    this.franjaMarca();
     this.marcaAgua();
     return true;
   }
@@ -904,9 +911,9 @@ class DibujoComprobante {
     this.doc
       .save()
       .rect(xCaja + 1, yc - 2, anchoCaja - 2, altoBanda)
-      .fill(COLOR.fondo)
+      .fill(COLOR.marca)
       .restore();
-    this.estilo('Helvetica-Bold', this.tam.titulo, COLOR.texto);
+    this.estilo('Helvetica-Bold', this.tam.titulo, COLOR.blanco);
     for (const l of tituloLineas) {
       this.linea(l, xCaja + 10, yc + 1, anchoCaja - 20, 'center');
       yc += this.alto(this.tam.titulo);
@@ -1029,17 +1036,17 @@ class DibujoComprobante {
     this.doc
       .save()
       .rect(this.x, this.y, this.ancho, alto)
-      .fill(COLOR.fondo)
+      .fill(COLOR.marca)
       .restore();
     this.doc
       .save()
-      .lineWidth(1)
-      .strokeColor(COLOR.marca)
+      .lineWidth(1.6)
+      .strokeColor(COLOR.acento)
       .moveTo(this.x, this.y + alto)
       .lineTo(this.x + this.ancho, this.y + alto)
       .stroke()
       .restore();
-    this.estilo('Helvetica-Bold', 7.4, COLOR.marca);
+    this.estilo('Helvetica-Bold', 7.4, COLOR.blanco);
     let cx = this.x;
     for (const c of columnas) {
       this.linea(c.titulo, cx + 4, this.y + 6, c.ancho - 8, c.alinear);

@@ -71,6 +71,45 @@ export function crearDocumentoPruebaBeta(
   };
 }
 
+/**
+ * Boleta de prueba con UNA línea de S/ 1.00 por código de unidad, para comprobar en SUNAT BETA
+ * que acepta cada código nuevo del catálogo 03 (SA, RD, BR, SR, BD, CO, QT, PT, HUR, DAY).
+ * Si BETA rechaza alguno, ese código se quita del catálogo y de unidades-amigables.ts.
+ * No está cableada a ningún endpoint: la invoca quien corra la prueba.
+ */
+export function crearDocumentoPruebaUnidades(
+  emisor: EmisorFiscal,
+  numero: number,
+  ahora: Date,
+  codigos: readonly string[],
+): DocumentoCpe {
+  if (!codigos.length) throw new Error('Indique al menos un código de unidad para la prueba.');
+  const base = crearDocumentoPruebaBeta(emisor, '03', numero, ahora);
+  const lineas = codigos.map((codigo) => {
+    const calculada = calcularComprobante([
+      { cantidad: 1, precio_unitario: 1, descuento: 0, tipo_de_igv: 1 },
+    ]).lineas[0];
+    return construirLineaCpe(
+      {
+        cantidad: calculada.cantidad,
+        precioUnitario: calculada.precio_unitario,
+        subtotal: calculada.subtotal,
+        igv: calculada.igv,
+        total: calculada.total,
+        afectacion: '10',
+        descuento: 0,
+      },
+      {
+        unidad: codigo,
+        descripcion: `PRUEBA DE UNIDAD ${codigo} - SIN VALOR TRIBUTARIO`,
+        codigoInterno: `BETA-${codigo}`,
+      },
+      18,
+    );
+  });
+  return { ...base, lineas, totales: totalesCpeDesdeLineas(lineas) };
+}
+
 function serieDePrueba(tipo: TipoCpe, sobreFactura: boolean): string {
   if (tipo === '01') return SERIES_BETA.factura;
   if (tipo === '03') return SERIES_BETA.boleta;

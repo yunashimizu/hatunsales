@@ -10,6 +10,9 @@ import { CrearProductoRequest, ActualizarProductoRequest } from '../../models/mo
 import { ProductoResponse } from '../../models/model/producto.response';
 import { IProductoBussniees } from '../Ibussnies/IProductoBussniees';
 import { traducirErrorStock } from './inventario.bussnies';
+import { ALIAS_UNIDADES, normalizarUnidad } from '../../sunat/catalogos/sunat.catalogos';
+import { GRUPOS_UNIDADES, UNIDADES_AMIGABLES } from '../../sunat/catalogos/unidades-amigables';
+import type { UnidadAmigable } from '../../sunat/catalogos/unidades-amigables';
 
 @Injectable()
 export class ProductoBussnies implements IProductoBussniees {
@@ -41,6 +44,7 @@ export class ProductoBussnies implements IProductoBussniees {
    * reintentar se duplicaba).
    */
   async create(dto: CrearProductoRequest): Promise<ProductoResponse> {
+    const unidadMedida = this.unidadValidada(dto.unidad_medida);
     await this.verificarUnicidad(dto.codigo_barras, dto.sku);
 
     const idAlmacen = dto.id_almacen ? Number(dto.id_almacen) : undefined;
@@ -67,7 +71,7 @@ export class ProductoBussnies implements IProductoBussniees {
           precio_compra: dto.precio_compra ?? 0,
           precio_venta: dto.precio_venta ?? 0,
           descuento: dto.descuento ?? 0,
-          unidad_medida: dto.unidad_medida ?? '',
+          unidad_medida: unidadMedida,
           estado: dto.estado ?? true,
           destacado: dto.destacado ?? false,
           categoria: dto.id_categoria
@@ -162,7 +166,8 @@ export class ProductoBussnies implements IProductoBussniees {
       precio_compra: dto.precio_compra,
       precio_venta: dto.precio_venta,
       descuento: dto.descuento,
-      unidad_medida: dto.unidad_medida,
+      // undefined = «no tocar»; si llega algo, se valida igual que en el alta.
+      unidad_medida: dto.unidad_medida === undefined ? undefined : this.unidadValidada(dto.unidad_medida),
       estado: dto.estado,
       destacado: dto.destacado,
     };
@@ -191,6 +196,31 @@ export class ProductoBussnies implements IProductoBussniees {
     }
 
     return this.getById(id);
+  }
+
+  /** Catálogo de unidades para el selector: grupos, unidades visibles y sinónimos aceptados. */
+  unidadesMedida(): { grupos: string[]; unidades: UnidadAmigable[]; alias: Record<string, string> } {
+    return {
+      grupos: [...GRUPOS_UNIDADES],
+      unidades: UNIDADES_AMIGABLES.filter((u) => u.visible),
+      alias: { ...ALIAS_UNIDADES },
+    };
+  }
+
+  /**
+   * Unidad que se guarda en el producto: siempre un código del catálogo 03 de SUNAT.
+   * Vacía → NIU; sinónimo (UND, kg, Plancha) → su código; desconocida → 400, porque
+   * caer a NIU en silencio guardaría una unidad que el usuario no eligió.
+   */
+  private unidadValidada(valor: string | null | undefined): string {
+    if (valor === undefined || valor === null || String(valor).trim() === '') return 'NIU';
+    const { codigo, advertencia } = normalizarUnidad(valor);
+    if (advertencia) {
+      throw new BadRequestException(
+        `Unidad de medida no válida: «${String(valor).trim()}». Elija una de la lista.`,
+      );
+    }
+    return codigo;
   }
 
   async delete(id: number): Promise<number> {

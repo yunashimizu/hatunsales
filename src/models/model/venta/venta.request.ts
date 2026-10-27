@@ -1,5 +1,5 @@
 import {
-  IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional,
+  IsArray, IsBoolean, IsEmail, IsIn, IsInt, IsNumber, IsOptional,
   IsString, MaxLength, Min, ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -128,6 +128,12 @@ export class CrearVentaRequest {
   @IsBoolean()
   @IsOptional()
   enviar_cliente?: boolean;
+
+  /** Correo del cliente escrito en el POS (opcional); viaja al comprobante como correo_cliente. */
+  @IsEmail()
+  @MaxLength(254)
+  @IsOptional()
+  correo_cliente?: string;
 
   // ── Operación ─────────────────────────────────────────────────
   @IsInt()

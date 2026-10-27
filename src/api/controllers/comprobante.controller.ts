@@ -18,7 +18,9 @@ import {
   GenerarComprobanteRequest,
   ConsultarComprobanteRequest,
   ConfirmarAceptadoRequest,
+  ReenviarCorreoRequest,
 } from '../../models/model/c-electronico/comprobante.request';
+import { CorreoComprobanteService } from '../../correo/correo-comprobante.service';
 import { AnularDocumentoRequest } from '../../models/model/c-electronico/nota-credito.request';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
@@ -42,7 +44,10 @@ export function nombreDescarga(nombre: string, respaldo = 'archivo'): string {
 @Roles('admin', 'vendedor', 'caja')
 export class ComprobanteController {
 
-  constructor(private readonly service: ComprobanteBussnies) {}
+  constructor(
+    private readonly service: ComprobanteBussnies,
+    private readonly correo: CorreoComprobanteService,
+  ) {}
 
   /** Motivos del catálogo SUNAT (09 y 10) que ofrece el sistema y la forma de armar cada nota. */
   @Get('catalogos/motivos')
@@ -150,8 +155,26 @@ export class ComprobanteController {
   }
 
   @Get(':id/detalle')
-  detalle(@Param('id', ParseIntPipe) id: number) {
-    return this.service.obtenerDetalle(id);
+  async detalle(@Param('id', ParseIntPipe) id: number) {
+    const detalle = await this.service.obtenerDetalle(id);
+    return { ...detalle, correo: await this.correo.estadoResumen(detalle) };
+  }
+
+  /** Reenvía el comprobante (PDF y XML) por correo; sin destino usa el del comprobante. Máximo 3 por hora. */
+  @Post(':id/correo')
+  @HttpCode(200)
+  reenviarCorreo(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: ReenviarCorreoRequest,
+    @UsuarioActual() usuario?: UsuarioToken,
+  ) {
+    return this.correo.reenviar(id, body?.destino, usuario?.id_usuario ?? null);
+  }
+
+  /** Historial de correos del comprobante (automáticos y reenvíos). */
+  @Get(':id/correos')
+  historialCorreos(@Param('id', ParseIntPipe) id: number) {
+    return this.correo.historial(id);
   }
 
   /** Representación impresa (A4 o ticket de 80 mm) con QR y hash. */

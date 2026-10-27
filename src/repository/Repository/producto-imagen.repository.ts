@@ -68,6 +68,26 @@ export class ProductoImagenRepository extends CrudRepository<ProductoImagen> {
     );
   }
 
+  /**
+   * Cambia solo el archivo de una foto (url, miniatura, tipo, peso, medidas y clave del
+   * almacén). `orden` e `is_primary` no se tocan: la foto conserva su lugar en la galería.
+   */
+  async actualizarArchivo(
+    id_imagen: number,
+    datos: Pick<ProductoImagen, 'url' | 'thumb_url' | 'mime' | 'size' | 'width' | 'height' | 'clave_almacen' | 'proveedor'>,
+  ): Promise<void> {
+    await this.imagenRepo.update(id_imagen, {
+      url: datos.url,
+      thumb_url: datos.thumb_url,
+      mime: datos.mime,
+      size: datos.size,
+      width: datos.width,
+      height: datos.height,
+      clave_almacen: datos.clave_almacen,
+      proveedor: datos.proveedor,
+    });
+  }
+
   async eliminar(id_imagen: number): Promise<void> {
     await this.imagenRepo.delete(id_imagen);
   }

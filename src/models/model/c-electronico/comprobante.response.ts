@@ -184,6 +184,8 @@ export interface ComprobanteDetalleResponse {
   };
   importe_en_letras: string;
   observaciones: string;
+  /** Se pidió enviar el comprobante por correo al cliente. */
+  enviar_cliente: boolean;
   estado: string;
   anulado: boolean;
   motivo_anulacion: string;

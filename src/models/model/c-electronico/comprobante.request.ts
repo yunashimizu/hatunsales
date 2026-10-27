@@ -1,5 +1,5 @@
 import {
-  IsInt, IsString, IsOptional, IsBoolean,
+  IsEmail, IsInt, IsString, IsOptional, IsBoolean,
   IsNumber, IsArray, ValidateNested, IsIn, Min, MaxLength, MinLength,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -228,6 +228,12 @@ export class GenerarComprobanteRequest {
   @IsOptional()
   enviar_cliente?: boolean;
 
+  /** Correo del cliente escrito al cobrar; tiene prioridad sobre el del receptor. */
+  @IsEmail()
+  @MaxLength(254)
+  @IsOptional()
+  correo_cliente?: string;
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ItemComprobanteRequest)
@@ -280,4 +286,13 @@ export class ConfirmarAceptadoRequest {
   @MinLength(5, { message: 'Explique en la nota qué verificó en SUNAT (mínimo 5 caracteres)' })
   @MaxLength(500)
   nota!: string;
+}
+
+/** Reenvío manual del comprobante por correo; sin destino se usa el correo guardado en el comprobante. */
+export class ReenviarCorreoRequest {
+
+  @IsEmail({}, { message: 'El correo de destino no es válido' })
+  @MaxLength(254)
+  @IsOptional()
+  destino?: string;
 }

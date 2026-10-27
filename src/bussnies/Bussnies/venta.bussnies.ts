@@ -645,6 +645,7 @@ export class VentaBussnies {
       serie: dto.serie,
       observaciones: dto.observaciones,
       enviar_cliente: dto.enviar_cliente,
+      correo_cliente: dto.correo_cliente,
       items: [
         ...items.map((i) => ({
           id_producto: i.id_producto,

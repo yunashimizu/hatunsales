@@ -23,8 +23,14 @@ function crear() {
     catalogoMotivos: jest.fn().mockReturnValue({ nota_credito: [], nota_debito: [] }),
     listar: jest.fn().mockResolvedValue({ datos: [], total: 0, pagina: 1, por_pagina: 20 }),
     generar: jest.fn().mockResolvedValue({}),
+    obtenerDetalle: jest.fn().mockResolvedValue({ id_comprobante: 5, enviar_cliente: true }),
   };
-  return { controlador: new ComprobanteController(servicio as never), servicio };
+  const correo = {
+    estadoResumen: jest.fn().mockResolvedValue({ estado: 'PENDIENTE', puede_reenviar: true }),
+    reenviar: jest.fn().mockResolvedValue({ id_correo: 31, estado: 'ENVIADO' }),
+    historial: jest.fn().mockResolvedValue([{ id_correo: 31 }]),
+  };
+  return { controlador: new ComprobanteController(servicio as never, correo as never), servicio, correo };
 }
 
 /** Contexto mínimo para el RolesGuard: el método del controlador y el usuario del token. */
@@ -150,6 +156,41 @@ describe('ComprobanteController', () => {
     const { controlador, servicio } = crear();
     await controlador.generar({ id_tipo: 2, items: [] } as never, { id_usuario: 9 } as never);
     expect(servicio.generar).toHaveBeenCalledWith({ id_tipo: 2, items: [] }, 9);
+  });
+
+  describe('correo del comprobante', () => {
+    it('GET :id/detalle mezcla el resumen del correo en el detalle sin tocar el resto', async () => {
+      const { controlador, servicio, correo } = crear();
+      const detalle = await controlador.detalle(5);
+      expect(servicio.obtenerDetalle).toHaveBeenCalledWith(5);
+      expect(correo.estadoResumen).toHaveBeenCalledWith({ id_comprobante: 5, enviar_cliente: true });
+      expect(detalle).toEqual({ id_comprobante: 5, enviar_cliente: true, correo: { estado: 'PENDIENTE', puede_reenviar: true } });
+    });
+
+    it('POST :id/correo reenvía con el destino y el usuario del token; sin cuerpo usa el del comprobante', async () => {
+      const { controlador, correo } = crear();
+      expect(await controlador.reenviarCorreo(5, { destino: 'otro@ejemplo.pe' }, { id_usuario: 9 } as never)).toEqual({ id_correo: 31, estado: 'ENVIADO' });
+      expect(correo.reenviar).toHaveBeenCalledWith(5, 'otro@ejemplo.pe', 9);
+      await controlador.reenviarCorreo(5, undefined as never, undefined);
+      expect(correo.reenviar).toHaveBeenLastCalledWith(5, undefined, null);
+    });
+
+    it('GET :id/correos devuelve el historial', async () => {
+      const { controlador, correo } = crear();
+      expect(await controlador.historialCorreos(5)).toEqual([{ id_correo: 31 }]);
+      expect(correo.historial).toHaveBeenCalledWith(5);
+    });
+
+    it('las rutas nuevas se declaran antes de GET :id y admiten admin, vendedor y caja', () => {
+      const orden = Object.getOwnPropertyNames(ComprobanteController.prototype);
+      expect(orden.indexOf('reenviarCorreo')).toBeLessThan(orden.indexOf('obtenerPorId'));
+      expect(orden.indexOf('historialCorreos')).toBeLessThan(orden.indexOf('obtenerPorId'));
+      const guard = new RolesGuard(new Reflector());
+      for (const rol of ['admin', 'vendedor', 'caja']) {
+        expect(guard.canActivate(contexto('reenviarCorreo', rol))).toBe(true);
+        expect(guard.canActivate(contexto('historialCorreos', rol))).toBe(true);
+      }
+    });
   });
 
   it('nombreDescarga deja solo [A-Za-z0-9._-] y nunca un nombre vacío u oculto', () => {

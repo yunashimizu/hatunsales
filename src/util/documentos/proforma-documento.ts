@@ -29,6 +29,26 @@ export const PALETA = {
   aviso: '#B54708',
 } as const;
 
+/** Lo mínimo de pdfkit que usa la franja de marca (así no se importa pdfkit aquí). */
+interface LienzoPdf {
+  page: { width: number };
+  save(): LienzoPdf;
+  rect(x: number, y: number, ancho: number, alto: number): LienzoPdf;
+  fill(color: string): LienzoPdf;
+  restore(): LienzoPdf;
+}
+
+/** Franja de marca en el borde superior de cada hoja A4: grafito con un tramo naranja. */
+export function dibujarFranjaMarca(doc: LienzoPdf): void {
+  doc
+    .save()
+    .rect(0, 0, doc.page.width, 7)
+    .fill(PALETA.grafito)
+    .rect(0, 0, 96, 7)
+    .fill(PALETA.naranja)
+    .restore();
+}
+
 /** "#23272B" -> "FF23272B" (formato ARGB que usa exceljs). */
 export function argb(hex: string): string {
   return `FF${hex.replace('#', '').toUpperCase()}`;

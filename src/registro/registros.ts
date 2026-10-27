@@ -9,6 +9,7 @@ import { REGISTRO_SUNAT_GRE } from '../sunat/registro/gre.registro';
 import { REGISTRO_NOTAS_CREDITO } from './notas-credito.registro';
 import { REGISTRO_VENTA_DOCUMENTOS } from './venta-documentos.registro';
 import { REGISTRO_GUIAS } from './guias.registro';
+import { REGISTRO_CORREO } from './correo.registro';
 
 /** Todo lo que los dominios registran en AppModule (ver registro-modulo.ts). */
 export const REGISTROS = unirRegistros(
@@ -22,4 +23,5 @@ export const REGISTROS = unirRegistros(
   REGISTRO_NOTAS_CREDITO,
   REGISTRO_VENTA_DOCUMENTOS,
   REGISTRO_GUIAS,
+  REGISTRO_CORREO,
 );
