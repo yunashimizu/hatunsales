@@ -287,3 +287,12 @@ export class ConfirmarAceptadoRequest {
   @MaxLength(500)
   nota!: string;
 }
+
+/** Reenvío manual del comprobante por correo; sin destino se usa el correo guardado en el comprobante. */
+export class ReenviarCorreoRequest {
+
+  @IsEmail({}, { message: 'El correo de destino no es válido' })
+  @MaxLength(254)
+  @IsOptional()
+  destino?: string;
+}
