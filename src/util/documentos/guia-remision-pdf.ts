@@ -89,6 +89,7 @@ const COLOR = {
   fondo: PALETA.fondo,
   cebra: PALETA.cebra,
   marca: PALETA.grafito,
+  acento: PALETA.dorado,
   peligro: PALETA.peligro,
   blanco: PALETA.blanco,
 };
@@ -252,13 +253,18 @@ class DibujoGuia {
     }
 
     const xCaja = x + this.ancho - caja;
-    this.doc.roundedRect(xCaja, this.y, caja, alto - 6, 4).lineWidth(1).strokeColor(COLOR.marca).stroke();
+    // Banda grafito con línea dorada detrás del nombre del documento (mismo recuadro de RUC que proforma y comprobante).
+    this.doc.save();
+    this.doc.rect(xCaja + 1, this.y + 24, caja - 2, 33).fill(COLOR.marca);
+    this.doc.rect(xCaja + 1, this.y + 57, caja - 2, 1.8).fill(COLOR.acento);
+    this.doc.restore();
+    this.doc.roundedRect(xCaja, this.y, caja, alto - 6, 4).lineWidth(1.3).strokeColor(COLOR.marca).stroke();
     const centrado = { width: caja - 12, align: 'center' as const };
     this.doc.font('Helvetica-Bold').fontSize(11).fillColor(COLOR.texto).text(`RUC ${t(this.d.emisor.ruc)}`, xCaja + 6, this.y + 9, centrado);
-    this.doc.fontSize(9).text('GUÍA DE REMISIÓN ELECTRÓNICA', xCaja + 6, this.y + 27, centrado);
-    this.doc.fontSize(11).text('REMITENTE', xCaja + 6, this.y + 40, centrado);
+    this.doc.fontSize(9).fillColor(COLOR.blanco).text('GUÍA DE REMISIÓN ELECTRÓNICA', xCaja + 6, this.y + 28, centrado);
+    this.doc.fontSize(11).text('REMITENTE', xCaja + 6, this.y + 42, centrado);
     this.doc.fontSize(this.d.numero ? 13 : 11).fillColor(this.d.numero ? COLOR.marca : COLOR.peligro)
-      .text(t(this.d.numero ?? `BORRADOR N.° ${this.d.idGuia}`), xCaja + 6, this.y + 58, centrado);
+      .text(t(this.d.numero ?? `BORRADOR N.° ${this.d.idGuia}`), xCaja + 6, this.y + 64, centrado);
     this.y = Math.max(this.y + alto, yTexto + 6);
   }
 
@@ -284,6 +290,7 @@ class DibujoGuia {
       this.doc.roundedRect(MARGEN, inicioTramo, this.ancho, hasta - inicioTramo, 3).lineWidth(0.6).strokeColor(COLOR.linea).stroke();
     };
     this.doc.rect(MARGEN, inicioTramo, this.ancho, 18).fillColor(COLOR.fondo).fill();
+    this.doc.rect(MARGEN, inicioTramo, 3, 18).fillColor(COLOR.acento).fill();
     this.doc.font('Helvetica-Bold').fontSize(8).fillColor(COLOR.marca).text(titulo, MARGEN + 8, inicioTramo + 5, { lineBreak: false });
     let filaY = inicioTramo + 23;
     filas.forEach(([nombre, valor], i) => {
@@ -307,6 +314,7 @@ class DibujoGuia {
     const encabezado = (): void => {
       this.asegurar(20 + 16);
       this.doc.rect(MARGEN, this.y, this.ancho, 18).fillColor(COLOR.marca).fill();
+      this.doc.rect(MARGEN, this.y + 17.2, this.ancho, 1.6).fillColor(COLOR.acento).fill();
       let cursor = MARGEN;
       this.doc.font('Helvetica-Bold').fontSize(7.5).fillColor(COLOR.blanco);
       titulos.forEach((titulo, i) => {
@@ -316,7 +324,8 @@ class DibujoGuia {
       this.y += 18;
     };
     this.asegurar(40);
-    this.doc.font('Helvetica-Bold').fontSize(8).fillColor(COLOR.marca).text('BIENES A TRASLADAR', MARGEN, this.y, { lineBreak: false });
+    this.doc.rect(MARGEN, this.y - 0.5, 3, 10).fillColor(COLOR.acento).fill();
+    this.doc.font('Helvetica-Bold').fontSize(8).fillColor(COLOR.marca).text('BIENES A TRASLADAR', MARGEN + 8, this.y, { lineBreak: false });
     this.y += 13;
     encabezado();
     if (!this.d.items.length) {

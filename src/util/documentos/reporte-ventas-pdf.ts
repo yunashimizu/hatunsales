@@ -37,11 +37,13 @@ type Alineacion = 'left' | 'right' | 'center';
 
 const COLOR = {
   marca: PALETA.grafito,
-  acento: PALETA.naranja,
-  acentoSuave: PALETA.naranjaSuave,
+  acento: PALETA.dorado,
+  acentoClaro: PALETA.doradoClaro,
+  acentoSuave: PALETA.doradoSuave,
   texto: PALETA.texto,
   gris: PALETA.gris,
   grisClaro: PALETA.grisClaro,
+  plata: PALETA.plata,
   linea: PALETA.linea,
   fondo: PALETA.fondo,
   cebra: PALETA.cebra,
@@ -180,11 +182,11 @@ export async function generarReporteVentasPdf(datos: DatosReporteVentas): Promis
     rect(0, 0, ANCHO_PAGINA, 82, COLOR.marca);
     rect(0, 82, ANCHO_PAGINA, 3, COLOR.acento);
     texto(cabecera.empresa, MARGEN, 20, ANCHO * 0.58, { fuente: 'Helvetica-Bold', tam: 16, color: COLOR.blanco });
-    texto(`RUC ${cabecera.ruc}`, MARGEN, 42, ANCHO * 0.58, { tam: 8.5, color: COLOR.grisClaro });
-    if (cabecera.direccion) texto(cabecera.direccion, MARGEN, 54, ANCHO * 0.58, { tam: 7.5, color: COLOR.grisClaro });
+    texto(`RUC ${cabecera.ruc}`, MARGEN, 42, ANCHO * 0.58, { tam: 8.5, color: COLOR.plata });
+    if (cabecera.direccion) texto(cabecera.direccion, MARGEN, 54, ANCHO * 0.58, { tam: 7.5, color: COLOR.plata });
     texto(`Generado el ${cabecera.generadoEl} (hora de Lima)`, MARGEN, 66, ANCHO * 0.58, {
       tam: 7,
-      color: COLOR.grisClaro,
+      color: COLOR.plata,
     });
 
     const xd = MARGEN + ANCHO * 0.58;
@@ -204,7 +206,7 @@ export async function generarReporteVentasPdf(datos: DatosReporteVentas): Promis
     texto(`Tipo: ${tipoTexto}`, xd, 54, wd, {
       fuente: 'Helvetica-Bold',
       tam: 8.5,
-      color: filtroTipo ? COLOR.acento : COLOR.grisClaro,
+      color: filtroTipo ? COLOR.acento : COLOR.plata,
       alinear: 'right',
     });
     y = 102;
@@ -621,13 +623,13 @@ export async function generarReporteVentasPdf(datos: DatosReporteVentas): Promis
   if (filasDetalle.length) {
     asegurar(30);
     y -= 4;
-    rect(MARGEN, y, ANCHO, 20, COLOR.acentoSuave);
-    linea(MARGEN, y, MARGEN + ANCHO, y, COLOR.marca, 1);
-    texto('Total neto', MARGEN + 8, y + 6, 200, { fuente: 'Helvetica-Bold', tam: 8.5, color: COLOR.marca });
+    rect(MARGEN, y, ANCHO, 20, COLOR.marca);
+    rect(MARGEN, y + 20, ANCHO, 1.6, COLOR.acento);
+    texto('Total neto', MARGEN + 8, y + 6, 200, { fuente: 'Helvetica-Bold', tam: 8.5, color: COLOR.blanco });
     texto(soles(reporte.total_vendido), MARGEN + ANCHO - 200, y + 5, 192, {
       fuente: 'Helvetica-Bold',
       tam: 10,
-      color: COLOR.marca,
+      color: COLOR.acentoClaro,
       alinear: 'right',
     });
     y += 26;

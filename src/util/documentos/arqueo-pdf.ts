@@ -44,7 +44,8 @@ const COLOR = {
   linea: PALETA.linea,
   fondo: PALETA.fondo,
   marca: PALETA.grafito,
-  acento: PALETA.naranja,
+  acento: PALETA.dorado,
+  acentoTexto: PALETA.doradoOscuro,
   peligro: PALETA.peligro,
   aviso: PALETA.aviso,
   exito: '#1E7B34',
@@ -248,12 +249,16 @@ class DibujoArqueo {
     this.asegurar(this.alto(this.tam.normal) + 20);
     this.y += this.ticket ? 1 : 6;
     this.estilo('Helvetica-Bold', this.ticket ? this.tam.normal : this.tam.normal + 1, COLOR.marca);
-    this.texto(titulo.toUpperCase(), this.x, this.y, this.ancho);
-    this.y += this.alto(this.tam.normal) + (this.ticket ? 1 : 3);
-    if (!this.ticket) {
-      this.doc.save().lineWidth(1.2).strokeColor(COLOR.acento).moveTo(this.x, this.y - 2).lineTo(this.x + 36, this.y - 2).stroke().restore();
-      this.y += 3;
+    if (this.ticket) {
+      this.texto(titulo.toUpperCase(), this.x, this.y, this.ancho);
+    } else {
+      // Barrita dorada + título (misma marca de sección que proforma, guía y comprobante).
+      this.doc.save().rect(this.x, this.y + 0.5, 3, this.tam.normal + 2).fill(COLOR.acento).restore();
+      this.estilo('Helvetica-Bold', this.tam.normal + 1, COLOR.marca);
+      this.texto(titulo.toUpperCase(), this.x + 8, this.y, this.ancho - 8);
     }
+    this.y += this.alto(this.tam.normal) + (this.ticket ? 1 : 3);
+    if (!this.ticket) this.y += 3;
   }
 
   private parrafo(valor: string, tam = this.tam.normal, color: string = COLOR.texto, fuente: Fuente = 'Helvetica'): void {
@@ -308,13 +313,18 @@ class DibujoArqueo {
 
     const anchoCaja = 190;
     const xCaja = this.x + this.ancho - anchoCaja;
-    this.doc.save().roundedRect(xCaja, this.y, anchoCaja, alto, 6).lineWidth(1.2).strokeColor(COLOR.marca).stroke().restore();
-    this.estilo('Helvetica-Bold', 12.5, COLOR.marca);
-    this.texto('ARQUEO DE CAJA', xCaja, this.y + 10, anchoCaja, 'center');
-    this.estilo('Helvetica-Bold', 10, COLOR.acento);
-    this.texto(tipo, xCaja, this.y + 28, anchoCaja, 'center');
+    // Banda grafito con línea dorada (recortada a las esquinas redondeadas) con el nombre del documento en blanco.
+    this.doc.save().roundedRect(xCaja, this.y, anchoCaja, alto, 6).clip();
+    this.doc.rect(xCaja, this.y, anchoCaja, 29).fill(COLOR.marca);
+    this.doc.rect(xCaja, this.y + 29, anchoCaja, 1.8).fill(COLOR.acento);
+    this.doc.restore();
+    this.doc.save().roundedRect(xCaja, this.y, anchoCaja, alto, 6).lineWidth(1.3).strokeColor(COLOR.marca).stroke().restore();
+    this.estilo('Helvetica-Bold', 12.5, COLOR.blanco);
+    this.texto('ARQUEO DE CAJA', xCaja, this.y + 8, anchoCaja, 'center');
+    this.estilo('Helvetica-Bold', 10, COLOR.acentoTexto);
+    this.texto(tipo, xCaja, this.y + 36, anchoCaja, 'center');
     this.estilo('Helvetica', 10, COLOR.texto);
-    this.texto(this.a.codigo, xCaja, this.y + 44, anchoCaja, 'center');
+    this.texto(this.a.codigo, xCaja, this.y + 49, anchoCaja, 'center');
     this.y += alto + 14;
   }
 
@@ -413,7 +423,14 @@ class DibujoArqueo {
       this.asegurar(altoFila * (filas + 2));
       const anchoCol = (this.ancho - 20) / 2;
       const encabezado = (xx: number, titulo: string) => {
-        this.estilo('Helvetica-Bold', this.tam.chico, COLOR.gris);
+        this.doc
+          .save()
+          .rect(xx - 4, this.y - 2, anchoCol + 8, altoFila)
+          .fill(COLOR.marca)
+          .rect(xx - 4, this.y - 2 + altoFila - 1, anchoCol + 8, 1.2)
+          .fill(COLOR.acento)
+          .restore();
+        this.estilo('Helvetica-Bold', this.tam.chico, COLOR.blanco);
         this.texto(titulo, xx, this.y, anchoCol * 0.4);
         this.texto('Cantidad', xx + anchoCol * 0.4, this.y, anchoCol * 0.25, 'right');
         this.texto('Subtotal', xx + anchoCol * 0.65, this.y, anchoCol * 0.35, 'right');
@@ -454,7 +471,16 @@ class DibujoArqueo {
     };
     const altoFila = this.alto(this.tam.normal);
     this.asegurar(altoFila * 2);
-    this.estilo('Helvetica-Bold', this.tam.chico, COLOR.gris);
+    if (!this.ticket) {
+      this.doc
+        .save()
+        .rect(this.x - 4, this.y - 2, this.ancho + 8, altoFila)
+        .fill(COLOR.marca)
+        .rect(this.x - 4, this.y - 2 + altoFila - 1, this.ancho + 8, 1.2)
+        .fill(COLOR.acento)
+        .restore();
+    }
+    this.estilo('Helvetica-Bold', this.tam.chico, this.ticket ? COLOR.gris : COLOR.blanco);
     this.texto('Medio', xs.nombre, this.y, this.ancho * cols.nombre);
     this.texto('Esperado', xs.esperado, this.y, this.ancho * cols.esperado, 'right');
     this.texto('Declarado', xs.declarado, this.y, this.ancho * cols.declarado, 'right');

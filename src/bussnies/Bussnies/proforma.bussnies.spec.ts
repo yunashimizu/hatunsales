@@ -100,6 +100,28 @@ describe('ProformaBussnies.create · productos en una sola consulta', () => {
   });
 });
 
+describe('ProformaBussnies.getById · unidad y descuento por ítem', () => {
+  it('devuelve unidad_medida y descuento de cada ítem (snapshot, o producto, o NIU y 0)', async () => {
+    const { servicio, repo } = armar();
+    const base = await repo.getById();
+    repo.getById.mockResolvedValue({
+      ...base,
+      items: [
+        ...base.items,
+        { id_producto: 3, cantidad: 1, precio_unitario: 6.5, subtotal: 6.5, producto: { unidad_medida: 'KGM', descuento: '0.5' } },
+        { id_producto: 4, cantidad: 1, precio_unitario: 1, subtotal: 1 },
+      ],
+    });
+    const r = await servicio.getById(7);
+    expect(r.items.map((i) => [i.unidad_medida, i.descuento])).toEqual([
+      ['BLS', 0],
+      ['NIU', 1.5],
+      ['KGM', 0.5],
+      ['NIU', 0],
+    ]);
+  });
+});
+
 describe('ProformaBussnies · documentos y WhatsApp', () => {
   it('genera PDF y Excel con el nombre de archivo de la proforma', async () => {
     const { servicio } = armar();

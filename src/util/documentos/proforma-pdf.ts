@@ -6,21 +6,22 @@ import {
   cuentasUtiles,
   DatosProformaDocumento,
   describirCuentaTabla,
+  descuentoTotal,
+  estadoParaDocumento,
   etiquetaDocumento,
   formatearCantidad,
-  formatearDecimal,
   formatearFecha,
   formatearFechaHora,
   formatearPorcentaje,
   formatearSoles,
   formatearTelefono,
-  hayDescuentos,
   LEYENDA_SIN_VALOR_TRIBUTARIO,
   numeroSeguro,
   PALETA,
   precioLista,
   textoMultilinea,
   textoPlano,
+  textoValidaHasta,
   dibujarFranjaMarca,
 } from './proforma-documento';
 
@@ -42,8 +43,10 @@ const ALTO_PIE = 36;
 
 const COLOR = {
   marca: PALETA.grafito,
-  acento: PALETA.naranja,
-  acentoSuave: PALETA.naranjaSuave,
+  acento: PALETA.dorado,
+  acentoClaro: PALETA.doradoClaro,
+  acentoTexto: PALETA.doradoOscuro,
+  acentoSuave: PALETA.doradoSuave,
   texto: PALETA.texto,
   gris: PALETA.gris,
   grisClaro: PALETA.grisClaro,
@@ -58,16 +61,7 @@ const COLOR = {
 type Fuente = 'Helvetica' | 'Helvetica-Bold' | 'Helvetica-Oblique' | 'Helvetica-BoldOblique';
 type Alineacion = 'left' | 'right' | 'center';
 
-type ClaveColumna =
-  | 'n'
-  | 'codigo'
-  | 'descripcion'
-  | 'unidad'
-  | 'cantidad'
-  | 'lista'
-  | 'descuento'
-  | 'precio'
-  | 'importe';
+type ClaveColumna = 'n' | 'codigo' | 'unidad' | 'precio' | 'cantidad' | 'descuento' | 'descripcion' | 'importe';
 
 interface Columna {
   clave: ClaveColumna;
@@ -135,7 +129,6 @@ class DibujoProforma {
   private readonly ancho: number;
   private readonly izquierda = MARGEN;
   private readonly columnas: Columna[];
-  private readonly conDescuento: boolean;
   private readonly codigo: string;
   private readonly razonSocial: string;
   private readonly generadoEn: Date;
@@ -148,24 +141,18 @@ class DibujoProforma {
     this.codigo = textoPdf(d.codigo) || '—';
     this.razonSocial = textoPdf(d.emisor?.razon_social) || 'HATUNSALES S.A.C.';
     this.generadoEn = d.generado_en ?? new Date();
-    this.conDescuento = hayDescuentos(d.items);
 
-    // Con descuentos se muestra precio de lista, descuento y precio neto:
-    // el cliente ve cuánto se le rebaja y el importe cuadra con la fila.
+    // Mismo orden que la proforma de referencia: P. Unit. es el precio de lista,
+    // Dto. el descuento de la línea (siempre visible) e Importe = P. Unit. × Cant. − Dto.
     const fijas: Columna[] = [
-      { clave: 'n', titulo: 'N°', ancho: 20, alinear: 'center' },
-      { clave: 'codigo', titulo: 'Código', ancho: this.conDescuento ? 66 : 76, alinear: 'left' },
+      { clave: 'n', titulo: 'N°', ancho: 22, alinear: 'center' },
+      { clave: 'codigo', titulo: 'Código', ancho: 62, alinear: 'left' },
+      { clave: 'unidad', titulo: 'Unidad', ancho: 40, alinear: 'center' },
+      { clave: 'precio', titulo: 'P. Unit.', ancho: 62, alinear: 'right' },
+      { clave: 'cantidad', titulo: 'Cant.', ancho: 36, alinear: 'right' },
+      { clave: 'descuento', titulo: 'Dto.', ancho: 54, alinear: 'right' },
       { clave: 'descripcion', titulo: 'Descripción', ancho: 0, alinear: 'left' },
-      { clave: 'unidad', titulo: 'Und.', ancho: 30, alinear: 'center' },
-      { clave: 'cantidad', titulo: 'Cant.', ancho: 34, alinear: 'right' },
-      ...(this.conDescuento
-        ? ([
-            { clave: 'lista', titulo: 'P. Lista', ancho: 50, alinear: 'right' },
-            { clave: 'descuento', titulo: 'Dto.', ancho: 42, alinear: 'right' },
-          ] as Columna[])
-        : []),
-      { clave: 'precio', titulo: 'P. Unit.', ancho: 54, alinear: 'right' },
-      { clave: 'importe', titulo: 'Importe', ancho: 66, alinear: 'right' },
+      { clave: 'importe', titulo: 'Importe', ancho: 70, alinear: 'right' },
     ];
     const ocupado = fijas.reduce((suma, c) => suma + c.ancho, 0);
     fijas.find((c) => c.clave === 'descripcion')!.ancho = this.ancho - ocupado;
@@ -369,7 +356,7 @@ class DibujoProforma {
     this.reglaMarca();
   }
 
-  /** Línea fina con un tramo naranja al inicio: acento de marca bajo la cabecera. */
+  /** Línea fina con un tramo dorado al inicio: acento de marca bajo la cabecera. */
   private reglaMarca(): void {
     const doc = this.doc;
     doc.save();
@@ -406,27 +393,28 @@ class DibujoProforma {
     const separacion = 20;
     const colAncho = (this.ancho - pad * 2 - separacion) / 2;
     const etiquetaIzq = 56;
-    const etiquetaDer = 88;
+    const etiquetaDer = 100;
     const tamValor = 8.5;
     const altoLinea = this.interlineado(tamValor);
 
     const cliente = this.d.cliente ?? {};
     const documento = textoPdf(cliente.documento);
+    // Cliente, documento y teléfono primero (como la referencia); dirección y correo después.
     const izquierda: Array<[string, string]> = [['Cliente', textoPdf(cliente.nombre) || '—']];
     if (documento) izquierda.push([etiquetaDocumento(documento), documento]);
-    if (textoPdf(cliente.direccion)) izquierda.push(['Dirección', textoPdf(cliente.direccion)]);
     if (formatearTelefono(cliente.telefono)) izquierda.push(['Teléfono', formatearTelefono(cliente.telefono)]);
+    if (textoPdf(cliente.direccion)) izquierda.push(['Dirección', textoPdf(cliente.direccion)]);
     if (textoPdf(cliente.email)) izquierda.push(['Correo', textoPdf(cliente.email)]);
 
     const aviso = avisoEstadoCliente(this.d.estado, this.d.valida_hasta, this.generadoEn);
     const derecha: Array<[string, string]> = [
       ['Fecha de emisión', formatearFecha(this.d.fecha_emision) || '—'],
     ];
-    const valida = formatearFecha(this.d.valida_hasta ?? null);
-    if (valida) derecha.push(['Válida hasta', valida]);
+    const valida = textoValidaHasta(this.d);
+    if (valida) derecha.push(['Válida hasta', textoPdf(valida)]);
     derecha.push(['Moneda', 'Soles (PEN)']);
-    if (textoPdf(this.d.almacen)) derecha.push(['Despacho desde', textoPdf(this.d.almacen)]);
-    if (aviso) derecha.push(['Estado', aviso.texto]);
+    derecha.push(['Estado', textoPdf(estadoParaDocumento(this.d.estado, this.d.valida_hasta, this.generadoEn))]);
+    if (textoPdf(this.d.almacen)) derecha.push(['Almacén de despacho', textoPdf(this.d.almacen)]);
 
     this.estilo('Helvetica', tamValor, COLOR.texto);
     const preparar = (filas: Array<[string, string]>, anchoEtiqueta: number) =>
@@ -512,6 +500,17 @@ class DibujoProforma {
     this.y += alto + 1.6;
   }
 
+  /** Las columnas de importes son angostas: un monto muy grande se achica en vez de pisar a su vecina. */
+  private ajustarNumero(texto: string, col: Columna, padX: number): string {
+    if (!['precio', 'descuento', 'importe'].includes(col.clave)) return texto;
+    const disponible = col.ancho - padX * 2;
+    const actual = Number(this.doc._fontSize) || 8.5;
+    const ancho = this.doc.widthOfString(texto);
+    if (ancho <= disponible) return texto;
+    this.doc.fontSize(Math.max(6.5, (actual * disponible) / ancho));
+    return texto;
+  }
+
   private tabla(): void {
     const doc = this.doc;
     const tam = 8.5;
@@ -557,27 +556,26 @@ class DibujoProforma {
         .lineWidth(0.5).strokeColor(COLOR.linea).stroke();
       doc.restore();
 
-      const descuento = numeroSeguro(item.descuento);
+      const descuentoLinea = numeroSeguro(item.descuento) * numeroSeguro(item.cantidad);
       const valores: Record<ClaveColumna, string[]> = {
         n: [String(indice + 1)],
         codigo: lineasSku.length ? lineasSku : ['—'],
         descripcion: lineasDesc,
         unidad: [textoPdf(item.unidad_medida) || 'NIU'],
         cantidad: [formatearCantidad(item.cantidad)],
-        lista: [formatearDecimal(precioLista(item))],
-        descuento: [descuento >= 0.005 ? formatearDecimal(descuento) : '—'],
-        precio: [formatearDecimal(item.precio_unitario)],
-        importe: [formatearDecimal(item.importe)],
+        precio: [formatearSoles(precioLista(item))],
+        descuento: [formatearSoles(descuentoLinea)],
+        importe: [formatearSoles(item.importe)],
       };
 
       let x = this.izquierda;
       for (const col of this.columnas) {
         if (col.clave === 'importe') this.estilo('Helvetica-Bold', tam, COLOR.texto);
         else if (col.clave === 'codigo') this.estilo('Helvetica', 8, COLOR.gris);
-        else if (col.clave === 'descuento' && descuento >= 0.005) this.estilo('Helvetica', tam, COLOR.aviso);
+        else if (col.clave === 'descuento' && descuentoLinea >= 0.005) this.estilo('Helvetica', tam, COLOR.aviso);
         else this.estilo('Helvetica', tam, COLOR.texto);
         valores[col.clave].forEach((texto, n) => {
-          this.linea(texto, x + padX, top + padY + n * altoLinea, col.ancho - padX * 2, col.alinear);
+          this.linea(this.ajustarNumero(texto, col, padX), x + padX, top + padY + n * altoLinea, col.ancho - padX * 2, col.alinear);
         });
         x += col.ancho;
       }
@@ -608,35 +606,42 @@ class DibujoProforma {
     const lineasSon = this.envolver(son, this.ancho - 26);
     const altoSon = lineasSon.length * this.interlineado(8.5) + 12;
 
+    const items = this.d.items ?? [];
+    const unidades = items.reduce((s, i) => s + numeroSeguro(i.cantidad), 0);
+    const ahorro = descuentoTotal(items);
+    const conAhorro = ahorro >= 0.005;
+
+    // Cuadro de totales: [Descuento aplicado,] Subtotal, Op. gravada, IGV y la banda TOTAL.
+    const filas: Array<[string, number]> = [
+      ...(conAhorro ? ([['Descuento aplicado', ahorro]] as Array<[string, number]>) : []),
+      ['Subtotal', this.d.total_gravada],
+      ['Op. gravada', this.d.total_gravada],
+      [`IGV (${pct})`, this.d.total_igv],
+    ];
+    const altoFilas = altoFila * filas.length;
+
     // Totales y monto en letras siempre juntos en la misma página.
-    const altoBloque = altoFila * 2 + altoTotal + 8 + altoSon;
+    const altoBloque = altoFilas + altoTotal + 8 + altoSon;
     this.asegurar(altoBloque);
     const top = this.y;
 
-    // Resumen a la izquierda: cantidades y, si hay, lo que se ahorra.
-    const items = this.d.items ?? [];
-    const unidades = items.reduce((s, i) => s + numeroSeguro(i.cantidad), 0);
-    const ahorro = items.reduce((s, i) => s + numeroSeguro(i.descuento) * numeroSeguro(i.cantidad), 0);
+    // Resumen a la izquierda: cantidades, nota de precios y, si hay, lo que se ahorra.
     let yResumen = top + 5;
     this.estilo('Helvetica', 8, COLOR.gris);
     this.linea(`Ítems: ${items.length}    ·    Unidades: ${formatearCantidad(unidades)}`, this.izquierda, yResumen);
     yResumen += this.interlineado(8);
-    this.linea('Importes en Soles (S/), IGV incluido.', this.izquierda, yResumen);
+    this.linea('Precios unitarios con IGV incluido.', this.izquierda, yResumen);
     yResumen += this.interlineado(8);
-    if (ahorro >= 0.005) {
+    if (conAhorro) {
       this.estilo('Helvetica-Bold', 8, COLOR.aviso);
       this.linea(`Descuento aplicado en esta proforma: ${formatearSoles(ahorro)}`, this.izquierda, yResumen);
     }
 
     doc.save();
     doc.lineWidth(0.8).strokeColor(COLOR.linea)
-      .rect(xTot, top, anchoTot, altoFila * 2 + altoTotal).stroke();
+      .rect(xTot, top, anchoTot, altoFilas + altoTotal).stroke();
     doc.restore();
 
-    const filas: Array<[string, number]> = [
-      ['Op. gravada', this.d.total_gravada],
-      [`IGV (${pct})`, this.d.total_igv],
-    ];
     filas.forEach(([etiqueta, valor], i) => {
       const y = top + i * altoFila;
       if (i > 0) {
@@ -644,20 +649,21 @@ class DibujoProforma {
         doc.moveTo(xTot, y).lineTo(xTot + anchoTot, y).lineWidth(0.5).strokeColor(COLOR.linea).stroke();
         doc.restore();
       }
-      this.estilo('Helvetica', 8.5, COLOR.gris);
+      const esAhorro = etiqueta === 'Descuento aplicado';
+      this.estilo('Helvetica', 8.5, esAhorro ? COLOR.aviso : COLOR.gris);
       this.linea(etiqueta, xTot + 10, y + 5.5);
-      this.estilo('Helvetica', 9, COLOR.texto);
+      this.estilo('Helvetica', 9, esAhorro ? COLOR.aviso : COLOR.texto);
       this.linea(formatearSoles(valor), xTot, y + 5, anchoTot - 10, 'right');
     });
 
-    const yTotal = top + altoFila * 2;
+    const yTotal = top + altoFilas;
     doc.save();
     doc.rect(xTot, yTotal, anchoTot, altoTotal).fill(COLOR.marca);
     doc.rect(xTot, yTotal, 3.5, altoTotal).fill(COLOR.acento);
     doc.restore();
     this.estilo('Helvetica-Bold', 10.5, COLOR.blanco);
     this.linea('TOTAL', xTot + 14, yTotal + 8.5);
-    this.estilo('Helvetica-Bold', 13.5, COLOR.blanco);
+    this.estilo('Helvetica-Bold', 13.5, COLOR.acentoClaro);
     this.linea(formatearSoles(this.d.total), xTot, yTotal + 7, anchoTot - 10, 'right');
 
     // Monto en letras.
@@ -805,7 +811,7 @@ class DibujoProforma {
 
     const vineta = (lineas: string[], x: number) => {
       if (!this.cabe(alto * Math.min(2, lineas.length))) this.nuevaPagina();
-      this.estilo('Helvetica-Bold', tam, COLOR.acento);
+      this.estilo('Helvetica-Bold', tam, COLOR.acentoTexto);
       this.linea('•', x, this.y);
       this.parrafo(lineas, x + sangria, tam, COLOR.texto);
       this.y += 1.5;

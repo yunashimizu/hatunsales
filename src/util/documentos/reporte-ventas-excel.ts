@@ -21,8 +21,10 @@ import {
 
 const ARGB = {
   marca: argb(PALETA.grafito),
-  acento: argb(PALETA.naranja),
-  acentoSuave: argb(PALETA.naranjaSuave),
+  acento: argb(PALETA.dorado),
+  acentoClaro: argb(PALETA.doradoClaro),
+  acentoTexto: argb(PALETA.doradoOscuro),
+  acentoSuave: argb(PALETA.doradoSuave),
   texto: argb(PALETA.texto),
   gris: argb(PALETA.gris),
   grisClaro: argb(PALETA.grisClaro),
@@ -109,7 +111,7 @@ function bloqueTitulo(ws: ExcelJS.Worksheet, datos: DatosReporteVentas, titulo: 
   const filtros = (cabecera.filtros ?? []).map((f) => `${f.etiqueta}: ${f.valor}`).join('  ·  ');
   const subtitulo = ws.getCell(2, 1);
   subtitulo.value = filtros ? `${titulo}  —  ${filtros}` : titulo;
-  subtitulo.font = { name: FUENTE, size: 11, bold: true, color: { argb: ARGB.acento } };
+  subtitulo.font = { name: FUENTE, size: 11, bold: true, color: { argb: ARGB.acentoTexto } };
   subtitulo.alignment = { vertical: 'middle', wrapText: true };
   ws.getRow(2).height = Math.max(20, lineas(String(subtitulo.value), 1.15) * 15 + 5);
 
@@ -130,7 +132,7 @@ function cabeceraTabla(ws: ExcelJS.Worksheet, fila: number, columnas: ColumnaHoj
     celda.value = col.titulo;
     celda.font = { name: FUENTE, size: 10, bold: true, color: { argb: ARGB.blanco } };
     celda.fill = relleno(ARGB.marca);
-    celda.border = bordes;
+    celda.border = { ...bordes, bottom: { style: 'medium', color: { argb: ARGB.acento } } };
     celda.alignment = { vertical: 'middle', horizontal: col.alinear ?? 'left', wrapText: true };
   });
   row.height = 22;
@@ -201,15 +203,16 @@ function agregarHoja(wb: ExcelJS.Workbook, datos: DatosReporteVentas, op: Opcion
       const row = ws.getRow(fila);
       for (let c = 1; c <= op.columnas.length; c++) {
         const celda = row.getCell(c);
-        celda.fill = relleno(ARGB.acentoSuave);
-        celda.border = { top: { style: 'medium', color: { argb: ARGB.marca } }, bottom: bordeFino };
-        celda.font = { name: FUENTE, size: 10, bold: true, color: { argb: ARGB.marca } };
+        celda.fill = relleno(ARGB.marca);
+        celda.border = { top: bordeFino, bottom: { style: 'medium', color: { argb: ARGB.acento } } };
+        celda.font = { name: FUENTE, size: 10, bold: true, color: { argb: ARGB.blanco } };
       }
       row.getCell(1).value = op.total.etiqueta;
       row.getCell(1).alignment = { vertical: 'middle', indent: 1 };
       const suma = row.getCell(op.total.columna);
       suma.value = { formula: `SUBTOTAL(109,${letra}${primera}:${letra}${fila - 1})`, result: op.total.valor };
       suma.numFmt = op.total.formato;
+      suma.font = { name: FUENTE, size: 10, bold: true, color: { argb: ARGB.acentoClaro } };
       suma.alignment = { vertical: 'middle', horizontal: 'right' };
       row.height = 22;
     }
@@ -300,6 +303,7 @@ function agregarResumen(wb: ExcelJS.Workbook, datos: DatosReporteVentas): void {
     : 'Ventas por tipo de comprobante';
   seccion.font = { name: FUENTE, size: 11, bold: true, color: { argb: ARGB.marca } };
   seccion.fill = relleno(ARGB.acentoSuave);
+  seccion.border = { left: { style: 'thick', color: { argb: ARGB.acento } } };
   seccion.alignment = { vertical: 'middle', indent: 1 };
   ws.getRow(fila).height = 22;
   fila += 1;

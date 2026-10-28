@@ -1,4 +1,5 @@
 import * as ExcelJS from 'exceljs';
+import { inflateSync } from 'zlib';
 import { codificarPng, imagenSoportada, reducirLogo } from './logo-emisor';
 import { DatosProformaDocumento } from './proforma-documento';
 import { generarProformaExcel } from './proforma-excel';
@@ -55,6 +56,50 @@ function itemsMuchos(n: number) {
 
 function paginasPdf(pdf: Buffer): number {
   return (pdf.toString('latin1').match(/\/Type\s*\/Page\b/g) ?? []).length;
+}
+
+interface TextoPdf {
+  pagina: number;
+  x: number;
+  y: number;
+  texto: string;
+}
+
+/**
+ * Extrae el texto de un PDF generado por pdfkit (Helvetica, cadenas hexadecimales
+ * en `[<...> n <...>] TJ`) con su posición, para comprobar contenido y orden.
+ */
+function textosDelPdf(pdf: Buffer): TextoPdf[] {
+  const crudo = pdf.toString('latin1');
+  const salida: TextoPdf[] = [];
+  let pagina = 0;
+  const flujos = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let flujo: RegExpExecArray | null;
+  while ((flujo = flujos.exec(crudo))) {
+    let contenido: string;
+    try {
+      contenido = inflateSync(Buffer.from(flujo[1], 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    if (!contenido.includes(' TJ')) continue;
+    pagina++;
+    const bloques = /BT\s+1 0 0 1 ([\d.-]+) ([\d.-]+) Tm([\s\S]*?)ET/g;
+    let bloque: RegExpExecArray | null;
+    while ((bloque = bloques.exec(contenido))) {
+      const matriz = /\[([^\]]*)\]\s*TJ/.exec(bloque[3]);
+      if (!matriz) continue;
+      const texto = Array.from(matriz[1].matchAll(/<([0-9a-fA-F]*)>/g))
+        .map((h) => Buffer.from(h[1], 'hex').toString('latin1'))
+        .join('');
+      salida.push({ pagina, x: Number(bloque[1]), y: Number(bloque[2]), texto });
+    }
+  }
+  return salida;
+}
+
+function textoPlanoPdf(pdf: Buffer): string {
+  return textosDelPdf(pdf).map((t) => t.texto).join('\n');
 }
 
 describe('textoWhatsappProforma', () => {
@@ -130,6 +175,91 @@ describe('generarProformaPdf', () => {
     const pdf = await generarProformaPdf(datos({ items: [] }));
     expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
   });
+
+  describe('orden de la referencia', () => {
+    const CABECERAS = ['N°', 'Código', 'Unidad', 'P. Unit.', 'Cant.', 'Dto.', 'Descripción', 'Importe'];
+
+    it('la tabla lleva las cabeceras en la secuencia N°, Código, Unidad, P. Unit., Cant., Dto., Descripción, Importe', async () => {
+      const textos = textosDelPdf(await generarProformaPdf(datos()));
+      const cabecera = textos.filter((t) => t.pagina === 1 && CABECERAS.includes(t.texto));
+      expect(cabecera.map((t) => t.texto)).toEqual(CABECERAS);
+      // Misma línea y de izquierda a derecha.
+      expect(new Set(cabecera.map((t) => t.y)).size).toBe(1);
+      const xs = cabecera.map((t) => t.x);
+      expect([...xs].sort((a, b) => a - b)).toEqual(xs);
+    });
+
+    it('Dto. aparece siempre: con S/ 0.00 sin descuentos y con el descuento de la línea cuando hay', async () => {
+      const sin = textoPlanoPdf(await generarProformaPdf(datos()));
+      expect(sin).toContain('Dto.');
+      expect(sin).toContain('S/ 0.00');
+      expect(sin).not.toContain('P. Lista');
+
+      const con = textoPlanoPdf(
+        await generarProformaPdf(
+          datos({
+            items: [{ descripcion: 'Con descuento', cantidad: 2, precio_unitario: 18.5, importe: 37, descuento: 1.5 }],
+            total: 37,
+            total_gravada: 31.36,
+            total_igv: 5.64,
+          }),
+        ),
+      );
+      // P. Unit. = lista (18.50 + 1.50), Dto. = 1.50 × 2, Importe = 37.
+      expect(con).toContain('S/ 20.00');
+      expect(con).toContain('S/ 3.00');
+      expect(con).toContain('S/ 37.00');
+      expect(con).toContain('Descuento aplicado');
+    });
+
+    it('el cuadro de totales trae Subtotal, Op. gravada, IGV y TOTAL, y la nota de precios con IGV', async () => {
+      const texto = textoPlanoPdf(await generarProformaPdf(datos()));
+      const orden = ['Subtotal', 'Op. gravada', 'IGV (18%)', 'TOTAL'].map((t) => texto.indexOf(t));
+      expect(orden.every((i) => i >= 0)).toBe(true);
+      expect([...orden].sort((a, b) => a - b)).toEqual(orden);
+      expect(texto).toContain('Precios unitarios con IGV incluido.');
+      expect(texto).not.toContain('Importes en Soles');
+      expect(texto).not.toContain('Descuento aplicado');
+    });
+
+    it('datos de la proforma: Estado siempre visible, Almacén de despacho y vigencia en días', async () => {
+      const texto = textoPlanoPdf(await generarProformaPdf(datos({ valida_hasta: '2026-10-01' })));
+      expect(texto).toContain('Estado:');
+      expect(texto).toContain('Enviada');
+      expect(texto).toContain('Almacén de despacho:');
+      expect(texto).not.toContain('Despacho desde');
+      expect(texto).toContain('01/10/2026 (7 días)');
+      const filas = ['Fecha de emisión:', 'Válida hasta:', 'Moneda:', 'Estado:', 'Almacén de despacho:'];
+      const posiciones = filas.map((f) => texto.indexOf(f));
+      expect([...posiciones].sort((a, b) => a - b)).toEqual(posiciones);
+
+      const borrador = textoPlanoPdf(await generarProformaPdf(datos({ estado: 'borrador' })));
+      expect(borrador).toContain('Borrador');
+    });
+
+    it('datos del cliente: cliente, documento y teléfono antes que dirección y correo', async () => {
+      const texto = textoPlanoPdf(await generarProformaPdf(datos()));
+      const filas = ['Cliente:', 'RUC:', 'Teléfono:', 'Dirección:', 'Correo:'];
+      const posiciones = filas.map((f) => texto.indexOf(f));
+      expect(posiciones.every((i) => i >= 0)).toBe(true);
+      expect([...posiciones].sort((a, b) => a - b)).toEqual(posiciones);
+    });
+
+    it('la primera condición dice «Proforma válida hasta el …» y no queda texto de la versión anterior', async () => {
+      const texto = textoPlanoPdf(await generarProformaPdf(datos({ valida_hasta: '2099-10-01' })));
+      expect(texto).toContain('Proforma válida hasta el 01/10/2099. Pasada esa fecha, los precios pueden variar.');
+      expect(texto).toContain('Los precios están expresados en Soles (PEN) e incluyen IGV.');
+      expect(texto).not.toContain('Oferta válida');
+    });
+
+    it('con 60 ítems sigue paginando y repite la cabecera de la tabla en cada hoja', async () => {
+      const pdf = await generarProformaPdf(datos({ items: itemsMuchos(60) }));
+      expect(paginasPdf(pdf)).toBeGreaterThan(1);
+      const textos = textosDelPdf(pdf);
+      const paginas = new Set(textos.filter((t) => t.texto === 'Importe').map((t) => t.pagina));
+      expect(paginas.size).toBeGreaterThan(1);
+    });
+  });
 });
 
 describe('generarProformaExcel', () => {
@@ -147,7 +277,7 @@ describe('generarProformaExcel', () => {
     hoja.eachRow((fila) => {
       fila.eachCell((celda) => {
         if (celda.value === 'TOTAL') {
-          const valor = fila.getCell(9).value as any;
+          const valor = fila.getCell(8).value as any;
           total = typeof valor === 'object' ? valor.result : valor;
         }
       });
@@ -155,12 +285,64 @@ describe('generarProformaExcel', () => {
     expect(total).toBe(3665);
   });
 
-  it('oculta las columnas de descuento cuando no hay descuentos y las muestra cuando sí', async () => {
-    const sin = await leer(datos());
-    expect(sin.hoja.getColumn(6).hidden).toBe(true);
-    expect(sin.hoja.getColumn(7).hidden).toBe(true);
+  const CABECERAS = ['N°', 'Código', 'Unidad', 'P. Unit.', 'Cant.', 'Dto.', 'Descripción', 'Importe'];
 
-    const con = await leer(
+  function textosHoja(hoja: ExcelJS.Worksheet): string[] {
+    const t: string[] = [];
+    hoja.eachRow((f) => f.eachCell((c) => typeof c.value === 'string' && t.push(c.value)));
+    return t;
+  }
+
+  it('la tabla lleva 8 columnas sin ocultar, en el orden de la referencia, y Dto. siempre visible', async () => {
+    const itemConDescuento = { descripcion: 'Con descuento', cantidad: 2, precio_unitario: 18.5, importe: 37, descuento: 1.5 };
+    for (const [d, conDescuento] of [
+      [datos(), false],
+      [
+        datos({ items: [itemConDescuento], total: 37, total_gravada: 31.36, total_igv: 5.64 }),
+        true,
+      ],
+    ] as Array<[DatosProformaDocumento, boolean]>) {
+      const { hoja } = await leer(d);
+      for (let c = 1; c <= 8; c++) expect(hoja.getColumn(c).hidden).toBeFalsy();
+      let cabecera: string[] = [];
+      hoja.eachRow((fila) => {
+        const valores = [1, 2, 3, 4, 5, 6, 7, 8].map((c) => fila.getCell(c).value);
+        if (valores.every((v, i) => v === CABECERAS[i])) cabecera = valores as string[];
+      });
+      expect(cabecera).toEqual(CABECERAS);
+      // Nada queda apuntando a la antigua columna I.
+      hoja.eachRow((fila) => expect(fila.getCell(9).value).toBeNull());
+      if (!conDescuento) continue;
+      let lineaOk = false;
+      hoja.eachRow((fila) => {
+        if (fila.getCell(7).value !== 'Con descuento') return;
+        const importe = fila.getCell(8).value as any;
+        lineaOk =
+          fila.getCell(4).value === 20 &&
+          fila.getCell(6).value === 3 &&
+          (typeof importe === 'object' ? importe.result : importe) === 37 &&
+          importe.formula === `D${fila.number}*E${fila.number}-F${fila.number}` &&
+          fila.getCell(4).numFmt === '"S/ "#,##0.00';
+      });
+      expect(lineaOk).toBe(true);
+    }
+  });
+
+  it('Dto. vale 0 sin descuentos y el cuadro trae Subtotal, Op. gravada, IGV y TOTAL en ese orden', async () => {
+    const { hoja } = await leer(datos());
+    hoja.eachRow((fila) => {
+      if (fila.getCell(7).value === 'Cemento Sol Tipo I bolsa 42.5 kg') expect(fila.getCell(6).value).toBe(0);
+    });
+    const textos = textosHoja(hoja);
+    const orden = ['Subtotal', 'Op. gravada', 'IGV (18%)', 'TOTAL'].map((t) => textos.indexOf(t));
+    expect(orden.every((i) => i >= 0)).toBe(true);
+    expect([...orden].sort((a, b) => a - b)).toEqual(orden);
+    expect(textos).toContain('Precios unitarios con IGV incluido.');
+    expect(textos).not.toContain('Descuento aplicado');
+  });
+
+  it('con descuento agrega la fila Descuento aplicado antes del Subtotal', async () => {
+    const { hoja } = await leer(
       datos({
         items: [{ descripcion: 'Con descuento', cantidad: 2, precio_unitario: 18.5, importe: 37, descuento: 1.5 }],
         total: 37,
@@ -168,23 +350,23 @@ describe('generarProformaExcel', () => {
         total_igv: 5.64,
       }),
     );
-    expect(con.hoja.getColumn(6).hidden).toBeFalsy();
-    let listaOk = false;
-    con.hoja.eachRow((fila) => {
-      if (fila.getCell(3).value === 'Con descuento') listaOk = fila.getCell(6).value === 20 && fila.getCell(7).value === 1.5;
-    });
-    expect(listaOk).toBe(true);
+    const textos = textosHoja(hoja);
+    expect(textos.indexOf('Descuento aplicado')).toBeGreaterThan(-1);
+    expect(textos.indexOf('Descuento aplicado')).toBeLessThan(textos.indexOf('Subtotal'));
   });
 
-  it('no imprime el estado interno al cliente, pero sí avisa si está anulada', async () => {
-    const textos = async (estado: string) => {
-      const { hoja } = await leer(datos({ estado }));
-      const t: string[] = [];
-      hoja.eachRow((f) => f.eachCell((c) => typeof c.value === 'string' && t.push(c.value)));
-      return t.join('|');
-    };
-    expect(await textos('enviada')).not.toMatch(/Enviada|Estado:/);
-    expect(await textos('anulada')).toContain('ANULADA');
+  it('datos de la proforma: Fecha de emisión, Válida hasta (N días), Moneda, Estado y Almacén de despacho', async () => {
+    const textos = async (estado: string) => textosHoja((await leer(datos({ estado, valida_hasta: '2099-10-01' }))).hoja).join('|');
+    const enviada = await textos('enviada');
+    expect(enviada).toContain('Estado:');
+    expect(enviada).toContain('Enviada');
+    expect(enviada).toContain('Fecha de emisión:');
+    expect(enviada).toContain('Almacén de despacho:');
+    expect(enviada).not.toMatch(/Despacho desde|Emisión:\|/);
+    expect(enviada).toMatch(/01\/10\/2099 \(\d+ días\)/);
+    expect(await textos('borrador')).toContain('Borrador');
+    expect(await textos('anulada')).toContain('Anulada');
+    expect(enviada).toContain('Proforma válida hasta el 01/10/2099. Pasada esa fecha, los precios pueden variar.');
   });
 
   it('no falla sin contacto ni cuentas', async () => {

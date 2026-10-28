@@ -751,6 +751,8 @@ export class ProformaBussnies implements IProformaBussniees {
           ),
           descripcion: item.descripcion_snapshot || item.producto?.nombre || '',
           sku: item.sku_snapshot || item.producto?.sku || '',
+          unidad_medida: item.unidad_medida_snapshot || item.producto?.unidad_medida || 'NIU',
+          descuento: Number(item.descuento_snapshot ?? item.producto?.descuento ?? 0),
         })) ?? [],
       creado_en: p.creado_en,
     };

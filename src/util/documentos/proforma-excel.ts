@@ -1,4 +1,5 @@
 import * as ExcelJS from 'exceljs';
+import { redondear } from '../fiscal/calculo-fiscal';
 import { montoEnLetras } from '../fiscal/numero-letras';
 import { dimensionesImagen } from './logo-emisor';
 import {
@@ -9,19 +10,21 @@ import {
   cuentasUtiles,
   DatosProformaDocumento,
   describirCuentaTabla,
+  descuentoTotal,
+  estadoParaDocumento,
   etiquetaDocumento,
   formatearCantidad,
   formatearFecha,
   formatearFechaHora,
   formatearPorcentaje,
   formatearTelefono,
-  hayDescuentos,
   LEYENDA_SIN_VALOR_TRIBUTARIO,
   numeroSeguro,
   PALETA,
   precioLista,
   textoMultilinea,
   textoPlano,
+  textoValidaHasta,
 } from './proforma-documento';
 
 /**
@@ -29,16 +32,17 @@ import {
  * imprimir en A4 vertical, con la misma información y la misma imagen de marca
  * que el PDF.
  *
- * La hoja usa una grilla fija de 9 columnas (A–I). Las dos columnas de
- * descuento (F, G) se ocultan cuando ninguna línea tiene descuento; todos los
- * bloques están armados con celdas combinadas que las atraviesan, así el
- * diseño se ve igual con o sin ellas.
+ * La hoja usa una grilla fija de 8 columnas (A–H), en el mismo orden que el PDF
+ * y que la proforma de referencia: N°, Código, Unidad, P. Unit., Cant., Dto.,
+ * Descripción, Importe. La columna Dto. siempre es visible. Los demás bloques
+ * están armados con celdas combinadas que atraviesan esa grilla.
  */
 
 const ARGB = {
   marca: argb(PALETA.grafito),
-  acento: argb(PALETA.naranja),
-  acentoSuave: argb(PALETA.naranjaSuave),
+  acento: argb(PALETA.dorado),
+  acentoClaro: argb(PALETA.doradoClaro),
+  acentoSuave: argb(PALETA.doradoSuave),
   texto: argb(PALETA.texto),
   gris: argb(PALETA.gris),
   grisClaro: argb(PALETA.grisClaro),
@@ -51,14 +55,15 @@ const ARGB = {
 };
 
 const FORMATO_SOLES = '"S/ "#,##0.00';
-const FORMATO_IMPORTE = '#,##0.00';
 const FORMATO_ENTERO = '#,##0';
 const FUENTE = 'Calibri';
 
-/** Ancho (en caracteres) de A–I: N°, Código, Descripción, Und., Cant., P. Lista, Dto., P. Unit., Importe. */
-const ANCHOS = [5, 14, 38, 7, 8, 11, 9, 12, 14];
-const COL = { n: 1, codigo: 2, descripcion: 3, unidad: 4, cantidad: 5, lista: 6, descuento: 7, precio: 8, importe: 9 };
-const ULTIMA = 'I';
+/** Ancho (en caracteres) de A–H: N°, Código, Unidad, P. Unit., Cant., Dto., Descripción, Importe. */
+const ANCHOS = [5, 14, 8, 12, 8, 11, 38, 14];
+const COL = { n: 1, codigo: 2, unidad: 3, precio: 4, cantidad: 5, descuento: 6, descripcion: 7, importe: 8 };
+const ULTIMA = 'H';
+/** Número de columnas de la grilla (A–H). */
+const NUM_COLUMNAS = ANCHOS.length;
 
 const bordeFino: Partial<ExcelJS.Border> = { style: 'thin', color: { argb: ARGB.linea } };
 const bordeCompleto: Partial<ExcelJS.Borders> = {
@@ -107,7 +112,6 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   const codigo = textoPlano(d.codigo) || '—';
   const generadoEn = d.generado_en ?? new Date();
   const items = d.items ?? [];
-  const conDescuento = hayDescuentos(items);
   const aviso = avisoEstadoCliente(d.estado, d.valida_hasta, generadoEn);
 
   const wb = new ExcelJS.Workbook();
@@ -126,16 +130,9 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     views: [{ showGridLines: false }],
   });
   ws.columns = ANCHOS.map((width) => ({ width }));
-  if (!conDescuento) {
-    ws.getColumn(COL.lista).hidden = true;
-    ws.getColumn(COL.descuento).hidden = true;
-  }
 
-  /** Ancho visible total (para estimar el alto de los textos a todo el ancho). */
-  const anchoVisible = ANCHOS.reduce(
-    (suma, ancho, i) => suma + (!conDescuento && (i + 1 === COL.lista || i + 1 === COL.descuento) ? 0 : ancho),
-    0,
-  );
+  /** Ancho total (para estimar el alto de los textos a todo el ancho). */
+  const anchoVisible = ANCHOS.reduce((suma, ancho) => suma + ancho, 0);
 
   let fila = 0;
   const siguiente = (alto?: number) => {
@@ -159,11 +156,11 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
 
   // ── Cabecera: logo + datos del emisor + recuadro R.U.C. / PROFORMA ─────
   const r1 = siguiente(24);
-  const r2 = siguiente(22);
+  const r2 = siguiente(27);
   const r3 = siguiente(26);
   const r4 = siguiente(14);
 
-  for (const r of [r1, r2, r3, r4]) combinar('C', 'G', r);
+  for (const r of [r1, r2, r3, r4]) combinar('C', 'F', r);
   // Zona del logo: A1:B4 como un solo bloque.
   ws.mergeCells(`A${r1}:B${r4}`);
 
@@ -202,30 +199,30 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     }
   }
 
-  // Recuadro de la derecha (H:I).
-  for (const r of [r1, r2, r3, r4]) combinar('H', ULTIMA, r);
+  // Recuadro de la derecha (G:H).
+  for (const r of [r1, r2, r3, r4]) combinar('G', ULTIMA, r);
   const bordeCaja = { style: 'medium' as const, color: { argb: ARGB.marca } };
-  poner(`H${r1}`, ruc ? `R.U.C. ${ruc}` : '', {
+  poner(`G${r1}`, ruc ? `R.U.C. ${ruc}` : '', {
     font: fuente({ bold: true, size: 11 }),
     alignment: { vertical: 'middle', horizontal: 'center' },
     border: { top: bordeCaja, left: bordeCaja, right: bordeCaja },
   });
-  poner(`H${r2}`, 'PROFORMA', {
+  poner(`G${r2}`, 'PROFORMA', {
     font: fuente({ bold: true, size: 13, color: { argb: ARGB.blanco } }),
     fill: relleno(ARGB.marca),
     alignment: { vertical: 'middle', horizontal: 'center' },
     border: { left: bordeCaja, right: bordeCaja },
   });
-  poner(`H${r3}`, codigo, {
+  poner(`G${r3}`, codigo, {
     font: fuente({ bold: true, size: 15, color: { argb: ARGB.marca } }),
     alignment: { vertical: 'middle', horizontal: 'center' },
     border: { top: { style: 'medium', color: { argb: ARGB.acento } }, left: bordeCaja, right: bordeCaja },
   });
-  poner(`H${r4}`, '', { border: { left: bordeCaja, right: bordeCaja, bottom: bordeCaja } });
+  poner(`G${r4}`, '', { border: { left: bordeCaja, right: bordeCaja, bottom: bordeCaja } });
 
-  // Regla de marca: línea naranja bajo la cabecera.
+  // Regla de marca: línea dorada bajo la cabecera.
   siguiente(6);
-  for (let c = 1; c <= 9; c++) {
+  for (let c = 1; c <= NUM_COLUMNAS; c++) {
     ws.getRow(fila).getCell(c).border = { bottom: { style: 'medium', color: { argb: ARGB.acento } } };
   }
   siguiente(8);
@@ -233,28 +230,28 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   // ── Datos del cliente (izquierda) y de la proforma (derecha) ──────────
   const cliente = d.cliente ?? {};
   const documento = textoPlano(cliente.documento);
+  // Cliente, documento y teléfono primero (como la referencia); dirección y correo después.
   const izquierda: Array<[string, string]> = [['Cliente', textoPlano(cliente.nombre) || '—']];
   if (documento) izquierda.push([etiquetaDocumento(documento), documento]);
-  if (textoPlano(cliente.direccion)) izquierda.push(['Dirección', textoPlano(cliente.direccion)]);
   if (formatearTelefono(cliente.telefono)) izquierda.push(['Teléfono', formatearTelefono(cliente.telefono)]);
+  if (textoPlano(cliente.direccion)) izquierda.push(['Dirección', textoPlano(cliente.direccion)]);
   if (textoPlano(cliente.email)) izquierda.push(['Correo', textoPlano(cliente.email)]);
 
-  const derecha: Array<[string, string]> = [['Emisión', formatearFecha(d.fecha_emision) || '—']];
-  const valida = formatearFecha(d.valida_hasta ?? null);
+  const derecha: Array<[string, string]> = [['Fecha de emisión', formatearFecha(d.fecha_emision) || '—']];
+  const valida = textoValidaHasta(d);
   if (valida) derecha.push(['Válida hasta', valida]);
   derecha.push(['Moneda', 'Soles (PEN)']);
-  if (textoPlano(d.almacen)) derecha.push(['Despacho desde', textoPlano(d.almacen)]);
-  if (aviso) derecha.push(['Estado', aviso.texto]);
+  derecha.push(['Estado', estadoParaDocumento(d.estado, d.valida_hasta, generadoEn)]);
+  if (textoPlano(d.almacen)) derecha.push(['Almacén de despacho', textoPlano(d.almacen)]);
 
-  const anchoValorIzq = ANCHOS[COL.descripcion - 1];
-  const anchoValorDer = conDescuento
-    ? ANCHOS[COL.lista - 1] + ANCHOS[COL.descuento - 1] + ANCHOS[COL.precio - 1] + ANCHOS[COL.importe - 1]
-    : ANCHOS[COL.precio - 1] + ANCHOS[COL.importe - 1];
+  // Bloque izquierdo A:D (etiqueta A:B, valor C:D); bloque derecho E:H (etiqueta E:F, valor G:H).
+  const anchoValorIzq = ANCHOS[COL.unidad - 1] + ANCHOS[COL.precio - 1];
+  const anchoValorDer = ANCHOS[COL.descripcion - 1] + ANCHOS[COL.importe - 1];
 
   const rTitulo = siguiente(19);
-  combinar('A', 'C', rTitulo);
-  combinar('D', ULTIMA, rTitulo);
-  for (const [celda, titulo] of [['A', 'DATOS DEL CLIENTE'], ['D', 'DATOS DE LA PROFORMA']]) {
+  combinar('A', 'D', rTitulo);
+  combinar('E', ULTIMA, rTitulo);
+  for (const [celda, titulo] of [['A', 'DATOS DEL CLIENTE'], ['E', 'DATOS DE LA PROFORMA']]) {
     poner(`${celda}${rTitulo}`, titulo, {
       font: fuente({ bold: true, size: 9, color: { argb: ARGB.marca } }),
       fill: relleno(ARGB.acentoSuave),
@@ -262,9 +259,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
       border: { ...bordeCompleto, left: { style: 'medium', color: { argb: ARGB.acento } } },
     });
   }
-  ws.getRow(rTitulo).getCell(3).border = bordeCompleto;
-  ws.getRow(rTitulo).getCell(3).fill = relleno(ARGB.acentoSuave);
-  for (let c = 5; c <= 9; c++) {
+  for (const c of [2, 3, 4, 6, 7, 8]) {
     ws.getRow(rTitulo).getCell(c).border = bordeCompleto;
     ws.getRow(rTitulo).getCell(c).fill = relleno(ARGB.acentoSuave);
   }
@@ -283,27 +278,26 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
       ),
     );
     combinar('A', 'B', r);
-    combinar('D', 'E', r);
-    combinar('F', ULTIMA, r);
-    const esAviso = etqDer === 'Estado' && aviso;
+    combinar('C', 'D', r);
+    combinar('E', 'F', r);
+    combinar('G', ULTIMA, r);
+    const esEstado = etqDer === 'Estado';
+    const colorEstado = aviso ? (aviso.tono === 'peligro' ? ARGB.peligro : ARGB.aviso) : ARGB.texto;
     const celdas: Array<[string, string, boolean, boolean]> = [
       ['A', etqIzq ? `${etqIzq}:` : '', true, false],
       ['C', valIzq, false, false],
-      ['D', etqDer ? `${etqDer}:` : '', true, false],
-      ['F', valDer, false, !!esAviso],
+      ['E', etqDer ? `${etqDer}:` : '', true, false],
+      ['G', valDer, false, esEstado && !!aviso],
     ];
     for (const [col, valor, esEtiqueta, resaltar] of celdas) {
       poner(`${col}${r}`, valor, {
         font: esEtiqueta
           ? fuente({ bold: true, size: 9, color: { argb: ARGB.gris } })
-          : fuente({
-              bold: resaltar,
-              color: { argb: resaltar ? (aviso!.tono === 'peligro' ? ARGB.peligro : ARGB.aviso) : ARGB.texto },
-            }),
+          : fuente({ bold: resaltar, color: { argb: resaltar ? colorEstado : ARGB.texto } }),
         alignment: { vertical: 'middle', wrapText: !esEtiqueta, indent: esEtiqueta ? 1 : 0 },
       });
     }
-    for (let c = 1; c <= 9; c++) {
+    for (let c = 1; c <= NUM_COLUMNAS; c++) {
       const celda = ws.getRow(r).getCell(c);
       celda.fill = relleno(ARGB.fondo);
       celda.border = bordeCompleto;
@@ -313,16 +307,16 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
 
   // ── Tabla de ítems ─────────────────────────────────────────────
   const filaCabecera = siguiente(22);
-  const titulos = ['N°', 'Código', 'Descripción', 'Und.', 'Cant.', 'P. Lista', 'Dto.', 'P. Unit.', 'Importe'];
+  const titulos = ['N°', 'Código', 'Unidad', 'P. Unit.', 'Cant.', 'Dto.', 'Descripción', 'Importe'];
   titulos.forEach((titulo, i) => {
-    const izq = i === 1 || i === 2;
+    const izq = i === 1 || i === 6;
     poner(`${String.fromCharCode(65 + i)}${filaCabecera}`, titulo, {
       font: fuente({ bold: true, color: { argb: ARGB.blanco } }),
       fill: relleno(ARGB.marca),
       alignment: {
         vertical: 'middle',
-        horizontal: izq ? 'left' : i >= 4 ? 'right' : 'center',
-        indent: izq || i >= 4 ? 1 : 0,
+        horizontal: izq ? 'left' : i === 0 || i === 2 ? 'center' : 'right',
+        indent: i === 0 || i === 2 ? 0 : 1,
       },
       border: { ...bordeCompleto, bottom: { style: 'medium', color: { argb: ARGB.acento } } },
     });
@@ -334,9 +328,9 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     const descripcion = textoPlano(item.descripcion) || 'Producto';
     const sku = textoPlano(item.sku);
     const cantidad = numeroSeguro(item.cantidad);
-    const precio = numeroSeguro(item.precio_unitario);
+    const lista = precioLista(item);
     const importe = numeroSeguro(item.importe);
-    const descuento = numeroSeguro(item.descuento);
+    const descuentoLinea = redondear(numeroSeguro(item.descuento) * cantidad);
     sumaImportes += importe;
 
     const r = siguiente(
@@ -346,37 +340,36 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
       ]),
     );
     const fondo = indice % 2 === 1 ? relleno(ARGB.cebra) : undefined;
-    // El importe queda como fórmula solo si coincide con cantidad × precio.
-    const cuadra = Math.abs(cantidad * precio - importe) < 0.005;
+    // Importe = P. Unit. × Cant. − Dto.: queda como fórmula solo si cuadra con el importe guardado.
+    const cuadra = Math.abs(lista * cantidad - descuentoLinea - importe) < 0.005;
     const valores: ExcelJS.CellValue[] = [
       indice + 1,
       sku || '—',
-      descripcion,
       textoPlano(item.unidad_medida) || 'NIU',
+      lista,
       cantidad,
-      precioLista(item),
-      descuento >= 0.005 ? descuento : '—',
-      precio,
-      cuadra ? { formula: `E${r}*H${r}`, result: importe } : importe,
+      descuentoLinea,
+      descripcion,
+      cuadra ? { formula: `D${r}*E${r}-F${r}`, result: importe } : importe,
     ];
     valores.forEach((valor, i) => {
       const celda = ws.getRow(r).getCell(i + 1);
       celda.value = valor;
       celda.font = fuente({
-        bold: i === 8,
+        bold: i === 7,
         size: i === 1 ? 9 : 10,
-        color: { argb: i === 1 ? ARGB.gris : i === 6 && descuento >= 0.005 ? ARGB.aviso : ARGB.texto },
+        color: { argb: i === 1 ? ARGB.gris : i === 5 && descuentoLinea >= 0.005 ? ARGB.aviso : ARGB.texto },
       });
       celda.border = bordeCompleto;
       if (fondo) celda.fill = fondo;
       celda.alignment = {
         vertical: 'middle',
-        horizontal: i === 0 || i === 3 ? 'center' : i >= 4 ? 'right' : 'left',
-        wrapText: i === 1 || i === 2,
-        indent: i >= 4 || i === 1 || i === 2 ? 1 : 0,
+        horizontal: i === 0 || i === 2 ? 'center' : i === 1 || i === 6 ? 'left' : 'right',
+        wrapText: i === 1 || i === 6,
+        indent: i === 0 || i === 2 ? 0 : 1,
       };
       if (i === 4) celda.numFmt = Number.isInteger(cantidad) ? FORMATO_ENTERO : '#,##0.00';
-      if (i === 5 || i === 6 || i === 7 || i === 8) celda.numFmt = FORMATO_IMPORTE;
+      if (i === 3 || i === 5 || i === 7) celda.numFmt = FORMATO_SOLES;
     });
   });
   const ultimaFilaItem = fila;
@@ -393,55 +386,61 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
 
   // ── Totales ────────────────────────────────────────────────────
   const unidades = items.reduce((s, i) => s + numeroSeguro(i.cantidad), 0);
-  const ahorro = items.reduce((s, i) => s + numeroSeguro(i.descuento) * numeroSeguro(i.cantidad), 0);
+  const ahorro = descuentoTotal(items);
+  const conAhorro = ahorro >= 0.005;
   const total = numeroSeguro(d.total);
   const totalCuadra = items.length > 0 && Math.abs(sumaImportes - total) < 0.005;
-  const filasTotales: Array<[string, ExcelJS.CellValue, boolean]> = [
-    ['Op. gravada', numeroSeguro(d.total_gravada), false],
-    [`IGV (${formatearPorcentaje(d.porcentaje_igv)})`, numeroSeguro(d.total_igv), false],
+  const filasTotales: Array<[string, ExcelJS.CellValue, 'normal' | 'ahorro' | 'total']> = [
+    ...(conAhorro ? ([['Descuento aplicado', ahorro, 'ahorro']] as Array<[string, ExcelJS.CellValue, 'ahorro']>) : []),
+    ['Subtotal', numeroSeguro(d.total_gravada), 'normal'],
+    ['Op. gravada', numeroSeguro(d.total_gravada), 'normal'],
+    [`IGV (${formatearPorcentaje(d.porcentaje_igv)})`, numeroSeguro(d.total_igv), 'normal'],
     [
       'TOTAL',
       totalCuadra && items.length
-        ? { formula: `SUM(I${primeraFilaItem}:I${ultimaFilaItem})`, result: total }
+        ? { formula: `SUM(H${primeraFilaItem}:H${ultimaFilaItem})`, result: total }
         : total,
-      true,
+      'total',
     ],
   ];
   const filaResumen = fila + 1;
-  filasTotales.forEach(([etiqueta, valor, esTotal]) => {
+  filasTotales.forEach(([etiqueta, valor, tipo]) => {
+    const esTotal = tipo === 'total';
     const r = siguiente(esTotal ? 25 : 18);
-    combinar('E', 'H', r);
-    const celdaEtiqueta = ws.getCell(`E${r}`);
-    const celdaValor = ws.getCell(`I${r}`);
+    combinar('F', 'G', r);
+    const celdaEtiqueta = ws.getCell(`F${r}`);
+    const celdaValor = ws.getCell(`H${r}`);
     celdaEtiqueta.value = etiqueta;
     celdaValor.value = valor;
     celdaValor.numFmt = FORMATO_SOLES;
     celdaEtiqueta.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
     celdaValor.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
-    for (let c = 5; c <= 9; c++) ws.getRow(r).getCell(c).border = bordeCompleto;
+    for (let c = 6; c <= NUM_COLUMNAS; c++) ws.getRow(r).getCell(c).border = bordeCompleto;
     if (esTotal) {
       celdaEtiqueta.font = fuente({ bold: true, size: 12, color: { argb: ARGB.blanco } });
-      celdaValor.font = fuente({ bold: true, size: 13, color: { argb: ARGB.blanco } });
-      for (let c = 5; c <= 9; c++) ws.getRow(r).getCell(c).fill = relleno(ARGB.marca);
-      ws.getRow(r).getCell(5).border = { ...bordeCompleto, left: { style: 'thick', color: { argb: ARGB.acento } } };
+      celdaValor.font = fuente({ bold: true, size: 13, color: { argb: ARGB.acentoClaro } });
+      for (let c = 6; c <= NUM_COLUMNAS; c++) ws.getRow(r).getCell(c).fill = relleno(ARGB.marca);
+      ws.getRow(r).getCell(6).border = { ...bordeCompleto, left: { style: 'thick', color: { argb: ARGB.acento } } };
     } else {
-      celdaEtiqueta.font = fuente({ color: { argb: ARGB.gris } });
-      celdaValor.font = fuente();
+      const color = tipo === 'ahorro' ? ARGB.aviso : undefined;
+      celdaEtiqueta.font = fuente({ color: { argb: color ?? ARGB.gris } });
+      celdaValor.font = fuente(color ? { color: { argb: color } } : {});
     }
   });
-  combinar('A', 'D', filaResumen);
+  // Resumen a la izquierda (A:E), junto a los totales.
+  combinar('A', 'E', filaResumen);
   poner(
     `A${filaResumen}`,
     `Ítems: ${items.length}   ·   Unidades: ${formatearCantidad(unidades)}`,
     { font: fuente({ size: 9, color: { argb: ARGB.gris } }), alignment: { vertical: 'middle' } },
   );
-  combinar('A', 'D', filaResumen + 1);
-  poner(`A${filaResumen + 1}`, 'Importes en Soles (S/), IGV incluido.', {
+  combinar('A', 'E', filaResumen + 1);
+  poner(`A${filaResumen + 1}`, 'Precios unitarios con IGV incluido.', {
     font: fuente({ size: 9, color: { argb: ARGB.gris } }),
     alignment: { vertical: 'middle' },
   });
-  if (ahorro >= 0.005) {
-    combinar('A', 'D', filaResumen + 2);
+  if (conAhorro) {
+    combinar('A', 'E', filaResumen + 2);
     poner(
       `A${filaResumen + 2}`,
       `Descuento aplicado en esta proforma: S/ ${ahorro.toLocaleString('en-US', {
@@ -463,7 +462,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     font: fuente({ bold: true }),
     alignment: { vertical: 'middle', wrapText: true, indent: 1 },
   });
-  for (let c = 1; c <= 9; c++) {
+  for (let c = 1; c <= NUM_COLUMNAS; c++) {
     const celda = ws.getRow(rSon).getCell(c);
     celda.fill = relleno(ARGB.acentoSuave);
     celda.border = bordeCompleto;
@@ -482,7 +481,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
         bottom: { style: 'thin', color: { argb: ARGB.linea } },
       },
     });
-    for (let c = 2; c <= 9; c++) {
+    for (let c = 2; c <= NUM_COLUMNAS; c++) {
       ws.getRow(t).getCell(c).border = { bottom: { style: 'thin', color: { argb: ARGB.linea } } };
     }
   };
@@ -510,19 +509,20 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
 
     const rEnc = siguiente(17);
     combinar('A', 'B', rEnc);
-    combinar('D', ULTIMA, rEnc);
+    combinar('C', 'F', rEnc);
+    combinar('G', ULTIMA, rEnc);
     const hayCci = cuentas.some((c) => c.cci);
     for (const [ref, texto] of [
       [`A${rEnc}`, 'BANCO / ENTIDAD'],
       [`C${rEnc}`, hayCci ? 'N° DE CUENTA' : 'N° DE CUENTA / CELULAR'],
-      [`D${rEnc}`, hayCci ? 'CCI (INTERBANCARIO)' : ''],
+      [`G${rEnc}`, hayCci ? 'CCI (INTERBANCARIO)' : ''],
     ]) {
       poner(ref, texto, {
         font: fuente({ bold: true, size: 8, color: { argb: ARGB.gris } }),
         alignment: { vertical: 'middle', indent: 1 },
       });
     }
-    for (let c = 1; c <= 9; c++) {
+    for (let c = 1; c <= NUM_COLUMNAS; c++) {
       const celda = ws.getRow(rEnc).getCell(c);
       celda.fill = relleno(ARGB.fondo);
       celda.border = bordeCompleto;
@@ -531,7 +531,8 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     cuentas.forEach((c) => {
       const r = siguiente(c.detalle ? 33 : 21);
       combinar('A', 'B', r);
-      combinar('D', ULTIMA, r);
+      combinar('C', 'F', r);
+      combinar('G', ULTIMA, r);
       // El número va en negrita y, debajo, el tipo de cuenta / titular en gris.
       const cuenta: ExcelJS.CellRichTextValue = {
         richText: [
@@ -546,11 +547,11 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
         alignment: { vertical: 'middle', wrapText: true, indent: 1 },
       });
       poner(`C${r}`, cuenta, { alignment: { vertical: 'middle', wrapText: true, horizontal: 'left', indent: 1 } });
-      poner(`D${r}`, c.cci || '—', {
+      poner(`G${r}`, c.cci || '—', {
         font: fuente(),
         alignment: { vertical: 'middle', horizontal: 'left', indent: 1 },
       });
-      for (let col = 1; col <= 9; col++) ws.getRow(r).getCell(col).border = bordeCompleto;
+      for (let col = 1; col <= NUM_COLUMNAS; col++) ws.getRow(r).getCell(col).border = bordeCompleto;
     });
   }
 
@@ -575,7 +576,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
       font: fuente({ bold: true, color: { argb: ARGB.marca } }),
       alignment: { vertical: 'middle', wrapText: true, indent: 1 },
     });
-    for (let c = 1; c <= 9; c++) {
+    for (let c = 1; c <= NUM_COLUMNAS; c++) {
       const celda = ws.getRow(rContacto).getCell(c);
       celda.fill = relleno(ARGB.acentoSuave);
       celda.border = bordeCompleto;

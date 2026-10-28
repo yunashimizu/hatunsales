@@ -205,7 +205,9 @@ const COLOR = {
   fondo: PALETA.fondo,
   cebra: PALETA.cebra,
   marca: PALETA.grafito,
-  acento: PALETA.naranja,
+  acento: PALETA.dorado,
+  acentoClaro: PALETA.doradoClaro,
+  acentoTexto: PALETA.doradoOscuro,
   peligro: PALETA.peligro,
   aviso: PALETA.aviso,
   blanco: PALETA.blanco,
@@ -863,9 +865,9 @@ class DibujoComprobante {
       this.alto(11) +
       6 +
       tituloLineas.length * this.alto(this.tam.titulo) +
-      8 +
+      10 +
       this.alto(this.tam.serie) +
-      10;
+      8;
     const alto = Math.max(altoEmisor, altoCaja, logo.alto);
 
     if (this.logo)
@@ -882,7 +884,7 @@ class DibujoComprobante {
       this.linea(l, xTexto, yy, anchoTexto);
       yy += this.alto(this.tam.razon);
     }
-    this.estilo('Helvetica-Bold', 9, COLOR.acento);
+    this.estilo('Helvetica-Bold', 9, COLOR.acentoTexto);
     for (const l of comercial) {
       this.linea(l, xTexto, yy, anchoTexto);
       yy += this.alto(9);
@@ -912,13 +914,15 @@ class DibujoComprobante {
       .save()
       .rect(xCaja + 1, yc - 2, anchoCaja - 2, altoBanda)
       .fill(COLOR.marca)
+      .rect(xCaja + 1, yc - 2 + altoBanda, anchoCaja - 2, 1.6)
+      .fill(COLOR.acento)
       .restore();
     this.estilo('Helvetica-Bold', this.tam.titulo, COLOR.blanco);
     for (const l of tituloLineas) {
-      this.linea(l, xCaja + 10, yc + 1, anchoCaja - 20, 'center');
+      this.linea(l, xCaja + 10, yc + 3.5, anchoCaja - 20, 'center');
       yc += this.alto(this.tam.titulo);
     }
-    yc += 8;
+    yc += 10;
     this.estilo('Helvetica-Bold', this.tam.serie, COLOR.marca);
     this.linea(this.codigo, xCaja, yc, anchoCaja, 'center');
 
@@ -982,6 +986,8 @@ class DibujoComprobante {
         .save()
         .rect(this.x + 0.5, this.y + 0.5, this.ancho - 1, altoTitulo - 2)
         .fill(COLOR.fondo)
+        .rect(this.x + 0.5, this.y + 0.5, 3, altoTitulo - 2)
+        .fill(COLOR.acento)
         .restore();
       this.estilo('Helvetica-Bold', 7.8, COLOR.marca);
       this.linea(
@@ -1198,6 +1204,7 @@ class DibujoComprobante {
       .restore();
     this.estilo('Helvetica-Bold', this.tam.total, COLOR.blanco);
     this.linea('IMPORTE TOTAL', xT + 8, yy + 5.5, anchoTotales - 120);
+    this.estilo('Helvetica-Bold', this.tam.total, COLOR.acentoClaro);
     this.linea(
       `${this.simbolo} ${monto(this.d.totales?.total)}`,
       xT + anchoTotales - 118,
@@ -1218,8 +1225,13 @@ class DibujoComprobante {
     this.asegurar(
       this.alto(tam) * 2 + 8 + filaAlto * Math.min(cuotas.length + 1, 4),
     );
+    this.doc
+      .save()
+      .rect(this.x, this.y - 0.5, 3, this.alto(tam) - 1)
+      .fill(COLOR.acento)
+      .restore();
     this.estilo('Helvetica-Bold', tam, COLOR.marca);
-    this.linea('FORMA DE PAGO: CRÉDITO', this.x, this.y, this.ancho);
+    this.linea('FORMA DE PAGO: CRÉDITO', this.x + 8, this.y, this.ancho - 8);
     this.y += this.alto(tam) + 2;
     this.estilo('Helvetica', tam, COLOR.texto);
     this.linea(
@@ -1239,9 +1251,11 @@ class DibujoComprobante {
       this.doc
         .save()
         .rect(this.x, this.y, anchoTabla, filaAlto)
-        .fill(COLOR.fondo)
+        .fill(COLOR.marca)
+        .rect(this.x, this.y + filaAlto - 1.2, anchoTabla, 1.2)
+        .fill(COLOR.acento)
         .restore();
-      this.estilo('Helvetica-Bold', tam - 1, COLOR.marca);
+      this.estilo('Helvetica-Bold', tam - 1, COLOR.blanco);
       let cx = this.x;
       cols.forEach((c, i) => {
         this.linea(
@@ -1647,8 +1661,19 @@ class DibujoComprobante {
       this.y += this.alto(tam);
     }
     this.y += 2;
-    this.estilo('Helvetica-Bold', this.tam.total, COLOR.marca);
+    this.doc
+      .save()
+      .rect(
+        this.x - 4,
+        this.y - 1.5,
+        this.ancho + 8,
+        this.alto(this.tam.total) + 2,
+      )
+      .fill(COLOR.marca)
+      .restore();
+    this.estilo('Helvetica-Bold', this.tam.total, COLOR.blanco);
     this.linea('IMPORTE TOTAL', this.x, this.y, this.ancho - 96);
+    this.estilo('Helvetica-Bold', this.tam.total, COLOR.acentoClaro);
     this.linea(
       `${this.simbolo} ${monto(this.d.totales?.total)}`,
       this.x + this.ancho - 96,

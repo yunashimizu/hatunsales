@@ -9,24 +9,31 @@ import { redondear } from '../fiscal/calculo-fiscal';
 export const ZONA_HORARIA_PERU = 'America/Lima';
 
 /**
- * Colores de marca (tomados del logo: grafito y naranja). PDF y Excel usan la
- * misma paleta para que los dos documentos se vean como de la misma empresa.
- * El naranja se usa solo como acento (líneas, detalles): sobre fondo blanco no
- * tiene contraste suficiente para texto.
+ * Colores de marca, tomados del logo oficial: gris grafito cálido, plata y oro
+ * mate. Todos los grises son neutros cálidos (sin tinte azul), como el logo. PDF
+ * y Excel usan la misma paleta para que todos los documentos se vean como de la
+ * misma empresa. El grafito es la estructura (cabeceras, TOTAL, bandas); el
+ * dorado es acento fino (líneas, barritas, cuadraditos de título), nunca fondo
+ * grande ni texto pequeño: para texto dorado pequeño se usa `doradoOscuro`, y
+ * para el monto del TOTAL sobre la banda grafito, `doradoClaro`. `aviso` es un
+ * ámbar tostado, distinto del dorado de marca y del rojo de peligro.
  */
 export const PALETA = {
-  grafito: '#23272B',
-  naranja: '#F28C1B',
-  naranjaSuave: '#FDF1E3',
-  texto: '#1F2933',
-  gris: '#4B5563',
-  grisClaro: '#8A94A0',
-  linea: '#D9DDE2',
-  fondo: '#F5F6F8',
-  cebra: '#F8F9FA',
+  grafito: '#3E403F',
+  dorado: '#B8975A',
+  doradoClaro: '#E9D6A4',
+  doradoOscuro: '#7F6A3F',
+  doradoSuave: '#F6F1E4',
+  plata: '#C9CAC8',
+  texto: '#262726',
+  gris: '#5A5C5B',
+  grisClaro: '#8E908F',
+  linea: '#D6D6D4',
+  fondo: '#F3F3F2',
+  cebra: '#F7F7F6',
   blanco: '#FFFFFF',
   peligro: '#B42318',
-  aviso: '#B54708',
+  aviso: '#9A5B13',
 } as const;
 
 /** Lo mínimo de pdfkit que usa la franja de marca (así no se importa pdfkit aquí). */
@@ -38,18 +45,18 @@ interface LienzoPdf {
   restore(): LienzoPdf;
 }
 
-/** Franja de marca en el borde superior de cada hoja A4: grafito con un tramo naranja. */
+/** Franja de marca en el borde superior de cada hoja A4: grafito con un tramo dorado. */
 export function dibujarFranjaMarca(doc: LienzoPdf): void {
   doc
     .save()
     .rect(0, 0, doc.page.width, 7)
     .fill(PALETA.grafito)
     .rect(0, 0, 96, 7)
-    .fill(PALETA.naranja)
+    .fill(PALETA.dorado)
     .restore();
 }
 
-/** "#23272B" -> "FF23272B" (formato ARGB que usa exceljs). */
+/** "#3E403F" -> "FF3E403F" (formato ARGB que usa exceljs). */
 export function argb(hex: string): string {
   return `FF${hex.replace('#', '').toUpperCase()}`;
 }
@@ -375,15 +382,57 @@ export function cuentasUtiles(cuentas?: CuentaBancariaDocumento[] | null): Cuent
   );
 }
 
+/** Fecha AAAA-MM-DD (hora de Lima) de un Date o de una cadena; null si no se puede leer. */
+function fechaIsoLima(valor: Date | string | null | undefined): string | null {
+  if (!valor) return null;
+  if (typeof valor === 'string') {
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(valor.trim());
+    if (m && valor.trim().length === 10) return m[1];
+  }
+  const d = valor instanceof Date ? valor : new Date(valor);
+  if (Number.isNaN(d.getTime())) return null;
+  const p = partesFechaLima(d);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+/** Días de vigencia entre la emisión y la fecha de validez; null si no se puede calcular o no es positiva. */
+export function diasVigencia(
+  fechaEmision: Date | string | null | undefined,
+  validaHasta?: string | null,
+): number | null {
+  const desde = fechaIsoLima(fechaEmision);
+  const hasta = fechaIsoLima(validaHasta ?? null);
+  if (!desde || !hasta) return null;
+  const [a1, m1, d1] = desde.split('-').map(Number);
+  const [a2, m2, d2] = hasta.split('-').map(Number);
+  const dias = Math.round((Date.UTC(a2, m2 - 1, d2) - Date.UTC(a1, m1 - 1, d1)) / 86_400_000);
+  return dias > 0 ? dias : null;
+}
+
+/** "22/09/2026 (7 días)", o solo la fecha si no se puede calcular la vigencia; '' si no hay fecha. */
+export function textoValidaHasta(datos: DatosProformaDocumento): string {
+  const fecha = formatearFecha(datos.valida_hasta ?? null);
+  if (!fecha) return '';
+  const dias = diasVigencia(datos.fecha_emision, datos.valida_hasta);
+  return dias ? `${fecha} (${dias} ${dias === 1 ? 'día' : 'días'})` : fecha;
+}
+
+/** Descuento total de la proforma (descuento unitario × cantidad de cada línea). */
+export function descuentoTotal(items?: ItemDocumento[] | null): number {
+  return redondear(
+    (items ?? []).reduce((suma, i) => suma + numeroSeguro(i?.descuento) * numeroSeguro(i?.cantidad), 0),
+  );
+}
+
 /** Condiciones comerciales comunes al PDF y al Excel. */
 export function condicionesComerciales(datos: DatosProformaDocumento): string[] {
   const valida = formatearFecha(datos.valida_hasta ?? null);
   const extras = (datos.condiciones_extra ?? []).map((c) => textoPlano(c)).filter(Boolean);
   return [
     valida
-      ? `Oferta válida hasta el ${valida}. Vencida esa fecha, los precios y la disponibilidad pueden variar.`
+      ? `Proforma válida hasta el ${valida}. Pasada esa fecha, los precios pueden variar.`
       : 'Precios sujetos a variación sin previo aviso.',
-    'Precios expresados en Soles (PEN) e incluyen IGV.',
+    'Los precios están expresados en Soles (PEN) e incluyen IGV.',
     'Sujeto a disponibilidad de stock al momento de confirmar la compra.',
     ...extras,
   ];

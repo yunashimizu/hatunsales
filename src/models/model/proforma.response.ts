@@ -5,6 +5,9 @@ export class ProformaItemResponse {
   subtotal?: number;
   descripcion?: string;
   sku?: string;
+  unidad_medida?: string;
+  /** Descuento unitario (el precio_unitario ya es el neto). */
+  descuento?: number;
 }
 
 export class ProformaResponse {

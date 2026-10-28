@@ -1,3 +1,5 @@
+import { PALETA } from '../util/documentos/proforma-documento';
+
 /** Datos que necesita el correo del comprobante (función pura: sin acceso a BD ni a red). */
 export interface DatosPlantillaCorreo {
   tipoNombre: string;
@@ -60,18 +62,18 @@ export function armarCorreoComprobante(d: DatosPlantillaCorreo): CorreoComproban
     ['Fecha de emisión', d.fechaEmision],
     ['Total', `${importe(d.simboloMoneda, d.total)} (${d.monedaNombre})`],
   ]
-    .map(([k, v]) => `<tr><td style="padding:4px 12px 4px 0;color:#555">${escapar(k)}</td><td style="padding:4px 0"><strong>${escapar(v)}</strong></td></tr>`)
+    .map(([k, v]) => `<tr><td style="padding:4px 12px 4px 0;color:${PALETA.gris}">${escapar(k)}</td><td style="padding:4px 0"><strong>${escapar(v)}</strong></td></tr>`)
     .join('');
   const aviso = d.esBeta
     ? `<p style="background:#fff3cd;border:1px solid #ffe08a;padding:8px 12px"><strong>${escapar(PREFIJO_BETA)}.</strong> Este documento se emitió en el ambiente de pruebas de SUNAT.</p>`
     : '';
   const html =
-    `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;max-width:560px">` +
+    `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:${PALETA.texto};max-width:560px">` +
     aviso +
     `<p>${escapar(saludo)}</p>` +
     `<p>Adjuntamos su ${escapar(d.tipoNombre.toLowerCase())} electrónica <strong>${escapar(d.numeroFormateado)}</strong> (PDF) y el archivo XML firmado.</p>` +
     `<table style="border-collapse:collapse">${filas}</table>` +
-    `<p style="margin-top:20px;color:#555;font-size:12px">${escapar(d.emisor.razon_social)} – RUC ${escapar(d.emisor.ruc)}` +
+    `<p style="margin-top:20px;color:${PALETA.gris};font-size:12px">${escapar(d.emisor.razon_social)} – RUC ${escapar(d.emisor.ruc)}` +
     contacto.map((c) => `<br>${escapar(c)}`).join('') +
     `</p></div>`;
 
