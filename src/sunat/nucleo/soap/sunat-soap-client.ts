@@ -7,6 +7,7 @@ import { leerXmlDeZip } from '../zip/paquete-zip';
 import { endpointsSunat, esEndpointProduccion } from './endpoints-sunat';
 import { DESCRIPCIONES_CONSULTA_SUNAT, estadoDeConsulta, normalizarCodigoConsulta } from './estados-consulta-sunat';
 import { leerRespuestaSoap, RespuestaSoapLeida } from './lector-respuesta-soap';
+import { RITMO_SUNAT, RitmoPeticiones } from './ritmo-peticiones';
 import { ArgumentosSoap, construirSobreSoap, CredencialesSoap, MetodoSoapSunat, soapActionDe } from './sobre-soap';
 import { CODIGOS_RED_TRANSITORIOS, ErrorTransporteSoap, TransporteSoap, TransporteSoapAxios } from './transporte-soap';
 
@@ -33,7 +34,7 @@ export interface ConfiguracionClienteSoap {
   endpointBill?: string;
   /** Reemplaza el billConsultService (solo producción). */
   endpointConsulta?: string;
-  /** Reintentos inmediatos de las CONSULTAS ante fallas de red (por omisión 1). Los envíos nunca se reintentan aquí. */
+  /** Reintentos inmediatos de las CONSULTAS ante fallas de red (por omisión 1). Los envíos nunca se reintentan aquí, salvo un 401 sin SOAP Fault. */
   reintentosConsulta?: number;
 }
 
@@ -41,7 +42,15 @@ export interface DependenciasClienteSoap {
   transporte?: TransporteSoap;
   /** Pausa entre reintentos (inyectable para los specs). */
   esperar?: (ms: number) => Promise<void>;
+  /**
+   * Separación entre peticiones a SUNAT. Por omisión, el ritmo compartido del proceso; si se inyecta
+   * un transporte (specs) no se aplica ninguno, salvo que se pase `ritmo`. `null` lo desactiva.
+   */
+  ritmo?: RitmoPeticiones | null;
 }
+
+/** Espera antes de repetir un envío que el servidor de entrada de SUNAT rechazó con 401. */
+const PAUSA_REINTENTO_401_MS = 1_000;
 
 type Interpretador = (leida: RespuestaSoapLeida, base: BaseRespuesta) => RespuestaSunat;
 type BaseRespuesta = Pick<RespuestaSunat, 'httpStatus' | 'tiempoMs' | 'raw'>;
@@ -155,6 +164,7 @@ export class SunatSoapClient {
   private readonly reintentosConsulta: number;
   private readonly transporte: TransporteSoap;
   private readonly esperar: (ms: number) => Promise<void>;
+  private readonly ritmo: RitmoPeticiones | null;
 
   constructor(cfg: ConfiguracionClienteSoap, dependencias: DependenciasClienteSoap = {}) {
     if (cfg?.ambiente !== 'beta' && cfg?.ambiente !== 'produccion') {
@@ -178,6 +188,7 @@ export class SunatSoapClient {
     this.reintentosConsulta = Math.min(3, Math.max(0, Math.trunc(cfg.reintentosConsulta ?? 1)));
     this.transporte = dependencias.transporte ?? new TransporteSoapAxios();
     this.esperar = dependencias.esperar ?? esperarPorOmision;
+    this.ritmo = dependencias.ritmo !== undefined ? dependencias.ritmo : dependencias.transporte ? null : RITMO_SUNAT;
   }
 
   enviarComprobante(nombreZip: string, base64: string): Promise<RespuestaSunat> {
@@ -239,9 +250,11 @@ export class SunatSoapClient {
     const inicio = Date.now();
     const cuerpo = construirSobreSoap(metodo, this.credenciales, argumentos);
     const reintentos = idempotente ? this.reintentosConsulta : 0;
+    let reintentado401 = false;
 
     for (let intento = 0; ; intento++) {
       try {
+        if (this.ritmo) await this.ritmo.turno(new URL(url).host);
         const http = await this.transporte.enviar({ url, cuerpo, soapAction: soapActionDe(metodo), timeoutMs: this.timeoutMs });
         const base: BaseRespuesta = { httpStatus: http.estadoHttp, tiempoMs: Date.now() - inicio, raw: this.redactar(http.cuerpo) };
         const leida = leerRespuestaSoap(http.cuerpo);
@@ -256,6 +269,13 @@ export class SunatSoapClient {
         if (http.estadoHttp < 200 || http.estadoHttp >= 300) {
           if (intento < reintentos && (http.estadoHttp >= 500 || http.estadoHttp === 429)) {
             await this.esperar(300 * (intento + 1));
+            continue;
+          }
+          // Un envío que el servidor de entrada de SUNAT rechaza con 401 y sin SOAP Fault no llegó al servicio
+          // (en BETA ocurre con envíos pegados): repetirlo una vez no puede duplicar el comprobante.
+          if (!idempotente && http.estadoHttp === 401 && !reintentado401) {
+            reintentado401 = true;
+            await this.esperar(PAUSA_REINTENTO_401_MS);
             continue;
           }
           return transporte(base, `HTTP_${http.estadoHttp}`, `SUNAT respondió HTTP ${http.estadoHttp} sin un SOAP Fault.`);

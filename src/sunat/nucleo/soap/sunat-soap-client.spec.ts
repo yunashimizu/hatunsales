@@ -169,6 +169,77 @@ describe('SunatSoapClient: contrato del transporte BETA y consultas', () => {
     expect(esperar).not.toHaveBeenCalled();
   });
 
+  describe('401 del servidor de entrada de SUNAT en un envío (BETA con envíos pegados)', () => {
+    const HTML_401 = '<html><head><title>401 Authorization Required</title></head><body><hr>nginx/1.17.3</body></html>';
+
+    it('repite el envío una vez tras una pausa y devuelve el CDR si la segunda vez pasa', async () => {
+      const cdr = cdrPrueba({ codigo: '0', descripcion: 'Aceptada' });
+      const transporte = {
+        enviar: jest
+          .fn()
+          .mockResolvedValueOnce({ estadoHttp: 401, cuerpo: HTML_401 })
+          .mockResolvedValueOnce({ estadoHttp: 200, cuerpo: respuestaSendBill(cdr) }),
+      };
+      const { cliente, esperar } = crearCliente('beta', transporte);
+
+      const resultado = await cliente.enviarComprobante('20123456789-07-FBC1-00000001.zip', 'UEsDBA==');
+
+      expect(resultado).toMatchObject({ tipo: 'CDR', codigo: '0' });
+      expect(transporte.enviar).toHaveBeenCalledTimes(2);
+      expect(esperar).toHaveBeenCalledWith(1_000);
+    });
+
+    it('si el segundo intento también da 401, devuelve HTTP_401 sin insistir más', async () => {
+      const transporte = { enviar: jest.fn().mockResolvedValue({ estadoHttp: 401, cuerpo: HTML_401 }) };
+      const { cliente } = crearCliente('beta', transporte);
+
+      const resultado = await cliente.enviarComprobante('20123456789-01-FFF1-00000001.zip', 'UEsDBA==');
+
+      expect(resultado).toMatchObject({ tipo: 'TRANSPORTE', codigo: 'HTTP_401', httpStatus: 401 });
+      expect(transporte.enviar).toHaveBeenCalledTimes(2);
+    });
+
+    it('un Fault SOAP no se repite: SUNAT sí procesó el envío', async () => {
+      const transporte = {
+        enviar: jest.fn().mockResolvedValue({ estadoHttp: 500, cuerpo: respuestaFault('soap-env:Client.0101', 'Usuario incorrecto') }),
+      };
+      const { cliente } = crearCliente('beta', transporte);
+
+      const resultado = await cliente.enviarComprobante('20123456789-01-FFF1-00000001.zip', 'UEsDBA==');
+
+      expect(resultado.tipo).toBe('FAULT');
+      expect(transporte.enviar).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('ritmo entre peticiones a SUNAT', () => {
+    it('cada petición espera su turno en el ritmo antes de salir', async () => {
+      const cdr = cdrPrueba({ codigo: '0', descripcion: 'Aceptada' });
+      const transporte = { enviar: jest.fn().mockResolvedValue({ estadoHttp: 200, cuerpo: respuestaSendBill(cdr) }) };
+      const ritmo = { turno: jest.fn().mockResolvedValue(undefined) };
+      const cliente = new SunatSoapClient(
+        { ...CREDENCIALES, ambiente: 'beta', endpointBill: 'http://127.0.0.1:8080/bill' },
+        { transporte: transporte as TransporteSoap, ritmo: ritmo as never },
+      );
+
+      await cliente.enviarComprobante('a.zip', 'UEsDBA==');
+
+      expect(ritmo.turno).toHaveBeenCalledWith('127.0.0.1:8080');
+      expect(ritmo.turno.mock.invocationCallOrder[0]).toBeLessThan(transporte.enviar.mock.invocationCallOrder[0]);
+    });
+
+    it('con un transporte inyectado y sin ritmo, no se aplica ninguna espera', async () => {
+      const cdr = cdrPrueba({ codigo: '0', descripcion: 'Aceptada' });
+      const transporte = { enviar: jest.fn().mockResolvedValue({ estadoHttp: 200, cuerpo: respuestaSendBill(cdr) }) };
+      const { cliente, esperar } = crearCliente('beta', transporte);
+
+      await cliente.enviarComprobante('a.zip', 'UEsDBA==');
+      await cliente.enviarComprobante('b.zip', 'UEsDBA==');
+
+      expect(esperar).not.toHaveBeenCalled();
+    });
+  });
+
   it('reintenta una consulta ante HTTP 503 transitorio', async () => {
     const transporte = {
       enviar: jest
