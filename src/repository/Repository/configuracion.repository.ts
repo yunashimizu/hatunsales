@@ -39,6 +39,9 @@ export class ConfiguracionRepository {
 
   async obtenerNumero(clave: string, porDefecto: number): Promise<number> {
     const valor = await this.obtener(clave);
+    // Number(null) es 0: sin esta guarda una clave ausente devolvía 0 en lugar del valor por defecto
+    // (con el IGV, 0 % y la validación previa de SUNAT rechazaba toda línea gravada).
+    if (valor === null) return porDefecto;
     const numero = Number(valor);
     return Number.isFinite(numero) ? numero : porDefecto;
   }

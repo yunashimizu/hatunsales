@@ -36,7 +36,6 @@ import {
   CLAVE_RECARGO_TARJETA_PCT,
   CODIGO_RECARGO_TARJETA,
   DESCRIPCION_RECARGO_TARJETA,
-  RECARGO_TARJETA_PCT_DEFECTO,
   UNIDAD_RECARGO_TARJETA,
   RecargoTarjeta,
   calcularRecargoTarjeta,
@@ -620,7 +619,8 @@ export class VentaBussnies {
   /** % vigente del recargo por tarjeta (0 = desactivado); lo lee el POS para el cálculo en vivo. */
   private async porcentajeRecargoTarjeta(): Promise<number> {
     return normalizarPorcentajeRecargo(
-      await this.config.obtenerNumero(CLAVE_RECARGO_TARJETA_PCT, RECARGO_TARJETA_PCT_DEFECTO),
+      // Sin la clave el recargo sigue desactivado (0), como antes de corregir obtenerNumero: no se cobra de más sin que alguien lo active.
+      await this.config.obtenerNumero(CLAVE_RECARGO_TARJETA_PCT, 0),
     );
   }
 
