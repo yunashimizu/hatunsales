@@ -6,12 +6,12 @@
  * Fuentes: Anexo N.8 de la RS 193-2020/SUNAT (catalogo 09 - motivos de nota
  * de credito), RS 000048-2026 (postergada al 01/01/2027 por la RS
  * 000143-2026) y guias oficiales de elaboracion de documentos XML UBL 2.1
- * publicadas en cpe.sunat.gob.pe. No confundir con los catalogos propios de
- * NUBEFACT (ver ../../util/fiscal/nubefact.catalogo.ts) — SUNAT y NUBEFACT
- * numeran distinto.
+ * publicadas en cpe.sunat.gob.pe. El sistema guarda el tipo de documento de
+ * identidad y el tipo de IGV como enteros propios; aqui se traducen a los
+ * codigos de SUNAT.
  */
 
-/** Catalogo 01: tipo de documento (el mismo que ya usa nubefact.catalogo.ts, repetido aqui para no acoplar los dos modulos). */
+/** Catalogo 01: tipo de documento (el mismo que usa tipos-comprobante.ts, repetido aqui para no acoplar los dos modulos). */
 export const CATALOGO_01_FACTURA = '01';
 export const CATALOGO_01_BOLETA = '03';
 export const CATALOGO_01_NOTA_CREDITO = '07';
@@ -64,13 +64,13 @@ export const CATALOGO_06_TIPOS_VALIDOS: ReadonlySet<string> = new Set(['0', '1',
 export type TipoDocIdentidadSunat = '0' | '1' | '4' | '6' | '7';
 
 /**
- * Traduce el tipo de documento entero que guarda el sistema (codificación de
- * NUBEFACT: 0, 1, 4, 6, 7) al código del catálogo 06 de SUNAT. Un valor
+ * Traduce el tipo de documento entero que guarda el sistema (0, 1, 4, 6, 7)
+ * al código del catálogo 06 de SUNAT. Un valor
  * desconocido se trata como "sin documento" ('0'): la validación previa al
  * envío lo rechazará si el comprobante exige documento (factura o boleta > S/ 700).
  */
-export function tipoDocIdentidadSunat(nubefact: number | string | null | undefined): TipoDocIdentidadSunat {
-  const texto = String(nubefact ?? '').trim();
+export function tipoDocIdentidadSunat(tipoDoc: number | string | null | undefined): TipoDocIdentidadSunat {
+  const texto = String(tipoDoc ?? '').trim();
   switch (texto) {
     case '1':
       return '1';
@@ -150,11 +150,10 @@ export function esAfectacionGratuita(codigo: string): boolean {
 }
 
 /**
- * tipo_de_igv del sistema (codificación de NUBEFACT: 1 gravado, 8 exonerado,
- * 9 inafecto) → catálogo 07 de SUNAT. Igual que calculo-fiscal.ts, cualquier
+ * tipo_de_igv del sistema (1 gravado, 8 exonerado, 9 inafecto) → catálogo 07 de SUNAT. Igual que calculo-fiscal.ts, cualquier
  * otro valor se trata como gravado.
  */
-export function afectacionDesdeTipoIgvNubefact(tipoIgv: number | string | null | undefined): '10' | '20' | '30' {
+export function afectacionDesdeTipoIgv(tipoIgv: number | string | null | undefined): '10' | '20' | '30' {
   const valor = Number(tipoIgv);
   if (valor === 8) return '20';
   if (valor === 9) return '30';
@@ -434,8 +433,8 @@ export function normalizarUnidad(unidad: string | null | undefined): { codigo: s
 /**
  * Consumidor final ("clientes varios") para SUNAT directo. Las guías de SUNAT
  * piden tipo '0' con un guion cuando el adquirente no tiene documento; la
- * variante 'dni_ceros' ('1' / 00000000) es la que aceptaba NUBEFACT y queda
- * como respaldo si BETA no admite la primera.
+ * variante 'dni_ceros' ('1' / 00000000) es la que se usaba antes con el
+ * proveedor anterior y queda como respaldo si BETA no admite la primera.
  */
 export type VarianteConsumidorFinal = 'sin_documento' | 'dni_ceros';
 

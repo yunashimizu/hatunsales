@@ -8,18 +8,18 @@
  *
  * El IGV de cada línea se obtiene restando la base al total, no multiplicando
  * la base por la tasa. Multiplicar produce diferencias de un céntimo que hacen
- * que la suma de las líneas no coincida con los totales, y NUBEFACT rechaza el
+ * que la suma de las líneas no coincida con los totales, y SUNAT rechaza el
  * comprobante por esa razón.
  */
 
-/** Catálogo 07 de SUNAT, en la codificación que espera NUBEFACT. */
+/** Catálogo 07 de SUNAT, en la codificación numérica con que el sistema guarda el tipo de IGV. */
 export const TIPO_IGV_GRAVADO = 1;
 export const TIPO_IGV_EXONERADO = 8;
 export const TIPO_IGV_INAFECTO = 9;
 
 export const PORCENTAJE_IGV_POR_DEFECTO = 18;
 
-/** Decimales que admite NUBEFACT en el valor unitario. */
+/** Decimales que admite SUNAT en el valor unitario. */
 const DECIMALES_VALOR_UNITARIO = 6;
 
 export interface LineaFiscalEntrada {

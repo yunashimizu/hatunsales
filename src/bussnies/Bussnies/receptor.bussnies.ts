@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, NotFoundException, ServiceUnavailableE
 import { ReceptorRepository } from '../../repository/Repository/receptor.repository';
 import { ConsultaDocumentoService } from '../../util/sunat/consulta-documento.service';
 import { ReceptorResponse, SugerenciaReceptor } from '../../models/model/receptor.response';
-import { TIPO_DOC_DNI, TIPO_DOC_RUC } from '../../util/fiscal/nubefact.catalogo';
+import { TIPO_DOC_DNI, TIPO_DOC_RUC } from '../../util/fiscal/tipos-comprobante';
 import { Cliente } from '../../models/DBModel/cliente.entity';
 import { Empresa } from '../../models/DBModel/empresa.entity';
 

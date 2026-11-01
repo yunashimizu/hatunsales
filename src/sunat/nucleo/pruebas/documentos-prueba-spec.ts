@@ -4,7 +4,7 @@
  * construirLineaCpe: así los specs prueban que XML = BD.
  */
 import { calcularComprobante } from '../../../util/fiscal/calculo-fiscal';
-import { afectacionDesdeTipoIgvNubefact } from '../../catalogos/sunat.catalogos';
+import { afectacionDesdeTipoIgv } from '../../catalogos/sunat.catalogos';
 import type { DocumentoCpe, EmisorCpe, LineaCpe, TotalesCpe } from '../documento-fiscal.types';
 import { construirLineaCpe, totalesCpeDesdeLineas } from '../linea-cpe';
 
@@ -52,7 +52,7 @@ export function lineasDesdeVenta(items: ItemVentaPrueba[], porcentajeIgv = 18): 
         subtotal: linea.subtotal,
         igv: linea.igv,
         total: linea.total,
-        afectacion: afectacionDesdeTipoIgvNubefact(linea.tipo_de_igv),
+        afectacion: afectacionDesdeTipoIgv(linea.tipo_de_igv),
         descuento: linea.descuento,
       },
       {

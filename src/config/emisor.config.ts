@@ -1,9 +1,7 @@
 /**
- * Datos del emisor que se imprimen en la cabecera del comprobante.
- *
- * Sirven solo para la vista previa: quien realmente rotula el documento es
- * NUBEFACT con los datos registrados en la cuenta. Se pueden sobreescribir
- * desde la tabla `configuraciones` sin volver a desplegar.
+ * Datos del emisor que se imprimen en la cabecera de los documentos y que sirven
+ * de valores iniciales de la configuración fiscal (SUNAT directo). Se pueden
+ * sobreescribir desde la tabla `configuraciones` sin volver a desplegar.
  */
 /**
  * Logo oficial de HatunSales para TODOS los documentos (proforma PDF/Excel, comprobante,
@@ -39,7 +37,7 @@ export const CLAVES_EMISOR = [
 /** Condiciones comerciales propias del negocio (una por línea) que se añaden a la proforma. */
 export const CLAVE_CONDICIONES_PROFORMA = 'proforma_condiciones';
 
-/** Series fiscales (Nubefact): el POS las muestra en solo lectura. */
+/** Series fiscales: el POS las muestra en solo lectura. */
 export const CLAVES_SERIES = {
   boleta: 'serie_boleta',
   factura: 'serie_factura',
