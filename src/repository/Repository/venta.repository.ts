@@ -240,23 +240,29 @@ export class VentaRepository {
               COALESCE(p.unidad_medida, '')  AS unidad_medida,
               COALESCE(p.precio_venta, 0)    AS precio_venta,
               COALESCE(p.descuento, 0)       AS descuento,
-              COALESCE((SELECT json_agg(json_build_object(
-                'id_regla', r.id_regla,
-                'cantidad_minima', r.cantidad_minima,
-                'descuento_unitario', r.descuento_unitario
-              ) ORDER BY r.cantidad_minima)
-                FROM producto_descuento_mayorista r
-               WHERE r.id_producto = p.id_producto AND r.activo = TRUE), '[]'::json) AS reglas_mayoristas,
+              COALESCE(rm.reglas, '[]'::json) AS reglas_mayoristas,
               COALESCE(inv.stock, 0)         AS stock_disponible,
               COALESCE(img.url, '')          AS imagen_url
          FROM productos p
          ${joinSql}
-         LEFT JOIN LATERAL (
-                SELECT pi.url FROM productos_imagenes pi
-                 WHERE pi.id_producto = p.id_producto
-                 ORDER BY pi.is_primary DESC NULLS LAST, pi.orden ASC NULLS LAST
-                 LIMIT 1
-              ) img ON TRUE
+         -- Catálogo completo: reglas e imagen se calculan UNA vez para todos los productos
+         -- (una subconsulta por producto costaba miles de búsquedas con 5 000+ productos).
+         LEFT JOIN (
+                SELECT r.id_producto,
+                       json_agg(json_build_object(
+                         'id_regla', r.id_regla,
+                         'cantidad_minima', r.cantidad_minima,
+                         'descuento_unitario', r.descuento_unitario
+                       ) ORDER BY r.cantidad_minima) AS reglas
+                  FROM producto_descuento_mayorista r
+                 WHERE r.activo = TRUE
+                 GROUP BY r.id_producto
+              ) rm ON rm.id_producto = p.id_producto
+         LEFT JOIN (
+                SELECT DISTINCT ON (pi.id_producto) pi.id_producto, pi.url
+                  FROM productos_imagenes pi
+                 ORDER BY pi.id_producto, pi.is_primary DESC NULLS LAST, pi.orden ASC NULLS LAST
+              ) img ON img.id_producto = p.id_producto
         WHERE COALESCE(p.estado, TRUE) = TRUE
         ORDER BY p.nombre ASC
         LIMIT $${idxLimite}`,
@@ -1208,7 +1214,16 @@ export class VentaRepository {
                 cp.estado AS comprobante_estado, cp.estado_sunat AS comprobante_estado_sunat,
                 (SELECT COUNT(*)::int FROM comprobantes n WHERE n.id_venta = v.id_venta AND n.id_tipo = ${TIPO_NOTA_CREDITO}) AS cantidad_notas,
                 (SELECT COUNT(*)::int FROM guias_remision g WHERE g.id_venta = v.id_venta) AS cantidad_guias
-           FROM ${tablas}
+           FROM (
+                  SELECT v.id_venta
+                    FROM ${tablas}
+                   WHERE ${donde}
+                   ORDER BY v.fecha DESC NULLS LAST, v.id_venta DESC
+                   LIMIT $${paramsDatos.length - 1} OFFSET $${paramsDatos.length}
+                ) pagina
+           JOIN ventas v ON v.id_venta = pagina.id_venta
+           LEFT JOIN clientes c ON c.id_cliente = v.id_cliente
+           ${sqlJoinEmpresa(snapshot)}
            LEFT JOIN LATERAL (
                   SELECT p.id_comprobante, p.serie, p.numero, p.id_tipo, p.estado, p.estado_sunat
                     FROM comprobantes p
@@ -1216,9 +1231,7 @@ export class VentaRepository {
                    ORDER BY p.id_comprobante
                    LIMIT 1
                 ) cp ON TRUE
-          WHERE ${donde}
-          ORDER BY v.fecha DESC NULLS LAST, v.id_venta DESC
-          LIMIT $${paramsDatos.length - 1} OFFSET $${paramsDatos.length}`,
+          ORDER BY v.fecha DESC NULLS LAST, v.id_venta DESC`,
         paramsDatos,
       ),
     ]);

@@ -260,6 +260,7 @@ export function construirSnapshot(valores: Valores, defectos: DefectosEntornoFis
     ambiente: leerAmbiente(texto(valores, CLAVES_CONFIG_FISCAL.ambiente), defectos.ambiente),
     boletasModo: opcion(texto(valores, CLAVES_CONFIG_FISCAL.boletasModo), MODOS_BOLETAS, 'individual'),
     envioEnLinea: booleano(texto(valores, CLAVES_CONFIG_FISCAL.envioEnLinea), true),
+    envioDiferido: booleano(texto(valores, CLAVES_CONFIG_FISCAL.envioDiferido), false),
     tareasActivas: booleano(texto(valores, CLAVES_CONFIG_FISCAL.tareasActivas), true),
     series,
     emisor,

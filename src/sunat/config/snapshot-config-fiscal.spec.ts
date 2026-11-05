@@ -26,6 +26,12 @@ describe('construirSnapshot', () => {
     expect(s.emisor).toMatchObject({ distrito: 'LURIN', provincia: 'LIMA', departamento: 'LIMA', codigoEstablecimiento: '0000' });
   });
 
+  it('envío diferido: apagado por defecto (la venta espera a SUNAT como siempre) y solo se enciende con «true»', () => {
+    expect(construirSnapshot({}, DEFECTOS_PRUEBA).envioDiferido).toBe(false);
+    expect(construirSnapshot({ fiscal_envio_diferido: 'true' }, DEFECTOS_PRUEBA).envioDiferido).toBe(true);
+    expect(construirSnapshot({ fiscal_envio_diferido: 'quizá' }, DEFECTOS_PRUEBA).envioDiferido).toBe(false);
+  });
+
   it('valores mal escritos caen en valores seguros (nunca activan SUNAT directo por accidente)', () => {
     const s = construirSnapshot(
       {

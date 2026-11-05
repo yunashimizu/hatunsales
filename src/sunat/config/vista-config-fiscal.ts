@@ -27,6 +27,7 @@ export interface ConfiguracionFiscalVista {
   ambiente: AmbienteFiscal;
   boletas_modo: ModoBoletas;
   envio_en_linea: boolean;
+  envio_diferido: boolean;
   tareas_activas: boolean;
   aplicar_reglas_2027: ModoReglas2027;
   series: SeriesFiscales;
@@ -113,6 +114,7 @@ export function construirVistaConfigFiscal(d: DatosVistaConfigFiscal): Configura
     ambiente: s.ambiente,
     boletas_modo: s.boletasModo,
     envio_en_linea: s.envioEnLinea,
+    envio_diferido: s.envioDiferido,
     tareas_activas: s.tareasActivas,
     aplicar_reglas_2027: s.reglas2027,
     series: { ...s.series },

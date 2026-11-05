@@ -109,13 +109,13 @@ describe('EmisionDirectaService.modo() (nunca lanza)', () => {
   afterEach(() => jest.restoreAllMocks());
 
   it('BETA activa solo con el interruptor del POS; PRODUCCIÓN activa solo con sunat_directo', async () => {
-    expect(await crear(EN_BETA).servicio.modo()).toEqual({ activo: true, ambiente: 'beta' });
+    expect(await crear(EN_BETA).servicio.modo()).toEqual({ activo: true, ambiente: 'beta', diferido: false });
     expect(await crear({ ...EN_BETA, fiscal_beta_pos_directo: '' }).servicio.modo()).toMatchObject({
       activo: false,
       ambiente: 'beta',
       codigo: 'FISCAL_BETA_POS_APAGADO',
     });
-    expect(await crear(EN_PRODUCCION).servicio.modo()).toEqual({ activo: true, ambiente: 'produccion' });
+    expect(await crear(EN_PRODUCCION).servicio.modo()).toEqual({ activo: true, ambiente: 'produccion', diferido: false });
     expect(await crear(VALORES_COMPLETOS).servicio.modo()).toMatchObject({ activo: false, ambiente: 'produccion', codigo: 'FISCAL_EMISION_INACTIVA' });
     // El proveedor de producción no enciende BETA ni el interruptor de BETA enciende producción.
     expect(await crear({ ...VALORES_COMPLETOS, fiscal_beta_pos_directo: 'true' }).servicio.modo()).toMatchObject({ activo: false });
@@ -125,7 +125,15 @@ describe('EmisionDirectaService.modo() (nunca lanza)', () => {
     const detenida = await crear({ ...EN_PRODUCCION, fiscal_emision_bloqueada_produccion: BLOQUEO }).servicio.modo();
     expect(detenida).toMatchObject({ activo: false, codigo: 'FISCAL_EMISION_BLOQUEADA' });
     expect((detenida as { motivo: string }).motivo).toMatch(/rechazó el usuario o la clave SOL/);
-    expect(await crear({ ...EN_PRODUCCION, fiscal_emision_bloqueada_beta: BLOQUEO }).servicio.modo()).toEqual({ activo: true, ambiente: 'produccion' });
+    expect(await crear({ ...EN_PRODUCCION, fiscal_emision_bloqueada_beta: BLOQUEO }).servicio.modo()).toEqual({ activo: true, ambiente: 'produccion', diferido: false });
+  });
+
+  it('fiscal_envio_diferido: apagado por defecto; con la clave en true el modo activo lo informa (no activa la emisión por sí sola)', async () => {
+    expect(await crear(EN_BETA).servicio.modo()).toMatchObject({ activo: true, diferido: false });
+    expect(await crear({ ...EN_BETA, fiscal_envio_diferido: 'true' }).servicio.modo()).toEqual({ activo: true, ambiente: 'beta', diferido: true });
+    expect(await crear({ ...EN_PRODUCCION, fiscal_envio_diferido: 'true' }).servicio.modo()).toEqual({ activo: true, ambiente: 'produccion', diferido: true });
+    // Con la emisión apagada no hay nada que diferir.
+    expect(await crear({ ...EN_BETA, fiscal_beta_pos_directo: '', fiscal_envio_diferido: 'true' }).servicio.modo()).toMatchObject({ activo: false });
   });
 
   it('sin el esquema fiscal: FISCAL_MIGRACION_PENDIENTE; si no se pudo verificar o leer: FISCAL_LECTURA_ERROR', async () => {

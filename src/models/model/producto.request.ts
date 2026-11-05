@@ -1,4 +1,8 @@
-import { IsInt, IsString, IsOptional, IsNumber, IsBoolean, Min, Max, MaxLength } from 'class-validator';
+import {
+  ArrayMaxSize, ArrayMinSize, IsArray, IsInt, IsString, IsOptional, IsNumber, IsBoolean, Matches, Min, Max, MaxLength,
+  ValidateNested,
+} from 'class-validator';
+import { Type } from 'class-transformer';
 import { CANTIDAD_MAXIMA_OPERACION } from './inventario.request';
 
 /*
@@ -14,6 +18,7 @@ const DESCUENTO_MAXIMO = 999.99;
 const MSJ_NOMBRE = `El nombre admite hasta ${LARGO_NOMBRE} caracteres`;
 const MSJ_PRECIO = 'El precio no puede superar S/ 99,999,999.99';
 const MSJ_DESCUENTO = 'El descuento por unidad no puede superar S/ 999.99';
+const MSJ_CODIGO_SUNAT = 'El código de producto SUNAT debe tener exactamente 8 dígitos (catálogo 25, UNSPSC).';
 const MSJ_STOCK_ENTERO = 'El stock debe ser un número entero de unidades (sin decimales)';
 const MSJ_STOCK_MAXIMO = `El stock inicial no puede superar ${CANTIDAD_MAXIMA_OPERACION.toLocaleString('en-US')} unidades`;
 
@@ -63,6 +68,12 @@ export class CrearProductoRequest {
   @IsOptional()
   @MaxLength(20)
   unidad_medida?: string;
+
+  /** Código de producto SUNAT (catálogo 25, 8 dígitos). Vacío lo quita; sin el campo, no se toca. */
+  @IsString()
+  @IsOptional()
+  @MaxLength(8, { message: MSJ_CODIGO_SUNAT })
+  codigo_sunat?: string;
 
   @IsInt()
   @IsOptional()
@@ -145,6 +156,12 @@ export class ActualizarProductoRequest {
   @MaxLength(20)
   unidad_medida?: string;
 
+  /** Código de producto SUNAT (catálogo 25, 8 dígitos). Vacío lo quita; sin el campo, no se toca. */
+  @IsString()
+  @IsOptional()
+  @MaxLength(8, { message: MSJ_CODIGO_SUNAT })
+  codigo_sunat?: string;
+
   /** null quita la categoría; sin el campo, no se toca. */
   @IsInt()
   @IsOptional()
@@ -166,4 +183,29 @@ export class ActualizarProductoRequest {
   @IsInt()
   @IsOptional()
   id_proveedor?: number;
+}
+
+/** Máximo de asignaciones por llamada a `PUT /producto/codigo-sunat`. */
+export const MAX_ASIGNACIONES_CODIGO_SUNAT = 500;
+
+export class AsignacionCodigoSunat {
+  @IsInt()
+  @Min(1)
+  id_producto!: number;
+
+  @IsString()
+  @Matches(/^\d{8}$/, { message: MSJ_CODIGO_SUNAT })
+  codigo_sunat!: string;
+}
+
+/** Carga masiva del código SUNAT desde la tarjeta «Productos sin código». */
+export class AsignarCodigosSunatRequest {
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Envíe al menos una asignación' })
+  @ArrayMaxSize(MAX_ASIGNACIONES_CODIGO_SUNAT, {
+    message: `Máximo ${MAX_ASIGNACIONES_CODIGO_SUNAT} asignaciones por envío`,
+  })
+  @ValidateNested({ each: true })
+  @Type(() => AsignacionCodigoSunat)
+  asignaciones!: AsignacionCodigoSunat[];
 }

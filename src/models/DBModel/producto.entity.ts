@@ -48,6 +48,10 @@ export class Producto {
   @Column({ nullable: true, type: 'integer' })
   id_unidad!: number;
 
+  /** Código de producto SUNAT (catálogo 25, UNSPSC): 8 dígitos. Columna de fase9. */
+  @Column({ type: 'varchar', length: 8, nullable: true })
+  codigo_sunat!: string | null;
+
   // Solo la relación: declarar también `@Column({ name: 'id_categoria' })`
   // duplica la metadata en TypeORM y hace fallar el INSERT/UPDATE con 500.
   @ManyToOne(() => Categoria, { nullable: true })

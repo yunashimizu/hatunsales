@@ -14,6 +14,7 @@ import { GestorCredencialesFiscalesService } from '../config/gestor-credenciales
 import { InterruptorEmisionFiscal } from '../config/interruptor-emision.service';
 import { NotificadorCambiosFiscales } from '../config/notificador-cambios-fiscales';
 import { PreparacionFiscalService } from '../config/preparacion-fiscal.service';
+import { ProductosSinCodigoSunatRepository } from '../config/productos-sin-codigo.repository';
 import { PruebaConexionFiscalService } from '../config/prueba-conexion-fiscal.service';
 import { RelojFiscal, RelojSistemaFiscal } from '../config/reloj-fiscal';
 import { SaludFiscalService } from '../config/salud-fiscal.service';
@@ -49,6 +50,7 @@ export const REGISTRO_SUNAT_CONFIG: RegistroModulo = {
     { provide: RepositorioCertificadosFiscales, useClass: CertificadoFiscalRepository },
     FiscalEsquemaService,
     FiscalAuditoriaRepository,
+    ProductosSinCodigoSunatRepository,
     DiagnosticoArranqueFiscal,
 
     // Seguridad

@@ -35,7 +35,7 @@ export const MAXIMO_ENVIOS_POR_PAGINA = 100;
  * panel), FISCAL_MIGRACION_PENDIENTE, FISCAL_LECTURA_ERROR (no se pudo leer la configuración).
  */
 export type ModoEmision =
-  | { activo: true; ambiente: AmbienteFiscal }
+  | { activo: true; ambiente: AmbienteFiscal; /** El comprobante se responde apenas queda firmado y guardado; SUNAT se envía en segundo plano. */ diferido?: boolean }
   | { activo: false; ambiente: AmbienteFiscal; codigo: string; motivo: string };
 
 export interface SeriesEmision {
@@ -149,6 +149,12 @@ export interface EventoEnvioCompletado {
   aceptado: boolean;
   /** Quién cerró el envío: 'envio' | 'reintento' | 'recuperacion' | 'tarea' | 'manual'. */
   origen: string;
+  /**
+   * Qué se envió: 'emitir' (comprobante), 'resumen' (RC) o 'baja' (RA). Opcional: la emisión de
+   * comprobantes no lo manda (ausente equivale a 'emitir'); los lotes fiscales sí. En un lote,
+   * `id_comprobante` es el de su primera línea y `tipo_documento` es 'RC' o 'RA'.
+   */
+  operacion?: 'emitir' | 'resumen' | 'baja';
 }
 
 /**

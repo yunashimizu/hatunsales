@@ -7,6 +7,8 @@ function montar() {
   const notas = {
     aplicarEfectos: jest.fn(async (idNota: number) => ({ id_nota: idNota })),
     notasConEfectosPendientes: jest.fn(async () => [70, 71, 72]),
+    aplicarBajaAceptada: jest.fn(async (_idEnvio: number) => 1),
+    bajasConEfectosPendientes: jest.fn(async (_limite: number): Promise<number[]> => []),
   };
   const oyentes = new OyentesEnvioFiscal();
   const config = { tareasActivas: jest.fn(async () => true) };
@@ -99,5 +101,63 @@ describe('EfectosNotasTarea (efectos de las notas de crédito cuando SUNAT las a
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  describe('anular sin nota: la baja (RA) o el resumen (RC) aceptado por SUNAT', () => {
+    it('un evento de baja o de resumen ACEPTADO anula al instante (por el id del envío); los demás resultados no hacen nada', async () => {
+      const { tarea, notas, oyentes } = montar();
+      tarea.onModuleInit();
+
+      await oyentes.notificar(evento({ id_envio: 801, tipo_documento: 'RA', operacion: 'baja' }));
+      await oyentes.notificar(evento({ id_envio: 802, tipo_documento: 'RC', operacion: 'resumen', estado: 'ACEPTADO_OBS' }));
+      expect(notas.aplicarBajaAceptada.mock.calls.map((c) => c[0])).toEqual([801, 802]);
+      expect(notas.aplicarEfectos).not.toHaveBeenCalled();
+
+      // Rechazada, pendiente de reenvío o con el comprobante sin dato: no se anula nada (el lote rechazado restaura el comprobante).
+      await oyentes.notificar(evento({ id_envio: 803, tipo_documento: 'RA', operacion: 'baja', estado: 'RECHAZADO', aceptado: false }));
+      await oyentes.notificar(evento({ id_envio: 804, tipo_documento: 'RA', operacion: 'baja', estado: 'PENDIENTE_REENVIO', aceptado: false }));
+      expect(notas.aplicarBajaAceptada).toHaveBeenCalledTimes(2);
+    });
+
+    it('el aviso de un comprobante normal (sin operación o «emitir») sigue sin anular por baja', async () => {
+      const { tarea, notas } = montar();
+
+      await tarea.alCompletarEnvio(evento({ tipo_documento: '01' }));
+      await tarea.alCompletarEnvio(evento({ tipo_documento: '07', operacion: 'emitir' }));
+
+      expect(notas.aplicarBajaAceptada).not.toHaveBeenCalled();
+      expect(notas.aplicarEfectos).toHaveBeenCalledTimes(1);
+    });
+
+    it('el oyente nunca lanza: si anular falla, lo registra y queda para el barrido', async () => {
+      const { tarea, notas } = montar();
+      notas.aplicarBajaAceptada.mockRejectedValueOnce(new Error('deadlock detected'));
+      const error = jest.spyOn(Logger.prototype, 'error');
+
+      await expect(tarea.alCompletarEnvio(evento({ id_envio: 805, tipo_documento: 'RA', operacion: 'baja' }))).resolves.toBeUndefined();
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('El barrido lo reintentará'));
+    });
+
+    it('el barrido, tras las notas, recorre las bajas aceptadas con el comprobante sin anular y cuenta las que anuló', async () => {
+      const { tarea, notas } = montar();
+      notas.notasConEfectosPendientes.mockResolvedValueOnce([]);
+      notas.bajasConEfectosPendientes.mockResolvedValueOnce([810, 811, 812]);
+      notas.aplicarBajaAceptada
+        .mockResolvedValueOnce(1)
+        .mockRejectedValueOnce(new Error('timeout'))
+        .mockResolvedValueOnce(0);
+
+      expect(await tarea.ejecutar()).toBe(1);
+      expect(notas.bajasConEfectosPendientes).toHaveBeenCalledWith(EfectosNotasTarea.NOTAS_POR_VUELTA);
+      expect(notas.aplicarBajaAceptada.mock.calls.map((c) => c[0])).toEqual([810, 811, 812]);
+    });
+
+    it('con las tareas apagadas el barrido tampoco toca las bajas', async () => {
+      const { tarea, notas, config } = montar();
+      config.tareasActivas.mockResolvedValueOnce(false);
+
+      expect(await tarea.ejecutar()).toBe(0);
+      expect(notas.bajasConEfectosPendientes).not.toHaveBeenCalled();
+    });
   });
 });

@@ -130,6 +130,10 @@ export class FiscalConfigService {
     return (await this.snapshot()).envioEnLinea;
   }
 
+  async envioDiferido(): Promise<boolean> {
+    return (await this.snapshot()).envioDiferido;
+  }
+
   async codigoProductoDefecto(): Promise<string | null> {
     return (await this.snapshot()).codigoProductoDefecto;
   }

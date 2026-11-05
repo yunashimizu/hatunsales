@@ -386,6 +386,14 @@ export class SunatEmisionService {
     return { ...resultado, consulta, tiempo_ms: tiempo };
   }
 
+  /**
+   * Cliente SOAP con las credenciales del ambiente (BETA: RUC + MODDATOS; PRODUCCIÓN: el usuario secundario
+   * SOL del panel). Lo usan también los lotes fiscales (RA y RC). Puede lanzar FiscalConfigError.
+   */
+  clienteSoap(ambiente: AmbienteFiscal, rucEmisor: string, timeoutMs: number): Promise<SunatSoapClient> {
+    return this.cliente(ambiente, rucEmisor, timeoutMs);
+  }
+
   // ── Interno ──────────────────────────────────────────────────────────────
 
   /** Manda el ZIP ya reclamado (primer envío o reintento) con las credenciales de SU ambiente. */

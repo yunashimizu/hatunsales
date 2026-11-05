@@ -60,13 +60,33 @@ export class ConfiguracionRepository {
   async obtenerVarias(claves: string[]): Promise<Record<string, string | null>> {
     if (!claves.length) return {};
 
+    // Si todas están vigentes en memoria no hace falta ir a la base: el POS pide estas claves
+    // en cada cálculo del comprobante (vista previa) y cada ida y vuelta cuesta.
+    const ahora = Date.now();
+    const completo: Record<string, string | null> = {};
+    let todasEnCache = true;
+    for (const clave of claves) {
+      const enCache = this.cache.get(clave);
+      if (!enCache || enCache.expira <= ahora) {
+        todasEnCache = false;
+        break;
+      }
+      completo[clave] = enCache.valor;
+    }
+    if (todasEnCache) return completo;
+
     const filas = await this.dataSource.query(
       'SELECT clave, valor FROM configuraciones WHERE clave = ANY($1)',
       [claves],
     );
 
     const resultado: Record<string, string | null> = {};
-    for (const clave of claves) resultado[clave] = null;
+    const vence = Date.now() + VIGENCIA_CACHE_MS;
+    for (const clave of claves) {
+      resultado[clave] = null;
+      // Una clave ausente también se recuerda: si no, nunca acertaría la caché y se consultaría siempre.
+      this.cache.set(clave, { valor: null, expira: vence });
+    }
     for (const fila of filas) {
       const valor = fila.valor === '' || fila.valor === null ? null : String(fila.valor);
       resultado[fila.clave] = valor;

@@ -8,6 +8,7 @@ import { FiscalConfigService } from './fiscal-config.service';
 import { SnapshotConfigFiscal } from './fiscal-config.tipos';
 import { FiscalEsquemaService } from './fiscal-esquema.service';
 import { EvaluadorPreparacionFiscal } from './fiscal-tokens';
+import { ProductosSinCodigoSunatRepository } from './productos-sin-codigo.repository';
 import { RelojFiscal } from './reloj-fiscal';
 
 /** Supuestos de un cambio que todavía no se guardó (se evalúa el estado futuro). */
@@ -30,6 +31,7 @@ export class PreparacionFiscalService implements EvaluadorPreparacionFiscal {
     private readonly credencialesSol: CredencialesSolService,
     private readonly credencialesGre: CredencialesGreService,
     private readonly reloj: RelojFiscal,
+    private readonly productosSinCodigo: ProductosSinCodigoSunatRepository,
   ) {}
 
   async listoParaProduccion(): Promise<ResultadoPreparacion> {
@@ -43,11 +45,12 @@ export class PreparacionFiscalService implements EvaluadorPreparacionFiscal {
   }
 
   async hechos(snapshot: SnapshotConfigFiscal): Promise<HechosPreparacion> {
-    const [esquema, certificados, claveSol, credencialesGre] = await Promise.all([
+    const [esquema, certificados, claveSol, credencialesGre, productosSinCodigoSunat] = await Promise.all([
       this.esquema.estado(),
       this.certificados.estadoParaChecklist(),
       this.credencialesSol.diagnosticoClave(),
       this.credencialesGre.diagnostico(),
+      this.productosSinCodigo.contar(),
     ]);
     return {
       snapshot,
@@ -57,6 +60,7 @@ export class PreparacionFiscalService implements EvaluadorPreparacionFiscal {
       certificados,
       claveSol,
       credencialesGre,
+      productosSinCodigoSunat,
     };
   }
 }

@@ -27,3 +27,30 @@ describe('ConfiguracionRepository.obtenerNumero', () => {
     await expect(repositorio([{ valor: '10.5' }]).obtenerNumero('pos_recargo_tarjeta_pct', 3)).resolves.toBe(10.5);
   });
 });
+
+describe('ConfiguracionRepository.obtenerVarias', () => {
+  it('la segunda lectura sale de la memoria, incluidas las claves ausentes', async () => {
+    const query = jest.fn().mockResolvedValue([{ clave: 'pos_recargo_tarjeta_pct', valor: '3' }]);
+    const repo = new ConfiguracionRepository({ query } as unknown as DataSource);
+    const claves = ['pos_recargo_tarjeta_pct', 'clave_que_no_existe'];
+
+    const primera = await repo.obtenerVarias(claves);
+    const segunda = await repo.obtenerVarias(claves);
+
+    expect(primera).toEqual({ pos_recargo_tarjeta_pct: '3', clave_que_no_existe: null });
+    expect(segunda).toEqual(primera);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('tras guardar una clave vuelve a leer de la base', async () => {
+    const query = jest.fn().mockResolvedValue([{ clave: 'a', valor: '1' }]);
+    const transaction = jest.fn().mockResolvedValue(undefined);
+    const repo = new ConfiguracionRepository({ query, transaction } as unknown as DataSource);
+
+    await repo.obtenerVarias(['a']);
+    await repo.guardar('a', '2');
+    await repo.obtenerVarias(['a']);
+
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+});

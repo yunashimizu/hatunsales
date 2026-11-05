@@ -40,6 +40,8 @@ export const ACCIONES_AUDITORIA_FISCAL = {
   PRUEBA_CREDENCIALES_PRODUCCION: 'PRUEBA_CREDENCIALES_PRODUCCION',
   POS_BETA_ACTIVADO: 'POS_BETA_ACTIVADO',
   POS_BETA_DESACTIVADO: 'POS_BETA_DESACTIVADO',
+  // Anular sin nota de crédito (comunicación de baja o resumen diario).
+  BAJA_SOLICITADA: 'FISCAL_BAJA_SOLICITADA',
 } as const;
 export type AccionAuditoriaFiscal = (typeof ACCIONES_AUDITORIA_FISCAL)[keyof typeof ACCIONES_AUDITORIA_FISCAL];
 

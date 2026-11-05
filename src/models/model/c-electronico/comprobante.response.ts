@@ -1,3 +1,4 @@
+import type { LoteDeComprobante } from '../../../sunat/documentos/lotes.contrato';
 import { ReceptorResponse } from '../receptor.response';
 
 export interface ObservacionSunatResponse {
@@ -37,6 +38,8 @@ export interface ComprobanteResponse {
   archivos_beta?: string[];
   /** Aviso del ambiente (p. ej. «Prueba SUNAT BETA: sin validez tributaria»). */
   aviso?: string | null;
+  /** true: el comprobante quedó firmado y guardado y su envío a SUNAT sigue en segundo plano (fiscal_envio_diferido). */
+  envio_diferido?: boolean;
   /** Último día (yyyy-mm-dd, Lima) para que SUNAT reciba el comprobante por envío individual. */
   fecha_limite_envio?: string | null;
   id_venta?: number | null;
@@ -96,6 +99,8 @@ export interface ComprobanteListadoResponse {
   /** Regla básica (aceptado, del ambiente vigente, no anulado); el saldo lo valida la nota de crédito. */
   puede_nota_credito?: boolean;
   puede_anular: boolean;
+  /** Se puede anular dando de baja en SUNAT (RA o resumen), sin nota de crédito: aceptado y dentro de los 7 días. */
+  puede_anular_sin_nota?: boolean;
 }
 
 /** Envío a SUNAT tal como se muestra en el detalle. */
@@ -228,6 +233,10 @@ export interface ComprobanteDetalleResponse {
   puede_confirmar_manual: boolean;
   puede_nota_credito: boolean;
   puede_anular: boolean;
+  /** Se puede anular dando de baja en SUNAT (RA o resumen), sin nota de crédito: aceptado y dentro de los 7 días. */
+  puede_anular_sin_nota: boolean;
+  /** Baja o resumen vigente del comprobante (en curso o aceptado); null si no tiene. */
+  baja: LoteDeComprobante | null;
 }
 
 export interface ItemPreviewResponse {

@@ -512,6 +512,12 @@ describe('VentaDocumentosBussnies.documentos (GET /venta/:id/documentos)', () =>
         { permitido: true, motivo: 'F001-00000012 ya está acreditado por completo con notas de crédito: la venta se anulará en el sistema.' },
       ],
       [
+        'baja (RA o resumen) en SUNAT sin respuesta',
+        { comprobantes: [factura({ estado_sunat: 'BAJA_PENDIENTE' })] },
+        ADMIN,
+        { permitido: false, motivo: 'La baja de F001-00000012 sigue en SUNAT: la venta se anulará cuando SUNAT la confirme.' },
+      ],
+      [
         'dos aceptadas',
         { comprobantes: [factura(), boleta({ id_comprobante: 11 })] },
         ADMIN,

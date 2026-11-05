@@ -5,7 +5,7 @@ import {
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, DeepPartial, EntityManager } from 'typeorm';
 import { Producto } from '../../models/DBModel/producto.entity';
-import { ProductoRepository, FilaProducto } from '../../repository/Repository/producto.repository';
+import { ProductoRepository, FilaProducto, FilaProductoSinCodigoSunat } from '../../repository/Repository/producto.repository';
 import { InventarioRepository } from '../../repository/Repository/inventario.repository';
 import { CrearProductoRequest, ActualizarProductoRequest } from '../../models/model/producto.request';
 import { ProductoResponse } from '../../models/model/producto.response';
@@ -15,6 +15,16 @@ import { ALIAS_UNIDADES, normalizarUnidad } from '../../sunat/catalogos/sunat.ca
 import { GRUPOS_UNIDADES, UNIDADES_AMIGABLES } from '../../sunat/catalogos/unidades-amigables';
 import type { UnidadAmigable } from '../../sunat/catalogos/unidades-amigables';
 import { ean13Interno } from '../../util/codigo-barras.util';
+
+/** Código de producto SUNAT (catálogo 25, UNSPSC): exactamente 8 dígitos. */
+const PATRON_CODIGO_SUNAT = /^\d{8}$/;
+const MSJ_CODIGO_SUNAT = 'El código de producto SUNAT debe tener exactamente 8 dígitos (catálogo 25, UNSPSC).';
+
+/** Resultado de la carga masiva de códigos SUNAT: lo que no se pudo asignar no aborta el resto. */
+export interface ResultadoAsignacionCodigosSunat {
+  actualizados: number;
+  rechazados: Array<{ id_producto: number; motivo: string }>;
+}
 
 /** Intentos máximos al buscar un código interno que no exista ya en productos. */
 const MAX_INTENTOS_CODIGO_INTERNO = 5;
@@ -50,6 +60,7 @@ export class ProductoBussnies implements IProductoBussniees {
    */
   async create(dto: CrearProductoRequest): Promise<ProductoResponse> {
     const unidadMedida = this.unidadValidada(dto.unidad_medida);
+    const codigoSunat = this.normalizarCodigoSunat(dto.codigo_sunat);
     await this.verificarUnicidad(dto.codigo_barras, dto.sku);
 
     const idAlmacen = dto.id_almacen ? Number(dto.id_almacen) : undefined;
@@ -77,6 +88,7 @@ export class ProductoBussnies implements IProductoBussniees {
           precio_venta: dto.precio_venta ?? 0,
           descuento: dto.descuento ?? 0,
           unidad_medida: unidadMedida,
+          codigo_sunat: codigoSunat ?? null,
           estado: dto.estado ?? true,
           destacado: dto.destacado ?? false,
           categoria: dto.id_categoria
@@ -158,6 +170,7 @@ export class ProductoBussnies implements IProductoBussniees {
     const existente = await this.repo.getById(id);
     if (!existente) throw new NotFoundException(`Producto ${id} no encontrado`);
 
+    const codigoSunat = this.normalizarCodigoSunat(dto.codigo_sunat);
     await this.verificarUnicidad(dto.codigo_barras, dto.sku, id);
 
     // Solo se tocan los campos que llegaron: así una edición parcial desde el
@@ -173,6 +186,8 @@ export class ProductoBussnies implements IProductoBussniees {
       descuento: dto.descuento,
       // undefined = «no tocar»; si llega algo, se valida igual que en el alta.
       unidad_medida: dto.unidad_medida === undefined ? undefined : this.unidadValidada(dto.unidad_medida),
+      // undefined = «no tocar»; null = vaciar el código.
+      codigo_sunat: codigoSunat,
       estado: dto.estado,
       destacado: dto.destacado,
     };
@@ -226,6 +241,69 @@ export class ProductoBussnies implements IProductoBussniees {
       );
     }
     return codigo;
+  }
+
+  /**
+   * Código de producto SUNAT que se guarda: `undefined` → no tocar (edición parcial);
+   * vacío o solo espacios → `null` (quitarlo); otro texto → 8 dígitos exactos o 400.
+   */
+  normalizarCodigoSunat(valor: unknown): string | null | undefined {
+    if (valor === undefined) return undefined;
+    if (valor === null) return null;
+    const texto = String(valor).replace(/\s+/g, '');
+    if (texto === '') return null;
+    if (!PATRON_CODIGO_SUNAT.test(texto)) throw new BadRequestException(MSJ_CODIGO_SUNAT);
+    return texto;
+  }
+
+  /** Productos activos sin código SUNAT (tarjeta de carga del panel). */
+  async productosSinCodigoSunat(limite?: number): Promise<{ total: number; datos: FilaProductoSinCodigoSunat[] }> {
+    return this.repo.listarSinCodigoSunat(limite);
+  }
+
+  /**
+   * Carga masiva: agrupa por código y hace un UPDATE por código. Un id inexistente o un código
+   * inválido no aborta el resto: se informa en `rechazados`. Si un id llega varias veces, vale la última.
+   */
+  async asignarCodigosSunat(
+    asignaciones: Array<{ id_producto: number; codigo_sunat: string }>,
+  ): Promise<ResultadoAsignacionCodigosSunat> {
+    const rechazados: ResultadoAsignacionCodigosSunat['rechazados'] = [];
+    const porProducto = new Map<number, string>();
+
+    for (const a of asignaciones ?? []) {
+      const id = Number(a?.id_producto);
+      const codigo = String(a?.codigo_sunat ?? '').replace(/\s+/g, '');
+      if (!Number.isInteger(id) || id <= 0) {
+        rechazados.push({ id_producto: id, motivo: 'Identificador de producto no válido' });
+      } else if (!PATRON_CODIGO_SUNAT.test(codigo)) {
+        rechazados.push({ id_producto: id, motivo: MSJ_CODIGO_SUNAT });
+      } else {
+        porProducto.set(id, codigo);
+      }
+    }
+
+    const porCodigo = new Map<string, number[]>();
+    for (const [id, codigo] of porProducto) {
+      porCodigo.set(codigo, [...(porCodigo.get(codigo) ?? []), id]);
+    }
+
+    let actualizados = 0;
+    for (const [codigo, ids] of porCodigo) {
+      let hechos: number[];
+      try {
+        hechos = await this.repo.asignarCodigoSunat(ids, codigo);
+      } catch (error) {
+        throw this.traducirErrorBd(error, 'No se pudo asignar el código SUNAT');
+      }
+      const encontrados = new Set(hechos.map(Number));
+      actualizados += encontrados.size;
+      for (const id of ids) {
+        if (!encontrados.has(id)) rechazados.push({ id_producto: id, motivo: 'El producto no existe' });
+      }
+    }
+
+    return { actualizados, rechazados };
   }
 
   async delete(id: number): Promise<number> {
@@ -346,6 +424,7 @@ export class ProductoBussnies implements IProductoBussniees {
       precio_venta: Number(p.precio_venta ?? 0),
       descuento: Number(p.descuento ?? 0),
       unidad_medida: p.unidad_medida ?? '',
+      codigo_sunat: p.codigo_sunat ?? null,
       id_categoria: p.id_categoria ?? undefined,
       categoria: p.categoria ?? '',
       id_marca: p.id_marca ?? undefined,

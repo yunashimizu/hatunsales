@@ -1,4 +1,6 @@
 import { BadRequestException, ConflictException, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { FiscalConfigError } from '../../sunat/config/fiscal-errores';
+import type { LoteVista, ResultadoLote } from '../../sunat/documentos/lotes.contrato';
 import type { Comprobante } from '../../models/DBModel/c-electronico/comprobante.entity';
 import type {
   CabeceraComprobante,
@@ -119,7 +121,7 @@ function venta(parcial: Partial<VentaDeNota> = {}): VentaDeNota {
 
 // ── Servicio con dobles ──────────────────────────────────────
 
-function crear(opciones: { esquema?: boolean; origen?: OrigenNota | null; notas?: NotaDeOrigen[]; lineas?: LineaNotaVigente[] } = {}) {
+function crear(opciones: { esquema?: boolean; origen?: OrigenNota | null; notas?: NotaDeOrigen[]; lineas?: LineaNotaVigente[]; lotes?: unknown } = {}) {
   const tx = { query: jest.fn() };
   const repo = {
     esquemaListo: jest.fn(async () => opciones.esquema ?? true),
@@ -158,7 +160,7 @@ function crear(opciones: { esquema?: boolean; origen?: OrigenNota | null; notas?
     confirmarAceptadoManual: jest.fn(async () => ({ aceptado: true })),
   };
   const auditoria = { registrar: jest.fn(async () => undefined) };
-  const servicio = new NotaCreditoBussnies(repo as never, ventas as never, emisor as never, emision as never, auditoria as never);
+  const servicio = new NotaCreditoBussnies(repo as never, ventas as never, emisor as never, emision as never, auditoria as never, opciones.lotes as never);
   return { servicio, repo, ventas, emisor, emision, auditoria, solicitudes, tx };
 }
 
@@ -784,6 +786,348 @@ function entidadOrigen(parcial: Partial<Record<keyof Comprobante, unknown>> = {}
     ...parcial,
   } as unknown as Comprobante;
 }
+
+describe('anular sin nota de crédito: la baja (RA) o el resumen (RC) en SUNAT', () => {
+  const RESULTADO_ENVIADO: ResultadoLote = {
+    id_envio: 700,
+    operacion: 'baja',
+    identificador: 'RA-20261105-00001',
+    estado: 'TICKET_PENDIENTE',
+    aceptado: false,
+    ticket: '202611050001',
+    mensaje: 'SUNAT recibió el lote',
+    codigo: null,
+  };
+
+  function loteAceptado(parcial: Partial<LoteVista> = {}): LoteVista {
+    return {
+      id_envio: 700,
+      ambiente: 'produccion',
+      operacion: 'baja',
+      identificador: 'RA-20261105-00001',
+      estado: 'ACEPTADO',
+      sunat_ticket: '202611050001',
+      codigo_sunat: '0',
+      mensaje_sunat: 'La Comunicacion de baja ha sido aceptada',
+      accion_sunat: 'NINGUNA',
+      fecha_referencia: '2026-11-03',
+      intento: 3,
+      proximo_intento_en: null,
+      creado_en: '2026-11-05T15:00:00.000Z',
+      actualizado_en: '2026-11-05T15:03:00.000Z',
+      archivos: ['xml_firmado', 'zip', 'cdr_xml', 'cdr_zip'],
+      lineas: [{ id_comprobante: 40, serie: 'F001', numero: 12, tipo_documento: '01', condicion: 3, estado: 'ACEPTADO' }],
+      ...parcial,
+    };
+  }
+
+  function lotesFalsos(parcial: Record<string, unknown> = {}) {
+    return {
+      solicitarAnulacion: jest.fn(async () => RESULTADO_ENVIADO),
+      estadoDeComprobante: jest.fn(async () => null),
+      obtener: jest.fn(async () => loteAceptado()),
+      lineasAceptadasSinAnular: jest.fn(async () => []),
+      ...parcial,
+    };
+  }
+
+  const SIN_NOTA = { id_comprobante: 40, motivo: 'Error en el monto', sin_nota: true };
+
+  describe('anular con sin_nota (POST /comprobante/anular y /venta/:id/anular)', () => {
+    it('factura aceptada: pide la baja, NO emite nota, no anula nada todavía y responde anulacion_en_curso con el lote', async () => {
+      const lotes = lotesFalsos();
+      const { servicio, emisor, repo } = crear({ lotes });
+
+      const resultado = await servicio.anularComprobante(SIN_NOTA, 3);
+
+      expect(lotes.solicitarAnulacion).toHaveBeenCalledWith({ id_comprobante: 40, motivo: 'Error en el monto', idUsuario: 3 });
+      expect(emisor.emitirNotaCredito).not.toHaveBeenCalled();
+      expect(repo.transaccion).not.toHaveBeenCalled();
+      expect(resultado).toMatchObject({
+        estado: 'anulacion_en_curso',
+        id_comprobante: 40,
+        venta_estado: 'activa',
+        aceptada_sunat: false,
+        baja: { id_envio: 700, operacion: 'baja', identificador: 'RA-20261105-00001', estado: 'TICKET_PENDIENTE', ticket: '202611050001' },
+      });
+      expect(resultado.avisos[0]).toContain('SUNAT recibió el pedido de baja de F001-00000012 (RA-20261105-00001, ticket 202611050001)');
+      expect(resultado.avisos[0]).toContain('la venta 9 se anulará cuando SUNAT lo confirme');
+    });
+
+    it('por «Anular venta» (POST /venta/:id/anular) responde igual, con la baja y la venta aún activa', async () => {
+      const lotes = lotesFalsos();
+      const { servicio, ventas } = crear({ lotes });
+
+      const resultado = await servicio.anularVenta(9, { motivo: 'Cliente desiste', sin_nota: true }, 3);
+
+      expect(lotes.solicitarAnulacion).toHaveBeenCalledWith({ id_comprobante: 40, motivo: 'Cliente desiste', idUsuario: 3 });
+      expect(ventas.anularVentaCompleta).not.toHaveBeenCalled();
+      expect(resultado).toMatchObject({ estado: 'anulacion_en_curso', id_venta: 9, anulada: false, baja: { identificador: 'RA-20261105-00001' } });
+    });
+
+    it('el motivo se recorta a los 100 caracteres de la comunicación de baja', async () => {
+      const lotes = lotesFalsos();
+      const { servicio } = crear({ lotes });
+
+      await servicio.anularComprobante({ ...SIN_NOTA, motivo: `  ${'m'.repeat(150)}  ` }, 3);
+
+      expect(lotes.solicitarAnulacion).toHaveBeenCalledWith(expect.objectContaining({ motivo: 'm'.repeat(100) }));
+    });
+
+    it('sin el contrato de lotes: 409 «La baja en SUNAT no está disponible» y nada cambia', async () => {
+      const { servicio, emisor } = crear();
+
+      await expect(servicio.anularComprobante(SIN_NOTA, 3)).rejects.toMatchObject({
+        response: { message: expect.stringContaining('La baja en SUNAT no está disponible'), codigo: 'BAJA_NO_DISPONIBLE' },
+      });
+      expect(emisor.emitirNotaCredito).not.toHaveBeenCalled();
+    });
+
+    it('sin sin_nota sigue emitiendo la nota de crédito, aunque exista el contrato de lotes', async () => {
+      const lotes = lotesFalsos();
+      const { servicio, solicitudes } = crear({ lotes });
+
+      await servicio.anularComprobante({ id_comprobante: 40, motivo: 'Cliente desiste' }, 3);
+
+      expect(lotes.solicitarAnulacion).not.toHaveBeenCalled();
+      expect(solicitudes[0]).toMatchObject({ motivo: '01', efecto: 'anular_venta' });
+    });
+
+    it('un comprobante que nunca valió con sin_nota se anula en el sistema como siempre (no hay nada que dar de baja)', async () => {
+      const lotes = lotesFalsos();
+      const { servicio, repo } = crear({ lotes, origen: origenFactura({ estado_sunat: 'RECHAZADO', aceptada_sunat: false }) });
+      repo.principalesDeVenta.mockResolvedValue([cabecera({ estado_sunat: 'RECHAZADO', aceptada_sunat: false })]);
+
+      const resultado = await servicio.anularComprobante(SIN_NOTA, 3);
+
+      expect(lotes.solicitarAnulacion).not.toHaveBeenCalled();
+      expect(resultado.estado).toBe('anulada');
+    });
+
+    it.each([
+      ['fuera de plazo', 'FISCAL_BAJA_FUERA_DE_PLAZO', 'Ya pasaron los 7 días: anúlelo con una nota de crédito.'],
+      ['sin documento electrónico', 'FISCAL_DOC_NO_ENCONTRADO', 'El comprobante no conserva su documento electrónico: anúlelo con una nota de crédito.'],
+      ['con una baja ya en curso', 'FISCAL_ENVIO_EN_CURSO', 'F001-12 ya tiene una baja en SUNAT.'],
+    ])('%s: se traduce a 409 con el código y el mensaje del lote', async (_caso, codigo, mensaje) => {
+      const lotes = lotesFalsos({ solicitarAnulacion: jest.fn().mockRejectedValue(new FiscalConfigError(codigo as never, mensaje)) });
+      const { servicio, repo } = crear({ lotes });
+
+      const error = await servicio.anularComprobante(SIN_NOTA, 3).catch((e) => e);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(error.getResponse()).toEqual({ message: mensaje, codigo });
+      expect(repo.transaccion).not.toHaveBeenCalled();
+    });
+
+    it('otro error del lote (p. ej. certificado) conserva su estado HTTP y su código', async () => {
+      const lotes = lotesFalsos({ solicitarAnulacion: jest.fn().mockRejectedValue(new FiscalConfigError('FISCAL_CERT_NO_CARGADO', 'No hay certificado.')) });
+      const { servicio } = crear({ lotes });
+
+      const error = await servicio.anularComprobante(SIN_NOTA, 3).catch((e) => e);
+
+      expect(error.getStatus()).toBe(404);
+      expect(error.getResponse()).toMatchObject({ codigo: 'FISCAL_CERT_NO_CARGADO' });
+    });
+
+    it('con una nota de crédito en envío, o con notas ya vigentes, no se da de baja (409)', async () => {
+      const enCurso = lotesFalsos();
+      const a = crear({ lotes: enCurso });
+      a.repo.resumenes.mockResolvedValue(new Map([[40, { saldo: 103, nota_en_curso: true, anulacion_en_curso: false }]]));
+      await expect(a.servicio.anularComprobante(SIN_NOTA, 3)).rejects.toMatchObject({ response: { codigo: 'NOTA_CREDITO_EN_CURSO' } });
+
+      const conNotas = lotesFalsos();
+      const b = crear({ lotes: conNotas });
+      b.repo.resumenes.mockResolvedValue(new Map([[40, { saldo: 93, nota_en_curso: false, anulacion_en_curso: false }]]));
+      await expect(b.servicio.anularComprobante(SIN_NOTA, 3)).rejects.toMatchObject({ response: { codigo: 'BAJA_CON_NOTAS' } });
+
+      expect(enCurso.solicitarAnulacion).not.toHaveBeenCalled();
+      expect(conNotas.solicitarAnulacion).not.toHaveBeenCalled();
+    });
+
+    it('si SUNAT rechaza el pedido en el acto: anulacion_rechazada y la venta sigue activa', async () => {
+      const lotes = lotesFalsos({
+        solicitarAnulacion: jest.fn(async () => ({ ...RESULTADO_ENVIADO, estado: 'RECHAZADO', ticket: null, mensaje: '2800 - dato inválido' })),
+      });
+      const { servicio, repo } = crear({ lotes });
+
+      const resultado = await servicio.anularComprobante(SIN_NOTA, 3);
+
+      expect(resultado).toMatchObject({ estado: 'anulacion_rechazada', aceptada_sunat: false, baja: { estado: 'RECHAZADO' } });
+      expect(resultado.avisos[0]).toContain('la venta 9 sigue activa');
+      expect(repo.transaccion).not.toHaveBeenCalled();
+    });
+
+    it('el lote sigue sin llegar a SUNAT (PENDIENTE_REENVIO): en curso, con el aviso de que se reintentará sola', async () => {
+      const lotes = lotesFalsos({
+        solicitarAnulacion: jest.fn(async () => ({ ...RESULTADO_ENVIADO, estado: 'PENDIENTE_REENVIO', ticket: null })),
+      });
+      const { servicio } = crear({ lotes });
+
+      const resultado = await servicio.anularComprobante(SIN_NOTA, 3);
+
+      expect(resultado.estado).toBe('anulacion_en_curso');
+      expect(resultado.avisos[0]).toContain('todavía no llegó a SUNAT');
+    });
+
+    it('con la baja en curso (BAJA_PENDIENTE), anular otra vez informa su estado y no emite una nota ni pide otra baja', async () => {
+      const lotes = lotesFalsos({
+        estadoDeComprobante: jest.fn(async () => ({ id_envio: 700, operacion: 'baja', identificador: 'RA-20261105-00001', estado: 'TICKET_PENDIENTE', sunat_ticket: '202611050001', mensaje: null })),
+      });
+      const { servicio, emisor, repo } = crear({ lotes, origen: origenFactura({ estado_sunat: 'BAJA_PENDIENTE' }) });
+      repo.principalesDeVenta.mockResolvedValue([cabecera({ estado_sunat: 'BAJA_PENDIENTE' })]);
+
+      for (const dto of [SIN_NOTA, { id_comprobante: 40, motivo: 'otra vez' }]) {
+        const resultado = await servicio.anularComprobante(dto, 3);
+        expect(resultado).toMatchObject({ estado: 'anulacion_en_curso', baja: { identificador: 'RA-20261105-00001', ticket: '202611050001' } });
+      }
+      expect(lotes.solicitarAnulacion).not.toHaveBeenCalled();
+      expect(emisor.emitirNotaCredito).not.toHaveBeenCalled();
+      expect(repo.transaccion).not.toHaveBeenCalled();
+    });
+
+    it('BAJA_PENDIENTE sin lote legible: 409 en lugar de tratarlo como un envío incierto', async () => {
+      const { servicio, repo, emision } = crear({ lotes: lotesFalsos(), origen: origenFactura({ estado_sunat: 'BAJA_PENDIENTE' }) });
+      repo.principalesDeVenta.mockResolvedValue([cabecera({ estado_sunat: 'BAJA_PENDIENTE' })]);
+
+      await expect(servicio.anularComprobante({ id_comprobante: 40, motivo: 'x' }, 3)).rejects.toMatchObject({ response: { codigo: 'BAJA_EN_CURSO' } });
+      expect(emision.recuperarCdr).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('aplicarBajaAceptada: los efectos cuando SUNAT acepta la baja', () => {
+    it('anula la venta y el comprobante (y los otros comprobantes de la venta que nunca valieron) en una sola transacción', async () => {
+      const lotes = lotesFalsos();
+      const { servicio, repo, ventas, tx } = crear({ lotes });
+      repo.principalesDeVenta.mockResolvedValue([cabecera(), cabecera({ id_comprobante: 41, serie: 'F001', numero: 11, estado_sunat: 'RECHAZADO', aceptada_sunat: false })]);
+
+      expect(await servicio.aplicarBajaAceptada(700)).toBe(1);
+
+      expect(lotes.obtener).toHaveBeenCalledWith(700);
+      expect(repo.transaccion).toHaveBeenCalledTimes(1);
+      expect(ventas.anularVentaCompleta).toHaveBeenCalledWith(9, { consultor: tx, descripcion: 'Devolución por venta 9 anulada' });
+      expect(repo.marcarAnulados).toHaveBeenCalledWith(tx, [40, 41], 'Baja aceptada por SUNAT (RA-20261105-00001)');
+    });
+
+    it('idempotente: la segunda vez (oyente y barrido a la vez) no vuelve a anular nada', async () => {
+      const lotes = lotesFalsos();
+      const { servicio, repo, ventas } = crear({ lotes });
+      expect(await servicio.aplicarBajaAceptada(700)).toBe(1);
+
+      repo.origen.mockResolvedValue(origenFactura({ anulado: true }));
+      expect(await servicio.aplicarBajaAceptada(700)).toBe(0);
+
+      expect(repo.transaccion).toHaveBeenCalledTimes(1);
+      expect(ventas.anularVentaCompleta).toHaveBeenCalledTimes(1);
+    });
+
+    it('con la venta ya anulada solo marca el comprobante (no toca el stock ni la deuda otra vez)', async () => {
+      const { servicio, repo, ventas, tx } = crear({ lotes: lotesFalsos() });
+      repo.ventaDeNota.mockResolvedValue(venta({ estado: 'anulada' }));
+
+      expect(await servicio.aplicarBajaAceptada(700)).toBe(1);
+
+      expect(ventas.anularVentaCompleta).not.toHaveBeenCalled();
+      expect(repo.marcarAnulados).toHaveBeenCalledWith(tx, [40], expect.stringContaining('RA-20261105-00001'));
+    });
+
+    it('un comprobante sin venta (boleta suelta) se anula solo a sí mismo', async () => {
+      const { servicio, repo, ventas } = crear({ lotes: lotesFalsos(), origen: origenFactura({ id_venta: null }) });
+
+      expect(await servicio.aplicarBajaAceptada(700)).toBe(1);
+
+      expect(ventas.anularVentaCompleta).not.toHaveBeenCalled();
+      expect(repo.principalesDeVenta).not.toHaveBeenCalled();
+      expect(repo.marcarAnulados).toHaveBeenCalledWith(expect.anything(), [40], expect.any(String));
+    });
+
+    it('un lote que no está aceptado (rechazado, en curso) o una línea no aceptada no anula nada', async () => {
+      for (const parcial of [{ estado: 'RECHAZADO' }, { estado: 'TICKET_PENDIENTE' }]) {
+        const { servicio, repo } = crear({ lotes: lotesFalsos({ obtener: jest.fn(async () => loteAceptado(parcial)) }) });
+        expect(await servicio.aplicarBajaAceptada(700)).toBe(0);
+        expect(repo.transaccion).not.toHaveBeenCalled();
+      }
+      const lineaPendiente = loteAceptado({ lineas: [{ id_comprobante: 40, serie: 'F001', numero: 12, tipo_documento: '01', condicion: 3, estado: 'RECHAZADO' }] });
+      const { servicio, repo } = crear({ lotes: lotesFalsos({ obtener: jest.fn(async () => lineaPendiente) }) });
+      expect(await servicio.aplicarBajaAceptada(700)).toBe(0);
+      expect(repo.transaccion).not.toHaveBeenCalled();
+    });
+
+    it('sin el contrato de lotes o con un lote inexistente responde 0 (nunca lanza por eso)', async () => {
+      expect(await crear().servicio.aplicarBajaAceptada(700)).toBe(0);
+      const { servicio } = crear({ lotes: lotesFalsos({ obtener: jest.fn(async () => null) }) });
+      expect(await servicio.aplicarBajaAceptada(700)).toBe(0);
+    });
+
+    it('bajasConEfectosPendientes entrega los envíos aceptados con comprobantes sin anular, sin repetir', async () => {
+      const lotes = lotesFalsos({
+        lineasAceptadasSinAnular: jest.fn(async () => [
+          { id_envio: 5, id_comprobante: 40 },
+          { id_envio: 5, id_comprobante: 41 },
+          { id_envio: 6, id_comprobante: 42 },
+        ]),
+      });
+      const { servicio } = crear({ lotes });
+
+      expect(await servicio.bajasConEfectosPendientes(20)).toEqual([5, 6]);
+      expect(lotes.lineasAceptadasSinAnular).toHaveBeenCalledWith(20);
+      expect(await crear().servicio.bajasConEfectosPendientes(20)).toEqual([]);
+    });
+  });
+
+  describe('consultar la anulación de un comprobante dado de baja', () => {
+    const CONSULTA = { tipo_de_comprobante: 1, serie: 'F001', numero: 12 };
+    const LOTE_EN_CURSO = { id_envio: 700, operacion: 'baja', identificador: 'RA-20261105-00001', estado: 'TICKET_PENDIENTE', sunat_ticket: '202611050001', mensaje: null };
+
+    it('con la baja en curso informa el ticket y que se anulará cuando SUNAT la confirme', async () => {
+      const lotes = lotesFalsos({ estadoDeComprobante: jest.fn(async () => LOTE_EN_CURSO) });
+      const { servicio } = crear({ lotes, origen: origenFactura({ estado_sunat: 'BAJA_PENDIENTE' }) });
+
+      const resultado = await servicio.consultarAnulacion(CONSULTA);
+
+      expect(resultado).toMatchObject({ estado: 'anulacion_en_curso', aceptada_sunat: false, baja: { identificador: 'RA-20261105-00001', ticket: '202611050001' } });
+      expect(resultado.avisos[0]).toContain('ticket 202611050001');
+    });
+
+    it('baja aceptada con el comprobante ya anulado: «dado de baja en SUNAT (RA-…)»', async () => {
+      const lotes = lotesFalsos({ estadoDeComprobante: jest.fn(async () => ({ ...LOTE_EN_CURSO, estado: 'ACEPTADO' })) });
+      const { servicio, repo } = crear({ lotes, origen: origenFactura({ anulado: true, estado_sunat: 'ANULADO' }) });
+
+      const resultado = await servicio.consultarAnulacion(CONSULTA);
+
+      expect(resultado).toMatchObject({ estado: 'anulada', aceptada_sunat: true, baja: { estado: 'ACEPTADO' } });
+      expect(resultado.avisos[0]).toContain('se dio de baja en SUNAT (RA-20261105-00001)');
+      expect(repo.transaccion).not.toHaveBeenCalled();
+    });
+
+    it('baja aceptada pero con los efectos pendientes (cayó el proceso): los aplica ahora y responde anulada', async () => {
+      const lotes = lotesFalsos({ estadoDeComprobante: jest.fn(async () => ({ ...LOTE_EN_CURSO, estado: 'ACEPTADO' })) });
+      const { servicio, repo } = crear({ lotes, origen: origenFactura({ estado_sunat: 'ANULADO' }) });
+
+      const resultado = await servicio.consultarAnulacion(CONSULTA);
+
+      expect(resultado).toMatchObject({ estado: 'anulada', aceptada_sunat: true });
+      expect(repo.transaccion).toHaveBeenCalledTimes(1);
+    });
+
+    it('con los efectos fallando queda en curso (nunca un 500)', async () => {
+      const lotes = lotesFalsos({ estadoDeComprobante: jest.fn(async () => ({ ...LOTE_EN_CURSO, estado: 'ACEPTADO' })) });
+      const { servicio, repo } = crear({ lotes, origen: origenFactura({ estado_sunat: 'ANULADO' }) });
+      repo.transaccion.mockRejectedValue(new Error('conexión perdida'));
+
+      const resultado = await servicio.consultarAnulacion(CONSULTA);
+
+      expect(resultado).toMatchObject({ estado: 'anulacion_en_curso', aceptada_sunat: false });
+    });
+
+    it('sin baja ni nota sigue diciendo «no tiene una anulación registrada»; si leer el lote falla, también', async () => {
+      const sin = crear({ lotes: lotesFalsos() });
+      expect(await sin.servicio.consultarAnulacion(CONSULTA)).toMatchObject({ estado: 'sin_anulacion' });
+
+      const roto = crear({ lotes: lotesFalsos({ estadoDeComprobante: jest.fn().mockRejectedValue(new Error('esquema pendiente')) }) });
+      expect(await roto.servicio.consultarAnulacion(CONSULTA)).toMatchObject({ estado: 'sin_anulacion' });
+    });
+  });
+});
 
 describe('directo a SUNAT: la nota se emite y se envía en el acto (motor real + EmisionDirecta simulada)', () => {
   const DEVOLUCION = { motivo: '07', sustento: 'Devolución de un martillo', items: [{ id_item: 401, cantidad: 1 }] };

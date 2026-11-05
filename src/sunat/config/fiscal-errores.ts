@@ -24,6 +24,7 @@ export const CODIGOS_FISCALES_EMISION = [
   'FISCAL_EMISION_INACTIVA',
   'FISCAL_EMISION_BLOQUEADA',
   'FISCAL_LECTURA_ERROR',
+  'FISCAL_BAJA_FUERA_DE_PLAZO',
 ] as const;
 
 export type CodigoFiscal = Extract<CodigoErrorTipo, `FISCAL_${string}`> | (typeof CODIGOS_FISCALES_EMISION)[number];
@@ -74,6 +75,8 @@ const ESTADO_HTTP: Record<CodigoFiscal, number> = {
   FISCAL_EMISION_INACTIVA: HttpStatus.SERVICE_UNAVAILABLE,
   FISCAL_EMISION_BLOQUEADA: HttpStatus.SERVICE_UNAVAILABLE,
   FISCAL_LECTURA_ERROR: HttpStatus.SERVICE_UNAVAILABLE,
+  // Anular sin nota (comunicación de baja o resumen): pasaron los 7 días de la emisión.
+  FISCAL_BAJA_FUERA_DE_PLAZO: HttpStatus.CONFLICT,
 };
 
 /** Campos que el detalle nunca puede pisar en el cuerpo HTTP. */

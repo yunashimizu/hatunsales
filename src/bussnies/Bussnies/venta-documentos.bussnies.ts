@@ -295,6 +295,10 @@ export class VentaDocumentosBussnies {
       return noPermitido(`No se puede anular ahora. ${motivoEmisionInactiva(modo)}`);
     }
 
+    // Una baja (RA) o un resumen (RC) en SUNAT sin respuesta: la venta se anula sola cuando SUNAT la confirme.
+    const enBaja = sinAnular.find((c) => c.estado_sunat === 'BAJA_PENDIENTE');
+    if (enBaja) return noPermitido(`La baja de ${numeroDe(enBaja)} sigue en SUNAT: la venta se anulará cuando SUNAT la confirme.`);
+
     const clases = sinAnular.map((c) => ({ c, clase: clasificarParaAnular(c, modo.ambiente) }));
     const de = (clase: string) => clases.filter((x) => x.clase === clase).map((x) => x.c);
     const aceptados = de('aceptado');

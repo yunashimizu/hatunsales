@@ -1,5 +1,5 @@
 import { CATALOGO_06_TIPOS_VALIDOS, PLAZOS_ENVIO_DIAS } from '../../catalogos/sunat.catalogos';
-import { Dinero } from '../decimal';
+import { Dinero, formatearDecimal } from '../decimal';
 import type { MonedaCpe } from '../documento-fiscal.types';
 import { ResumenInvalidoError } from '../errores-nucleo';
 import { diasEntre, esFechaIso } from '../fechas-fiscales';
@@ -26,6 +26,8 @@ export interface LineaResumenDiario {
   inafecta: number;
   gratuita: number;
   igv: number;
+  /** Tasa del IGV en %, para el cbc:Percent que SUNAT exige en la categoría del tributo (por omisión 18). */
+  porcentajeIgv?: number;
   isc?: number;
   otrosTributos?: number;
   total: number;
@@ -212,7 +214,7 @@ export class ConstructorResumenDiarioUbl {
       el('cac:Status', null, el('cbc:ConditionCode', null, linea.estado)),
       el('sac:TotalAmount', { currencyID: moneda }, Dinero.de(linea.total).toString()),
       this.pagos(linea, moneda),
-      this.tributo(Dinero.de(linea.igv), { id: '1000', nombre: 'IGV', codigo: 'VAT' }, moneda),
+      this.tributo(Dinero.de(linea.igv), { id: '1000', nombre: 'IGV', codigo: 'VAT' }, moneda, linea.porcentajeIgv ?? 18),
       Dinero.de(linea.isc ?? 0).esPositivo() ? this.tributo(Dinero.de(linea.isc ?? 0), { id: '2000', nombre: 'ISC', codigo: 'EXC' }, moneda) : null,
       Dinero.de(linea.otrosTributos ?? 0).esPositivo()
         ? this.tributo(Dinero.de(linea.otrosTributos ?? 0), { id: '9999', nombre: 'OTROS', codigo: 'OTH' }, moneda)
@@ -240,7 +242,8 @@ export class ConstructorResumenDiarioUbl {
     );
   }
 
-  private tributo(monto: Dinero, esquema: { id: string; nombre: string; codigo: string }, moneda: MonedaCpe): NodoXml {
+  /** `porcentaje`: tasa del tributo (cbc:Percent). SUNAT rechaza el resumen sin ella para el IGV (2992). */
+  private tributo(monto: Dinero, esquema: { id: string; nombre: string; codigo: string }, moneda: MonedaCpe, porcentaje?: number): NodoXml {
     return el(
       'cac:TaxTotal',
       null,
@@ -252,6 +255,7 @@ export class ConstructorResumenDiarioUbl {
         el(
           'cac:TaxCategory',
           null,
+          porcentaje === undefined ? null : el('cbc:Percent', null, formatearDecimal(porcentaje, 2, 2)),
           el('cac:TaxScheme', null, el('cbc:ID', null, esquema.id), el('cbc:Name', null, esquema.nombre), el('cbc:TaxTypeCode', null, esquema.codigo)),
         ),
       ),

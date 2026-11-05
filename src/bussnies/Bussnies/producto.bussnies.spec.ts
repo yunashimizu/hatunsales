@@ -18,6 +18,9 @@ function armar() {
     detallePorId: jest.fn().mockResolvedValue({ id_producto: 7, nombre: 'X' }),
     getById: jest.fn().mockResolvedValue({ id_producto: 7 }),
     actualizar: jest.fn().mockResolvedValue(undefined),
+    listarSinCodigoSunat: jest.fn().mockResolvedValue({ total: 0, datos: [] }),
+    // Por omisión todos los ids existen: devuelve los que recibe.
+    asignarCodigoSunat: jest.fn(async (ids: number[]) => ids),
   };
   const inventarioRepo = {
     existeAlmacen: jest.fn().mockResolvedValue(true),
@@ -218,5 +221,135 @@ describe('ProductoBussnies · generarCodigoInterno', () => {
   it('si la secuencia superó los 11 dígitos responde 500', async () => {
     const { servicio } = conSecuencia([100_000_000_000]);
     await expect(servicio.generarCodigoInterno()).rejects.toThrow('agotó los 11 dígitos');
+  });
+});
+
+describe('ProductoBussnies · código SUNAT del producto', () => {
+  it('normalizarCodigoSunat: undefined no toca, vacío o espacios vacía, texto válido se limpia', () => {
+    const { servicio } = armar();
+    expect(servicio.normalizarCodigoSunat(undefined)).toBeUndefined();
+    expect(servicio.normalizarCodigoSunat('')).toBeNull();
+    expect(servicio.normalizarCodigoSunat('   ')).toBeNull();
+    expect(servicio.normalizarCodigoSunat(null)).toBeNull();
+    expect(servicio.normalizarCodigoSunat(' 3002 1500 ')).toBe('30021500');
+  });
+
+  it('normalizarCodigoSunat rechaza 7 dígitos, 9 dígitos y letras con el mensaje del catálogo 25', () => {
+    const { servicio } = armar();
+    for (const malo of ['3002150', '300215001', '3002150A']) {
+      expect(() => servicio.normalizarCodigoSunat(malo)).toThrow(BadRequestException);
+      expect(() => servicio.normalizarCodigoSunat(malo)).toThrow(
+        'El código de producto SUNAT debe tener exactamente 8 dígitos (catálogo 25, UNSPSC).',
+      );
+    }
+  });
+
+  it('crea con código y lo guarda sin espacios', async () => {
+    const { servicio, guardados } = armar();
+    await servicio.create({ nombre: 'Clavos', codigo_sunat: ' 30021500 ' } as any);
+    expect(guardados[0].codigo_sunat).toBe('30021500');
+  });
+
+  it('crea sin código y guarda null', async () => {
+    const { servicio, guardados } = armar();
+    await servicio.create({ nombre: 'Clavos' } as any);
+    expect(guardados[0].codigo_sunat).toBeNull();
+  });
+
+  it('crea con 7 dígitos y responde 400 sin tocar la BD', async () => {
+    const { servicio, dataSource } = armar();
+    await expect(servicio.create({ nombre: 'Clavos', codigo_sunat: '3002150' } as any)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('update sin el campo no toca codigo_sunat', async () => {
+    const { servicio, repo } = armar();
+    await servicio.update({ precio_venta: 12 } as any, 7);
+    expect('codigo_sunat' in repo.actualizar.mock.calls[0][1]).toBe(false);
+  });
+
+  it('update con cadena vacía deja el código en null', async () => {
+    const { servicio, repo } = armar();
+    await servicio.update({ codigo_sunat: '' } as any, 7);
+    expect(repo.actualizar.mock.calls[0][1]).toEqual({ codigo_sunat: null });
+  });
+
+  it('update con un código válido lo guarda y con uno inválido responde 400 sin actualizar', async () => {
+    const { servicio, repo } = armar();
+    await servicio.update({ codigo_sunat: '31162800' } as any, 7);
+    expect(repo.actualizar.mock.calls[0][1]).toEqual({ codigo_sunat: '31162800' });
+
+    repo.actualizar.mockClear();
+    await expect(servicio.update({ codigo_sunat: '1234567' } as any, 7)).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.actualizar).not.toHaveBeenCalled();
+  });
+
+  it('el detalle expone codigo_sunat (null cuando no hay)', async () => {
+    const { servicio, repo } = armar();
+    repo.detallePorId.mockResolvedValueOnce({ id_producto: 7, nombre: 'X', codigo_sunat: '30021500' });
+    expect((await servicio.getById(7)).codigo_sunat).toBe('30021500');
+    repo.detallePorId.mockResolvedValueOnce({ id_producto: 7, nombre: 'X', codigo_sunat: null });
+    expect((await servicio.getById(7)).codigo_sunat).toBeNull();
+  });
+
+  it('productosSinCodigoSunat delega en el repositorio con el límite', async () => {
+    const { servicio, repo } = armar();
+    repo.listarSinCodigoSunat.mockResolvedValueOnce({ total: 2, datos: [{ id_producto: 1 }] });
+    await expect(servicio.productosSinCodigoSunat(50)).resolves.toEqual({ total: 2, datos: [{ id_producto: 1 }] });
+    expect(repo.listarSinCodigoSunat).toHaveBeenCalledWith(50);
+  });
+});
+
+describe('ProductoBussnies.asignarCodigosSunat', () => {
+  it('agrupa por código: un UPDATE por código y cuenta los actualizados', async () => {
+    const { servicio, repo } = armar();
+    const resultado = await servicio.asignarCodigosSunat([
+      { id_producto: 1, codigo_sunat: '30021500' },
+      { id_producto: 2, codigo_sunat: '30021500' },
+      { id_producto: 3, codigo_sunat: '31162800' },
+    ]);
+    expect(repo.asignarCodigoSunat).toHaveBeenCalledTimes(2);
+    expect(repo.asignarCodigoSunat).toHaveBeenCalledWith([1, 2], '30021500');
+    expect(repo.asignarCodigoSunat).toHaveBeenCalledWith([3], '31162800');
+    expect(resultado).toEqual({ actualizados: 3, rechazados: [] });
+  });
+
+  it('reporta como rechazados los ids inexistentes y los códigos inválidos, sin lanzar', async () => {
+    const { servicio, repo } = armar();
+    repo.asignarCodigoSunat.mockImplementation(async (ids: number[]) => ids.filter((id) => id !== 99));
+    const resultado = await servicio.asignarCodigosSunat([
+      { id_producto: 1, codigo_sunat: '30021500' },
+      { id_producto: 99, codigo_sunat: '30021500' },
+      { id_producto: 5, codigo_sunat: '1234567' },
+    ]);
+    expect(repo.asignarCodigoSunat).toHaveBeenCalledTimes(1);
+    expect(repo.asignarCodigoSunat).toHaveBeenCalledWith([1, 99], '30021500');
+    expect(resultado.actualizados).toBe(1);
+    expect(resultado.rechazados).toEqual(
+      expect.arrayContaining([
+        { id_producto: 5, motivo: expect.stringMatching(/8 dígitos/) },
+        { id_producto: 99, motivo: 'El producto no existe' },
+      ]),
+    );
+    expect(resultado.rechazados).toHaveLength(2);
+  });
+
+  it('si un id llega repetido vale la última asignación y no se cuenta dos veces', async () => {
+    const { servicio, repo } = armar();
+    const resultado = await servicio.asignarCodigosSunat([
+      { id_producto: 1, codigo_sunat: '30021500' },
+      { id_producto: 1, codigo_sunat: '31162800' },
+    ]);
+    expect(repo.asignarCodigoSunat).toHaveBeenCalledTimes(1);
+    expect(repo.asignarCodigoSunat).toHaveBeenCalledWith([1], '31162800');
+    expect(resultado.actualizados).toBe(1);
+  });
+
+  it('sin asignaciones no consulta la base', async () => {
+    const { servicio, repo } = armar();
+    await expect(servicio.asignarCodigosSunat([])).resolves.toEqual({ actualizados: 0, rechazados: [] });
+    expect(repo.asignarCodigoSunat).not.toHaveBeenCalled();
   });
 });

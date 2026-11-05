@@ -361,7 +361,14 @@ export class VentaDocumentosRepository {
                 COALESCE(v.total, 0)::text AS total,
                 ${SQL_PARTES_CLIENTE},
                 u.serie AS ultimo_serie, u.numero AS ultimo_numero, u.anulado AS ultimo_anulado, u.mensaje AS ultimo_mensaje
-           FROM ventas v
+           FROM (
+                  SELECT v.id_venta
+                    FROM ventas v
+                   WHERE ${donde}
+                   ORDER BY v.fecha DESC NULLS LAST, v.id_venta DESC
+                   LIMIT $${paramsDatos.length - 1} OFFSET $${paramsDatos.length}
+                ) pagina
+           JOIN ventas v ON v.id_venta = pagina.id_venta
            LEFT JOIN clientes c ON c.id_cliente = v.id_cliente
            ${sqlJoinEmpresa(snapshot)}
            LEFT JOIN LATERAL (
@@ -374,9 +381,7 @@ export class VentaDocumentosRepository {
                    ORDER BY p.creado_en DESC NULLS LAST, p.id_comprobante DESC
                    LIMIT 1
                 ) u ON TRUE
-          WHERE ${donde}
-          ORDER BY v.fecha DESC NULLS LAST, v.id_venta DESC
-          LIMIT $${paramsDatos.length - 1} OFFSET $${paramsDatos.length}`,
+          ORDER BY v.fecha DESC NULLS LAST, v.id_venta DESC`,
         paramsDatos,
       ),
     ]);

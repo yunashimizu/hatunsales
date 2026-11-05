@@ -438,6 +438,8 @@ export class VentaBussnies {
   private avisarSiNoAceptado(venta: VentaResponse): void {
     const comprobante = venta.comprobante;
     if (!comprobante || comprobante.aceptada_sunat) return;
+    // Envío diferido: el comprobante está guardado y SUNAT lo recibe en segundo plano; no es un fallo.
+    if (comprobante.envio_diferido === true) return;
     venta.comprobante_error =
       comprobante.error ||
       comprobante.sunat_description ||

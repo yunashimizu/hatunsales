@@ -15,10 +15,10 @@ export function nombreArchivoSeguro(nombre: string | null | undefined): string {
 }
 
 /**
- * Artefacto de un envío como descarga (las cabeceras fijas de D13 las pone el controlador con @Header).
+ * Artefacto de un envío (o de un lote RA/RC: basta con que ofrezca obtenerArchivo) como descarga (las cabeceras fijas de D13 las pone el controlador con @Header).
  * 400 si el tipo no es de la lista cerrada; 404 si el envío no lo tiene.
  */
-export async function descargaDeEnvio(emision: EmisionDirecta, idEnvio: number, tipo: string): Promise<StreamableFile> {
+export async function descargaDeEnvio(emision: Pick<EmisionDirecta, 'obtenerArchivo'>, idEnvio: number, tipo: string): Promise<StreamableFile> {
   if (!(TIPOS_ARCHIVO_ENVIO as readonly string[]).includes(tipo)) {
     throw new FiscalConfigError('FISCAL_CONFIG_INVALIDA', `Tipo de archivo no válido. Use: ${TIPOS_ARCHIVO_ENVIO.join(', ')}.`);
   }

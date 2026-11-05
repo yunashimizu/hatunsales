@@ -276,6 +276,14 @@ export class AnularComprobanteRequest {
   @IsString()
   @MaxLength(250)
   motivo!: string;
+
+  /**
+   * true = anular dando de baja el comprobante en SUNAT (comunicación de baja de la factura o resumen diario
+   * de la boleta), sin nota de crédito. Solo hasta 7 días después de emitido; la venta se anula cuando SUNAT confirme.
+   */
+  @IsOptional()
+  @IsBoolean({ message: 'sin_nota debe ser verdadero o falso' })
+  sin_nota?: boolean;
 }
 
 /** El administrador verificó en SUNAT Operaciones en Línea que el comprobante fue aceptado. */

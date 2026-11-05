@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { FiscalAuditoriaRepository } from '../auditoria/fiscal-auditoria.repository';
 import { CertificadoFiscalService } from '../certificado/certificado-fiscal.service';
+import { CacheTtl } from '../config/cache-ttl';
 import { RepositorioConfigFiscal } from '../config/config-fiscal.repository';
 import { FiscalConfigService } from '../config/fiscal-config.service';
 import type { ActorFiscal, EmisorFiscal } from '../config/fiscal-config.tipos';
@@ -11,8 +12,14 @@ import type { EmisorBetaDto } from './emisor-beta.dto';
 
 export const CLAVE_EMISOR_BETA = 'fiscal_beta_emisor';
 
+/** Vigencia del emisor BETA leído (igual que el snapshot fiscal): cada vista previa y cada venta en BETA lo pide. */
+const TTL_EMISOR_BETA_MS = 10_000;
+
 @Injectable()
 export class EmisorBetaService implements EmisorPruebaBeta {
+  /** JSON guardado del emisor BETA ('' si no hay): se cachea el texto, no el objeto, para devolver siempre una copia nueva. */
+  private readonly cache = new CacheTtl<string>(TTL_EMISOR_BETA_MS);
+
   constructor(
     private readonly repo: RepositorioConfigFiscal,
     private readonly config: FiscalConfigService,
@@ -21,11 +28,11 @@ export class EmisorBetaService implements EmisorPruebaBeta {
   ) {}
 
   async obtenerEmisor(): Promise<EmisorFiscal> {
-    const valores = await this.repo.leer([CLAVE_EMISOR_BETA]);
-    if (!valores[CLAVE_EMISOR_BETA]) return this.config.emisor();
+    const crudo = await this.cache.obtener(CLAVE_EMISOR_BETA, async () => (await this.repo.leer([CLAVE_EMISOR_BETA]))[CLAVE_EMISOR_BETA] ?? '');
+    if (!crudo) return this.config.emisor();
     let d: EmisorBetaDto;
     try {
-      d = JSON.parse(valores[CLAVE_EMISOR_BETA]!);
+      d = JSON.parse(crudo);
     } catch {
       throw new FiscalConfigError(
         'FISCAL_CONFIG_INVALIDA',
@@ -76,6 +83,7 @@ export class EmisorBetaService implements EmisorPruebaBeta {
         'El RUC BETA no tiene un dígito verificador válido.',
       );
     await this.repo.guardar({ [CLAVE_EMISOR_BETA]: JSON.stringify(dto) });
+    this.cache.invalidar();
     await this.auditoria.registrar({
       accion: 'CONFIG_EMISOR_BETA',
       id_usuario: actor.id_usuario,

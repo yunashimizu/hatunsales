@@ -92,6 +92,41 @@ describe('checklist de activación por tipo de documento', () => {
     expect(resultado.advertencias.join(' ')).not.toMatch(/Nubefact/i);
   });
 
+  describe('advertencia de productos sin código SUNAT', () => {
+    const conDefecto = { ...VALORES_COMPLETOS, fiscal_codigo_producto_defecto: '72153600' };
+
+    it('sin código por defecto y con productos sin código, advierte con el mensaje fuerte y no bloquea', () => {
+      const resultado = evaluarPreparacion(hechosPrueba({ productosSinCodigoSunat: 12 }));
+      expect(resultado.listo).toBe(true);
+      const aviso = resultado.advertencias.find((a) => /código de producto SUNAT/.test(a));
+      expect(aviso).toMatch(/^12 producto\(s\) activo\(s\) no tienen código de producto SUNAT y no hay código por defecto/);
+      expect(aviso).toMatch(/01\/01\/2027 sus comprobantes no se emitirán/);
+      expect(aviso).toMatch(/Operación y series/);
+    });
+
+    it('con código por defecto y productos sin código, advierte con el mensaje suave', () => {
+      const resultado = evaluarPreparacion(
+        hechosPrueba({ productosSinCodigoSunat: 3, snapshot: snapshotPrueba(conDefecto) }),
+      );
+      const aviso = resultado.advertencias.find((a) => /código SUNAT por defecto/.test(a));
+      expect(aviso).toMatch(/^3 producto\(s\) activo\(s\) usan el código SUNAT por defecto \(72153600\)/);
+      expect(aviso).toMatch(/conviene cargar el código real/);
+      expect(resultado.advertencias.join(' ')).not.toMatch(/no se emitirán/);
+    });
+
+    it('sin productos sin código (0), sin dato (null) o sin el campo, no advierte', () => {
+      for (const hechos of [
+        hechosPrueba({ productosSinCodigoSunat: 0 }),
+        hechosPrueba({ productosSinCodigoSunat: null }),
+        hechosPrueba(),
+        hechosPrueba({ productosSinCodigoSunat: 0, snapshot: snapshotPrueba(conDefecto) }),
+        hechosPrueba({ productosSinCodigoSunat: null, snapshot: snapshotPrueba(conDefecto) }),
+      ]) {
+        expect(evaluarPreparacion(hechos).advertencias.join(' ')).not.toMatch(/código (de producto )?SUNAT/);
+      }
+    });
+  });
+
   it('avisa si el certificado vence en 30 días o menos', () => {
     const resultado = evaluarPreparacion(
       hechosPrueba({ certificados: { beta: null, produccion: certificadoPrueba({ vigenteHasta: new Date(AHORA_PRUEBA.getTime() + 10 * DIA) }) } }),

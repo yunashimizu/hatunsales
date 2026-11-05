@@ -119,7 +119,7 @@ function envio(parcial: Partial<EnvioVista> = {}): EnvioVista {
   };
 }
 
-function crear(opciones: { comprobante?: Comprobante | null; fiscal?: DatosFiscalesComprobante | null } = {}) {
+function crear(opciones: { comprobante?: Comprobante | null; fiscal?: DatosFiscalesComprobante | null; lotes?: unknown } = {}) {
   const repo = {
     buscarPorId: jest.fn().mockResolvedValue(opciones.comprobante === undefined ? cpe() : opciones.comprobante),
     buscarPorSerieNumero: jest.fn().mockResolvedValue(opciones.comprobante === undefined ? cpe() : opciones.comprobante),
@@ -138,7 +138,7 @@ function crear(opciones: { comprobante?: Comprobante | null; fiscal?: DatosFisca
     emisor_ubicacion: 'LURIN - LIMA - LIMA',
     emisor_logo_url: 'https://ejemplo.invalid/logo.png',
   });
-  const servicio = new ComprobanteBussnies(repo as never, crearReceptorFalso() as never, config as never, emision as never);
+  const servicio = new ComprobanteBussnies(repo as never, crearReceptorFalso() as never, config as never, emision as never, opciones.lotes as never);
   return { servicio, repo, emision };
 }
 
@@ -251,12 +251,58 @@ describe('ComprobanteBussnies: detalle, listado, acciones y descargas', () => {
       const { servicio } = crear({ comprobante: null });
       await expect(servicio.obtenerDetalle(999)).rejects.toBeInstanceOf(NotFoundException);
     });
+
+    describe('anular sin nota (baja RA / resumen RC)', () => {
+      const LOTE = { id_envio: 700, operacion: 'baja', identificador: 'RA-20261021-00001', estado: 'TICKET_PENDIENTE', sunat_ticket: '2026102100001', mensaje: null };
+
+      it('con una baja en curso muestra el lote y apaga anular, nota de crédito y baja (ya hay un trámite en SUNAT)', async () => {
+        jest.useFakeTimers({ now: new Date('2026-10-21T15:00:00Z') });
+        const lotes = { estadoDeComprobante: jest.fn().mockResolvedValue(LOTE) };
+        const { servicio } = crear({ comprobante: cpe({ estado_sunat: 'BAJA_PENDIENTE' }), lotes });
+
+        const detalle = await servicio.obtenerDetalle(50);
+
+        expect(lotes.estadoDeComprobante).toHaveBeenCalledWith(50);
+        expect(detalle.baja).toEqual(LOTE);
+        expect(detalle).toMatchObject({ puede_anular: false, puede_nota_credito: false, puede_anular_sin_nota: false });
+      });
+
+      it('aceptado y dentro de los 7 días: ofrece la baja y no pregunta por ningún lote', async () => {
+        jest.useFakeTimers({ now: new Date('2026-10-21T15:00:00Z') });
+        const lotes = { estadoDeComprobante: jest.fn().mockResolvedValue(null) };
+        const { servicio } = crear({ lotes });
+
+        const detalle = await servicio.obtenerDetalle(50);
+
+        expect(detalle).toMatchObject({ puede_anular_sin_nota: true, puede_anular: true, puede_nota_credito: true, baja: null });
+        expect(lotes.estadoDeComprobante).not.toHaveBeenCalled();
+      });
+
+      it('ya dado de baja (ANULADO): informa el lote aceptado; si leerlo falla, el detalle igual se muestra', async () => {
+        const lotes = { estadoDeComprobante: jest.fn().mockResolvedValueOnce({ ...LOTE, estado: 'ACEPTADO' }).mockRejectedValueOnce(new Error('esquema')) };
+        const { servicio } = crear({ comprobante: cpe({ estado_sunat: 'ANULADO', anulado: true }), lotes });
+
+        expect((await servicio.obtenerDetalle(50)).baja).toMatchObject({ estado: 'ACEPTADO' });
+        expect((await servicio.obtenerDetalle(50)).baja).toBeNull();
+      });
+
+      it('sin el contrato de lotes registrado (o de otro proveedor) no ofrece la baja ni lee lotes', async () => {
+        jest.useFakeTimers({ now: new Date('2026-10-21T15:00:00Z') });
+        const sin = await crear().servicio.obtenerDetalle(50);
+        expect(sin).toMatchObject({ puede_anular_sin_nota: false, baja: null });
+
+        const lotes = { estadoDeComprobante: jest.fn() };
+        const historico = crear({ comprobante: cpe({ proveedor_fiscal: 'nubefact', estado_sunat: 'ANULADO' }), lotes });
+        expect((await historico.servicio.obtenerDetalle(50)).baja).toBeNull();
+        expect(lotes.estadoDeComprobante).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('listado: banderas de acciones', () => {
-    async function fila(comprobante: Comprobante, extra: Partial<DatosListadoComprobante> = {}) {
+    async function fila(comprobante: Comprobante, extra: Partial<DatosListadoComprobante> = {}, lotes?: unknown) {
       jest.useFakeTimers({ now: new Date('2026-10-21T15:00:00Z') });
-      const { servicio, repo } = crear();
+      const { servicio, repo } = crear({ lotes });
       repo.listar.mockResolvedValue({ datos: [comprobante], total: 1, pagina: 1, por_pagina: 20 });
       repo.datosListado.mockResolvedValue(
         new Map([[comprobante.id_comprobante, {
@@ -285,6 +331,31 @@ describe('ComprobanteBussnies: detalle, listado, acciones y descargas', () => {
         id_venta: 9,
         accion_sunat: 'NINGUNA',
         fecha_limite_envio: '2026-10-24',
+      });
+    });
+
+    describe('anular sin nota: puede_anular_sin_nota', () => {
+      const LOTES = { estadoDeComprobante: jest.fn() };
+
+      it('factura aceptada del ambiente vigente, emitida hoy o hasta 7 días atrás: sí (D a D+7)', async () => {
+        expect((await fila(cpe(), {}, LOTES)).puede_anular_sin_nota).toBe(true);
+        expect((await fila(cpe({ fecha_de_emision: '14-10-2026' }), {}, LOTES)).puede_anular_sin_nota).toBe(true);
+      });
+
+      it('al 8.º día ya no: queda la nota de crédito', async () => {
+        expect(await fila(cpe({ fecha_de_emision: '13-10-2026' }), {}, LOTES)).toMatchObject({ puede_anular_sin_nota: false, puede_nota_credito: true, puede_anular: true });
+      });
+
+      it('sin el contrato de lotes, de BETA, histórico, anulado o con la baja ya en curso: no', async () => {
+        expect((await fila(cpe())).puede_anular_sin_nota).toBe(false);
+        expect((await fila(cpe({ ambiente_fiscal: 'beta' }), {}, LOTES)).puede_anular_sin_nota).toBe(false);
+        expect((await fila(cpe({ proveedor_fiscal: 'nubefact' }), {}, LOTES)).puede_anular_sin_nota).toBe(false);
+        expect((await fila(cpe({ anulado: true }), {}, LOTES)).puede_anular_sin_nota).toBe(false);
+        expect(await fila(cpe({ estado_sunat: 'BAJA_PENDIENTE' }), {}, LOTES)).toMatchObject({
+          puede_anular_sin_nota: false,
+          puede_anular: false,
+          puede_nota_credito: false,
+        });
       });
     });
 

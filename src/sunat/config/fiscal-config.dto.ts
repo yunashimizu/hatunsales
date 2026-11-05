@@ -275,6 +275,11 @@ export class ActualizarConfigFiscalDto {
 
   @IsOptional()
   @Transform(aBooleano)
+  @IsBoolean({ message: 'envio_diferido debe ser verdadero o falso.' })
+  envio_diferido?: boolean;
+
+  @IsOptional()
+  @Transform(aBooleano)
   @IsBoolean({ message: 'tareas_activas debe ser verdadero o falso.' })
   tareas_activas?: boolean;
 

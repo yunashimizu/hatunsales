@@ -130,7 +130,9 @@ export interface DescarteEnvio {
 
 const SQL_VIGENTE = `COALESCE(n.anulado, FALSE) = FALSE AND COALESCE(n.estado, '') <> 'error' AND COALESCE(n.estado_sunat, '') <> 'RECHAZADO'`;
 /** Envío de la nota todavía sin respuesta definitiva de SUNAT: otra nota del mismo origen debe esperar. */
-const SQL_EN_CURSO = `${SQL_VIGENTE} AND COALESCE(n.estado_sunat, 'NO_ENVIADO') IN ('NO_ENVIADO', 'ENVIANDO', 'PENDIENTE_REENVIO')`;
+// `n.id_comprobante IS NOT NULL`: en el LEFT JOIN de `resumenes` un origen sin notas trae `n` todo nulo, y sin esta
+// condición el COALESCE de abajo lo contaba como una nota 'NO_ENVIADO' en curso (apagaba Anular y Nota de crédito).
+const SQL_EN_CURSO = `n.id_comprobante IS NOT NULL AND ${SQL_VIGENTE} AND COALESCE(n.estado_sunat, 'NO_ENVIADO') IN ('NO_ENVIADO', 'ENVIANDO', 'PENDIENTE_REENVIO')`;
 const MOTIVOS_TOTALES_SQL = `('01', '02', '06')`;
 
 const ESTADOS_ACEPTADO_SQL = `('ACEPTADO', 'ACEPTADO_OBS')`;

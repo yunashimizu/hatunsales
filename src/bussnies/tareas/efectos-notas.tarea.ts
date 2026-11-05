@@ -18,6 +18,10 @@ const DISPERSION_INICIAL_MS = 60_000;
  *    la aceptación y los efectos, o los efectos fallaron). Solo corre con fiscal_tareas_activas.
  * Varias réplicas: cada nota se reclama con UPDATE … WHERE efectos_aplicados = false, así nunca se
  * aplican dos veces; no se usan candados de sesión.
+ *
+ * También anula la venta y el comprobante cuando SUNAT acepta la baja (RA) o el resumen (RC) con que se
+ * anula SIN nota (evento con `operacion` 'baja' | 'resumen' y barrido de lotes aceptados): el mismo
+ * camino, con NotaCreditoBussnies.aplicarBajaAceptada, que también es idempotente.
  */
 @Injectable()
 export class EfectosNotasTarea implements OnModuleInit, OnApplicationBootstrap, OnModuleDestroy, OyenteEnvioFiscal {
@@ -56,12 +60,27 @@ export class EfectosNotasTarea implements OnModuleInit, OnApplicationBootstrap, 
 
   /** Oyente de envíos: nunca lanza (un fallo queda en el log y lo retoma el barrido). */
   async alCompletarEnvio(evento: EventoEnvioCompletado): Promise<void> {
+    if (evento.aceptado === true && (evento.operacion === 'baja' || evento.operacion === 'resumen')) {
+      await this.aplicarBaja(evento);
+      return;
+    }
     if (evento.aceptado !== true || evento.tipo_documento !== '07' || !evento.id_comprobante) return;
     try {
       await this.notas.aplicarEfectos(evento.id_comprobante);
     } catch (error) {
       this.log.error(
         `No se aplicaron los efectos de la nota ${evento.id_comprobante} (envío ${evento.id_envio}): ${this.mensajeDe(error)}. El barrido lo reintentará.`,
+      );
+    }
+  }
+
+  /** Una baja (RA) o un resumen (RC) aceptado: anula el comprobante y la venta. Nunca lanza (lo retoma el barrido). */
+  private async aplicarBaja(evento: EventoEnvioCompletado): Promise<void> {
+    try {
+      await this.notas.aplicarBajaAceptada(evento.id_envio);
+    } catch (error) {
+      this.log.error(
+        `No se aplicaron los efectos de la baja del envío ${evento.id_envio}: ${this.mensajeDe(error)}. El barrido lo reintentará.`,
       );
     }
   }
@@ -82,7 +101,19 @@ export class EfectosNotasTarea implements OnModuleInit, OnApplicationBootstrap, 
         }
       }
       if (aplicadas > 0) this.log.log(`${aplicadas} nota(s) de crédito aceptadas con efectos aplicados por el barrido.`);
-      return aplicadas;
+
+      // Bajas (RA) y resúmenes (RC) aceptados por SUNAT cuyo comprobante sigue sin anular.
+      const bajas = await this.notas.bajasConEfectosPendientes(EfectosNotasTarea.NOTAS_POR_VUELTA);
+      let anuladas = 0;
+      for (const idEnvio of bajas) {
+        try {
+          anuladas += await this.notas.aplicarBajaAceptada(idEnvio);
+        } catch (error) {
+          this.log.warn(`No se pudieron aplicar los efectos de la baja (envío ${idEnvio}): ${this.mensajeDe(error)}`);
+        }
+      }
+      if (anuladas > 0) this.log.log(`${anuladas} comprobante(s) dados de baja en SUNAT anulados por el barrido.`);
+      return aplicadas + anuladas;
     } catch (error) {
       this.log.warn(`El barrido de efectos de notas de crédito no pudo completar la vuelta: ${this.mensajeDe(error)}`);
       return 0;

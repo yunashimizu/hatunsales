@@ -115,6 +115,8 @@ export interface SnapshotConfigFiscal {
   readonly ambiente: AmbienteFiscal;
   readonly boletasModo: ModoBoletas;
   readonly envioEnLinea: boolean;
+  /** Con sunat_directo, la venta responde en cuanto el comprobante queda firmado y guardado; el envío a SUNAT sigue en segundo plano (por defecto apagado). */
+  readonly envioDiferido: boolean;
   readonly tareasActivas: boolean;
   readonly series: Readonly<SeriesFiscales>;
   readonly emisor: Readonly<EmisorFiscal>;
@@ -149,6 +151,7 @@ export const CLAVES_CONFIG_FISCAL = {
   ambiente: 'fiscal_ambiente',
   boletasModo: 'fiscal_boletas_modo',
   envioEnLinea: 'fiscal_envio_en_linea',
+  envioDiferido: 'fiscal_envio_diferido',
   tareasActivas: 'fiscal_tareas_activas',
   solUsuario: 'fiscal_sol_usuario',
   codigoProductoDefecto: 'fiscal_codigo_producto_defecto',

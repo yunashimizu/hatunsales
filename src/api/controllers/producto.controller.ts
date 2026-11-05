@@ -1,6 +1,6 @@
 import { Controller, Get, Post, Put, Delete, Body, Param, UseGuards, Query } from '@nestjs/common';
 import { ProductoBussnies } from '../../bussnies/Bussnies/producto.bussnies';
-import { CrearProductoRequest, ActualizarProductoRequest } from '../../models/model/producto.request';
+import { CrearProductoRequest, ActualizarProductoRequest, AsignarCodigosSunatRequest } from '../../models/model/producto.request';
 import { ProductoResponse } from '../../models/model/producto.response';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { OptionalJwtGuard } from '../../guards/optional-jwt.guard';
@@ -62,6 +62,23 @@ export class ProductoController {
   @Roles('admin', 'vendedor')
   generarCodigoInterno() {
     return this.service.generarCodigoInterno();
+  }
+
+  /** Productos activos sin código SUNAT. Antes de `:id`, o Nest tomaría «sin-codigo-sunat» como id. */
+  @Get('sin-codigo-sunat')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin', 'vendedor')
+  sinCodigoSunat(@Query('limite') limite?: string) {
+    const n = Number(limite);
+    return this.service.productosSinCodigoSunat(Number.isFinite(n) && n > 0 ? n : undefined);
+  }
+
+  /** Carga masiva del código SUNAT. Antes de `:id` para que `PUT :id` no lo capture. */
+  @Put('codigo-sunat')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin', 'vendedor')
+  asignarCodigoSunat(@Body() body: AsignarCodigosSunatRequest) {
+    return this.service.asignarCodigosSunat(body.asignaciones);
   }
 
   @Get(':id')

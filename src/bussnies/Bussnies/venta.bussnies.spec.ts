@@ -508,6 +508,23 @@ describe('VentaBussnies: comprobante de la venta (emisión directa)', () => {
       expect(venta.comprobante_pendiente).toBeUndefined();
     });
 
+    it('envío diferido: el comprobante en proceso NO es un error del mostrador (sin comprobante_error ni pendiente de emitir)', async () => {
+      const { servicio, comprobantes } = crear();
+      comprobantes.generar.mockResolvedValue({
+        id_comprobante: 5, aceptada_sunat: false, estado: 'pendiente', estado_sunat: 'ENVIANDO', ambiente_fiscal: 'produccion',
+        envio_diferido: true, sunat_description: 'BB01-00000005 quedó firmado y guardado; se está enviando a SUNAT.',
+      });
+
+      const venta = await servicio.registrar(
+        { id_tipo: 2, items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+
+      expect(venta.comprobante).toMatchObject({ id_comprobante: 5, estado: 'pendiente', envio_diferido: true });
+      expect(venta.comprobante_error).toBeUndefined();
+      expect(venta.comprobante_pendiente).toBeUndefined();
+    });
+
     it('si no se pudo emitir o SUNAT lo rechazó, la venta queda con el comprobante pendiente de emitir', async () => {
       const inactiva = crear();
       inactiva.comprobantes.generar.mockRejectedValue(new ServiceUnavailableException('la emisión electrónica no está activa'));

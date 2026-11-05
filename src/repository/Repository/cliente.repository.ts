@@ -21,10 +21,15 @@ export class ClienteRepository extends CrudRepository<Cliente> implements IClien
   }
 
   override async getAll(): Promise<Cliente[]> {
-    return this.clienteRepo.find({
-      relations: ['documento', 'usuario'],
-      order: { id_cliente: 'ASC' },
-    });
+    // La lista solo necesita saber si el cliente tiene cuenta (id_usuario): traer la fila completa de
+    // `usuarios` de cada cliente (correo, hash de clave…) era peso inútil en la consulta y en memoria.
+    return this.clienteRepo
+      .createQueryBuilder('c')
+      .leftJoinAndSelect('c.documento', 'documento')
+      .leftJoin('c.usuario', 'usuario')
+      .addSelect('usuario.id_usuario')
+      .orderBy('c.id_cliente', 'ASC')
+      .getMany();
   }
 
   override async getById(id: number): Promise<Cliente | null> {

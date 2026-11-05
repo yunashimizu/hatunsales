@@ -5,6 +5,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
@@ -67,7 +68,10 @@ import type {
   TotalesCpe,
 } from '../../sunat/nucleo/documento-fiscal.types';
 import { DocumentoCpeInvalidoError } from '../../sunat/nucleo/errores-nucleo';
+import { LotesFiscales } from '../../sunat/documentos/lotes.contrato';
+import type { LoteDeComprobante } from '../../sunat/documentos/lotes.contrato';
 import { fechaLima, horaLima } from '../../sunat/nucleo/fechas-fiscales';
+import { bajaDentroDePlazo } from '../../sunat/nucleo/ubl/constructor-comunicacion-baja';
 import { admiteGetStatusCdr, fechaLimiteEnvioIndividual } from '../../sunat/nucleo/reglas-envio';
 import {
   CATALOGO_10_MOTIVO_NOTA_DEBITO,
@@ -200,6 +204,8 @@ interface AccionesComprobante {
   puede_confirmar_manual: boolean;
   puede_nota_credito: boolean;
   puede_anular: boolean;
+  /** Anular dando de baja en SUNAT (RA o resumen), sin nota: aceptado, del ambiente vigente y dentro de los 7 días. */
+  puede_anular_sin_nota: boolean;
   vencido: boolean;
 }
 
@@ -246,6 +252,8 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     private readonly receptorBussnies: ReceptorBussnies,
     private readonly config: ConfiguracionRepository,
     private readonly emision: EmisionDirecta,
+    /** Bajas (RA) y resúmenes (RC) para anular sin nota; sin él `puede_anular_sin_nota` es siempre false. */
+    @Optional() private readonly lotes?: LotesFiscales,
   ) {}
 
   registrarGestorNotas(gestor: GestorNotasCredito): void {
@@ -370,7 +378,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       cadena_qr: registrado.preparado.preparado.cadenaQr,
       codigo_hash: registrado.preparado.preparado.digestValue,
       fecha_limite_envio: this.fechaLimite(tipo, serie, cuerpo.fechaEmision),
-    }, contexto.aviso);
+    }, contexto.aviso, true);
   }
 
   // ── Emitir nota de crédito (contrato EmisorNotasCredito) ─────
@@ -653,7 +661,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     const c = await this.repo.buscarPorId(id_comprobante);
     if (!c) throw new NotFoundException('Comprobante no encontrado');
 
-    const [fiscal, envio, notas, guias, configurado, modo, resumenes] = await Promise.all([
+    const [fiscal, envio, notas, guias, configurado, modo, resumenes, baja] = await Promise.all([
       this.repo.datosFiscales(id_comprobante),
       this.envioDe(c),
       this.opcional(() => this.repo.notasDe(id_comprobante), `notas de ${c.serie}-${c.numero}`, []),
@@ -661,6 +669,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       this.emisorConfigurado(),
       this.emision.modo(),
       this.resumenesNotas(esComprobantePrincipal(c.tipo?.id_tipo) ? [id_comprobante] : []),
+      this.bajaDe(c),
     ]);
     const emisor = await this.emisorDelDocumento(c, fiscal, configurado);
     const hoy = fechaLima();
@@ -785,6 +794,8 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       puede_confirmar_manual: acciones.puede_confirmar_manual,
       puede_nota_credito: acciones.puede_nota_credito,
       puede_anular: acciones.puede_anular,
+      puede_anular_sin_nota: acciones.puede_anular_sin_nota,
+      baja,
     };
   }
 
@@ -905,7 +916,18 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
    * Después del COMMIT: manda a SUNAT. Si la llamada falla el comprobante YA está guardado con su
    * envío en ENVIANDO (recuperable): se informa como pendiente para que nadie emita otro encima.
    */
-  private async enviarYResponder(registrado: Registrado, base: BaseRespuesta, aviso: string | null): Promise<ComprobanteResponse> {
+  private async enviarYResponder(
+    registrado: Registrado,
+    base: BaseRespuesta,
+    aviso: string | null,
+    diferible = false,
+  ): Promise<ComprobanteResponse> {
+    // Envío diferido (fiscal_envio_diferido): la venta no espera a SUNAT. Solo facturas y boletas: una nota de
+    // crédito anula la venta cuando SUNAT la acepta y su respuesta se necesita en el acto.
+    if (diferible) {
+      const modo = await this.emision.modo();
+      if (modo.activo && modo.diferido === true) return this.responderDiferido(registrado, base, aviso);
+    }
     try {
       const resultado = await this.emision.enviarRegistrado(registrado.idEnvio, registrado.preparado);
       return this.respuestaEmision(base, resultado, aviso);
@@ -924,6 +946,45 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
         aviso,
       };
     }
+  }
+
+  /**
+   * El comprobante ya está firmado y guardado, con su envío en ENVIANDO. Se lanza el primer intento sin
+   * esperarlo y se responde «en proceso». Si el proceso cae o SUNAT tarda, la tarea de emisión retoma el envío
+   * (ENVIANDO con el reclamo vencido, o PENDIENTE_REENVIO) con el mismo ZIP: nunca se emite otro.
+   */
+  private responderDiferido(registrado: Registrado, base: BaseRespuesta, aviso: string | null): ComprobanteResponse {
+    const numero = this.formatearNumero(base.serie, base.numero);
+    void this.emision
+      .enviarRegistrado(registrado.idEnvio, registrado.preparado)
+      .catch((error) =>
+        this.logger.error(`${numero}: el envío diferido a SUNAT (envío ${registrado.idEnvio}) no terminó: ${this.mensajeDe(error)}. La tarea de emisión lo retomará.`),
+      );
+    const empaquetado = registrado.preparado.preparado;
+    const respuesta = this.respuestaEmision(
+      base,
+      {
+        ambiente: registrado.preparado.ambiente,
+        id_envio: registrado.idEnvio,
+        nombre_base: empaquetado.nombreBase,
+        estado: 'ENVIANDO',
+        aceptado: false,
+        codigo: null,
+        mensaje: `${numero} quedó firmado y guardado; se está enviando a SUNAT.`,
+        observaciones: [],
+        digest: empaquetado.digestValue,
+        cadena_qr: empaquetado.cadenaQr,
+        accion: 'NINGUNA',
+        archivos: ['xml_original', 'xml_firmado', 'zip'],
+        id_comprobante: registrado.idComprobante,
+        serie: base.serie,
+        numero: base.numero,
+        fecha_limite_envio: base.fecha_limite_envio,
+      },
+      aviso,
+    );
+    // No es un error: el mostrador no debe verlo como «comprobante pendiente de revisar».
+    return { ...respuesta, error: undefined, envio_diferido: true };
   }
 
   private async exigirVentaSinComprobante(idVenta: number, consultor?: EntityManager): Promise<void> {
@@ -1588,18 +1649,38 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       && c.ambiente_fiscal === modo.ambiente;
     const conSaldo = resumen === null || resumen.saldo > 0;
     const notaEnCurso = resumen?.nota_en_curso === true;
+    // Mientras SUNAT no responde una baja o un resumen, no se anula ni se emite una nota (el estado lo marca el lote).
+    const bajaEnCurso = estadoSunat === 'BAJA_PENDIENTE';
+    // La baja solo va sobre un comprobante sin notas vigentes.
+    const sinNotasVigentes = resumen === null || resumen.saldo + 0.005 >= Number(c.total ?? 0);
 
     return {
       puede_reintentar: directo && !aceptado && !vencido && ((pendienteReenvio && !recuperar) || incierto),
       puede_recuperar_cdr: directo && !aceptado && consultaCdr && (pendienteReenvio || incierto || recuperar),
       puede_confirmar_manual: directo && !aceptado && recuperar,
       // Se emite en el acto: hace falta la emisión activa, saldo por acreditar y ninguna otra nota en envío.
-      puede_nota_credito: admiteNota && modo.activo && conSaldo && !notaEnCurso,
+      puede_nota_credito: admiteNota && modo.activo && conSaldo && !notaEnCurso && !bajaEnCurso,
       // D9: también sin venta (nota de crédito o anulación en el sistema), salvo con una nota en envío (el saldo
       // puede cambiar) o si hace falta una nota de crédito y la emisión no está activa.
-      puede_anular: !c.anulado && esComprobantePrincipal(idTipo) && !notaEnCurso && !(admiteNota && conSaldo && !modo.activo),
+      puede_anular: !c.anulado && esComprobantePrincipal(idTipo) && !notaEnCurso && !bajaEnCurso && !(admiteNota && conSaldo && !modo.activo),
+      // D9 alternativo: baja en SUNAT sin nota, hasta el 7.º día desde la emisión (el plazo lo vuelve a validar el lote).
+      puede_anular_sin_nota:
+        !!this.lotes
+        && admiteNota
+        && !notaEnCurso
+        && !bajaEnCurso
+        && modo.activo
+        && sinNotasVigentes
+        && bajaDentroDePlazo(this.fechaIsoOpcional(c.fecha_de_emision) ?? '', hoy),
       vencido,
     };
+  }
+
+  /** Baja o resumen vigente (en curso o aceptado) del comprobante; solo se pregunta si su estado lo sugiere. */
+  private async bajaDe(c: Comprobante): Promise<LoteDeComprobante | null> {
+    const lotes = this.lotes;
+    if (!lotes || c.proveedor_fiscal !== 'sunat_directo' || !['BAJA_PENDIENTE', 'ANULADO'].includes(c.estado_sunat ?? '')) return null;
+    return this.opcional(() => lotes.estadoDeComprobante(c.id_comprobante), `baja de ${c.serie}-${c.numero}`, null);
   }
 
   /** Saldo y notas en curso por comprobante; si no se pueden leer, las acciones usan la regla básica. */
@@ -1909,6 +1990,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       puede_confirmar_manual: acciones.puede_confirmar_manual,
       puede_nota_credito: acciones.puede_nota_credito,
       puede_anular: acciones.puede_anular,
+      puede_anular_sin_nota: acciones.puede_anular_sin_nota,
     };
   }
 }

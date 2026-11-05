@@ -111,6 +111,8 @@ export interface HechosPreparacion {
   certificados: Record<AmbienteFiscal, CertificadoParaChecklist | null>;
   claveSol: DiagnosticoSecreto;
   credencialesGre: DiagnosticoSecreto;
+  /** Productos activos sin código SUNAT; null si no se pudo consultar. Opcional: solo alimenta una advertencia. */
+  productosSinCodigoSunat?: number | null;
 }
 
 const BITS_MINIMOS = 1024;
@@ -444,6 +446,15 @@ function advertencias(h: HechosPreparacion): string[] {
   if (h.snapshot.proveedor === 'sunat_directo' && h.snapshot.ambiente !== 'produccion') {
     lista.push(
       'La emisión de producción está elegida pero el ambiente es BETA: solo se emiten pruebas de SUNAT BETA y únicamente si la emisión de prueba del POS está activa.',
+    );
+  }
+  const sinCodigo = h.productosSinCodigoSunat;
+  if (typeof sinCodigo === 'number' && sinCodigo > 0) {
+    const codigoDefecto = h.snapshot.codigoProductoDefecto;
+    lista.push(
+      codigoDefecto === null
+        ? `${sinCodigo} producto(s) activo(s) no tienen código de producto SUNAT y no hay código por defecto: desde el 01/01/2027 sus comprobantes no se emitirán. Cárguelo en Productos o fije un código por defecto en Operación y series.`
+        : `${sinCodigo} producto(s) activo(s) usan el código SUNAT por defecto (${codigoDefecto}); conviene cargar el código real de cada uno.`,
     );
   }
   return lista;

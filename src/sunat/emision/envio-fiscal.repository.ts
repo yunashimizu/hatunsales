@@ -39,7 +39,7 @@ export interface RegistroEnvioNuevo {
   fechaLimiteEnvio: string;
 }
 
-interface ArchivoNuevo {
+export interface ArchivoNuevo {
   tipo: TipoArchivoEnvio;
   nombre: string;
   mime: string;
@@ -170,6 +170,12 @@ function restriccionUnica(error: unknown): string | null {
 @Injectable()
 export class EnvioFiscalRepository {
   private readonly esquemaHora = new CacheTtl<boolean>((existe) => (existe ? 10 * 60_000 : 60_000));
+  /**
+   * Primer número libre por serie en BETA: recorre fiscal_envios (sin índice por serie) y se pide en cada vista previa
+   * del POS. Un valor atrasado solo puede ser MÁS BAJO que el real y el número verdadero se reserva siempre dentro de
+   * la transacción (con reintento si SUNAT ya lo tenía), así que 5 s de caché no pueden repetir un número.
+   */
+  private readonly libresBeta = new CacheTtl<Record<string, number>>(5_000);
 
   constructor(
     @InjectDataSource('pgConnection') private readonly bd: DataSource,
@@ -554,6 +560,11 @@ export class EnvioFiscalRepository {
    * admite repetirlo). Solo trae las series que tienen envíos.
    */
   async primerosLibresBeta(series: readonly string[]): Promise<Record<string, number>> {
+    const copia = await this.libresBeta.obtener([...series].sort().join(','), () => this.leerPrimerosLibresBeta(series));
+    return { ...copia };
+  }
+
+  private async leerPrimerosLibresBeta(series: readonly string[]): Promise<Record<string, number>> {
     const filas = filasDe<{ serie: string; ultimo: string | number }>(
       await this.bd.query(
         `SELECT split_part(t.identificador, '-', 3) AS serie, MAX(split_part(t.identificador, '-', 4)::bigint) AS ultimo
@@ -641,8 +652,11 @@ export class EnvioFiscalRepository {
     }
   }
 
-  /** Todos los archivos del envío en UNA sentencia (menos viajes a la BD en la venta). */
-  private async insertarArchivos(
+  /**
+   * Todos los archivos del envío en UNA sentencia (menos viajes a la BD en la venta). Pública: la
+   * comparten los lotes fiscales (RA y RC), que guardan sus artefactos igual que un comprobante.
+   */
+  async insertarArchivos(
     ejecutor: EjecutorSql,
     idEnvio: number,
     idComprobante: number | null,

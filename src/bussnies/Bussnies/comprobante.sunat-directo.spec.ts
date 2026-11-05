@@ -209,6 +209,72 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
     });
   });
 
+  describe('envío diferido (fiscal_envio_diferido)', () => {
+    it('con el modo diferido responde en proceso sin esperar a SUNAT y lanza el envío después del COMMIT', async () => {
+      const bd = crearBdFalsa({ maximos: { BB01: [4] } });
+      const { servicio, emision } = crearMotor({ bd });
+      emision.modo.mockResolvedValue({ activo: true, ambiente: 'beta', diferido: true });
+      // SUNAT que nunca contesta: si generar() la esperara, la prueba no terminaría.
+      emision.enviarRegistrado.mockReturnValue(new Promise(() => undefined));
+
+      const respuesta = await servicio.generar(boleta(), 3);
+
+      expect(bd.registro).toContain('COMMIT');
+      expect(emision.enviarRegistrado).toHaveBeenCalledTimes(1);
+      expect(emision.enviarRegistrado.mock.calls[0][0]).toBe(501);
+      expect(respuesta).toMatchObject({
+        id_comprobante: 900,
+        serie: 'BB01',
+        numero: 5,
+        estado: 'pendiente',
+        estado_sunat: 'ENVIANDO',
+        aceptada_sunat: false,
+        id_envio_ultimo: 501,
+        cadena_qr: 'QR-LOCAL',
+        codigo_hash: 'HASH-LOCAL',
+        envio_diferido: true,
+      });
+      // No es un error: el mostrador no debe avisar «comprobante pendiente de revisar».
+      expect(respuesta.error).toBeUndefined();
+    });
+
+    it('si el envío en segundo plano falla, la respuesta ya salió bien y el fallo queda en el log (la tarea lo retoma)', async () => {
+      const bd = crearBdFalsa({ maximos: { BB01: [0] } });
+      const { servicio, emision } = crearMotor({ bd });
+      emision.modo.mockResolvedValue({ activo: true, ambiente: 'beta', diferido: true });
+      emision.enviarRegistrado.mockRejectedValue(new Error('SUNAT no respondió'));
+
+      const respuesta = await servicio.generar(boleta());
+      await new Promise((resolver) => setImmediate(resolver));
+
+      expect(respuesta).toMatchObject({ estado: 'pendiente', envio_diferido: true });
+      expect(respuesta.error).toBeUndefined();
+    });
+
+    it('sin el modo diferido (o con diferido apagado) el comportamiento es el de siempre: espera a SUNAT', async () => {
+      for (const modo of [{ activo: true, ambiente: 'beta' }, { activo: true, ambiente: 'beta', diferido: false }]) {
+        const bd = crearBdFalsa({ maximos: { BB01: [4] } });
+        const { servicio, emision } = crearMotor({ bd });
+        emision.modo.mockResolvedValue(modo);
+
+        const respuesta = await servicio.generar(boleta());
+
+        expect(respuesta.envio_diferido).toBeUndefined();
+        expect(respuesta.aceptada_sunat).toBe(true);
+        expect(bd.registro).toContain('enviar:501');
+      }
+    });
+
+    it('la emisión de prueba o inactiva nunca difiere: con la emisión apagada no se prepara nada', async () => {
+      const bd = crearBdFalsa({ maximos: { BB01: [4] } });
+      const { servicio, emision } = crearMotor({ bd });
+      emision.modo.mockResolvedValue({ activo: false, ambiente: 'beta', codigo: 'FISCAL_BETA_POS_APAGADO', motivo: 'apagada' });
+
+      await expect(servicio.generar(boleta())).rejects.toBeDefined();
+      expect(emision.enviarRegistrado).not.toHaveBeenCalled();
+    });
+  });
+
   describe('numeración (PLAN D2)', () => {
     it('ignora serie y número del cliente: serie del contexto y siguiente número de la serie', async () => {
       const { servicio, emision } = crearMotor({ bd: crearBdFalsa({ maximos: { BB01: [11] } }) });

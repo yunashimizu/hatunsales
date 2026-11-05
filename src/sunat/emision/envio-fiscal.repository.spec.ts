@@ -338,6 +338,20 @@ describe('EnvioFiscalRepository: reclamos, cierre y consultas', () => {
     expect(bd.llamadas[0].sql).toMatch(/NOT IN \('ACEPTADO', 'ACEPTADO_OBS', 'RECHAZADO', 'ANULADO', 'BAJA_PENDIENTE'\)/);
   });
 
+  it('BETA: el primer número libre se recuerda unos segundos (la vista previa lo pide en cada cambio del carrito)', async () => {
+    const { repositorio, bd } = crear([[/GROUP BY 1/, [{ serie: 'BB01', ultimo: 4 }]]]);
+
+    const primero = await repositorio.primerosLibresBeta(['BB01', 'FB01']);
+    primero.BB01 = 999; // no debe contaminar lo recordado
+    const segundo = await repositorio.primerosLibresBeta(['FB01', 'BB01']);
+
+    expect(segundo).toEqual({ BB01: 5 });
+    expect(bd.llamadas.filter((l) => /GROUP BY 1/.test(l.sql))).toHaveLength(1);
+    // Otras series son otra consulta.
+    await repositorio.primerosLibresBeta(['BB01']);
+    expect(bd.llamadas.filter((l) => /GROUP BY 1/.test(l.sql))).toHaveLength(2);
+  });
+
   it('BETA: primer número libre por serie según lo ya enviado (las pruebas del panel cuentan)', async () => {
     const { repositorio, bd } = crear([[/GROUP BY 1/, [{ serie: 'FB01', ultimo: '3' }, { serie: 'BB01', ultimo: 4 }]]]);
     expect(await repositorio.primerosLibresBeta(['FB01', 'BB01', 'FBC1'])).toEqual({ FB01: 4, BB01: 5 });

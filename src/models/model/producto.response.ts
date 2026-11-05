@@ -9,6 +9,8 @@ export class ProductoResponse {
   precio_venta?: number;
   descuento?: number;
   unidad_medida?: string;
+  /** Código de producto SUNAT (catálogo 25, 8 dígitos); null si aún no se cargó. */
+  codigo_sunat?: string | null;
   id_proveedor?: number;
   id_categoria?: number;
   categoria?: string;

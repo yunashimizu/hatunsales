@@ -60,3 +60,22 @@ describe('ProductoRepository.siguienteCodigoInterno', () => {
     await expect(conQuery(jest.fn().mockResolvedValue([{ n: null }])).siguienteCodigoInterno()).rejects.toThrow();
   });
 });
+
+describe('ProductoRepository.asignarCodigoSunat', () => {
+  it('lee los ids del par [filas, cantidad] que entrega el driver de PostgreSQL en UPDATE ... RETURNING', async () => {
+    const productoRepo = { query: jest.fn().mockResolvedValue([[{ id_producto: 1 }, { id_producto: 3 }], 2]) };
+    const repo = new ProductoRepository(productoRepo as never);
+
+    await expect(repo.asignarCodigoSunat([1, 3, 99], '72153600')).resolves.toEqual([1, 3]);
+    expect(productoRepo.query).toHaveBeenCalledWith(expect.stringContaining('RETURNING id_producto'), [[1, 3, 99], '72153600']);
+  });
+
+  it('también acepta una lista simple de filas y no consulta con una lista vacía', async () => {
+    const productoRepo = { query: jest.fn().mockResolvedValue([{ id_producto: 5 }]) };
+    const repo = new ProductoRepository(productoRepo as never);
+
+    await expect(repo.asignarCodigoSunat([5], '72153600')).resolves.toEqual([5]);
+    await expect(repo.asignarCodigoSunat([], '72153600')).resolves.toEqual([]);
+    expect(productoRepo.query).toHaveBeenCalledTimes(1);
+  });
+});

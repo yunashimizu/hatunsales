@@ -330,7 +330,7 @@ export class EmisionDirectaService implements EmisionDirecta {
         `La emisión está detenida: ${bloqueo.motivo} Corrija la causa y reanúdela desde Facturación SUNAT; mientras tanto las ventas se registran sin comprobante.`,
       );
     }
-    return { activo: true, ambiente };
+    return { activo: true, ambiente, diferido: snapshot.envioDiferido === true };
   }
 
   /** D1: el certificado debe ser del emisor; si su RUC no se puede leer, en producción vale la confirmación del administrador. */

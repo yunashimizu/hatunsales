@@ -5,6 +5,7 @@ import {
   Logger,
   NotFoundException,
   OnModuleInit,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
@@ -21,6 +22,9 @@ import {
 } from '../../repository/Repository/nota-credito.repository';
 import { VentaRepository } from '../../repository/Repository/venta.repository';
 import { FiscalAuditoriaRepository } from '../../sunat/auditoria/fiscal-auditoria.repository';
+import { aHttp, FiscalConfigError } from '../../sunat/config/fiscal-errores';
+import { LotesFiscales } from '../../sunat/documentos/lotes.contrato';
+import type { LoteDeComprobante, ResultadoLote } from '../../sunat/documentos/lotes.contrato';
 import { EmisionDirecta } from '../../sunat/emision/emision.contrato';
 import type { ModoEmision } from '../../sunat/emision/emision.contrato';
 import { admiteGetStatusCdr } from '../../sunat/nucleo/reglas-envio';
@@ -46,6 +50,7 @@ import type {
 import type {
   AnulacionDocumentoResponse,
   AnulacionVentaResponse,
+  BajaAnulacionResponse,
   ConsultaAnulacionResponse,
   ContextoNotaCreditoResponse,
   EstadoAnulacion,
@@ -94,6 +99,18 @@ const ESTADOS_NOTA_EN_CURSO: ReadonlySet<string> = new Set(['NO_ENVIADO', 'ENVIA
 const ESTADOS_SIN_VALIDEZ: ReadonlySet<string> = new Set(['RECHAZADO', 'ERROR_CONFIG', 'ANULADO']);
 /** getStatusCdr: «El comprobante de pago electrónico no existe» (SUNAT no lo recibió). */
 const CODIGO_CONSULTA_NO_EXISTE = '0011';
+/** Largo máximo del motivo de una comunicación de baja (RA); lo que pase de ahí se recorta. */
+const LONGITUD_MOTIVO_BAJA = 100;
+/** Estados de un lote (RA o RC) que SUNAT no tomó: el comprobante vuelve a su estado anterior. */
+const ESTADOS_LOTE_SIN_EFECTO: ReadonlySet<string> = new Set(['RECHAZADO', 'EXCEPCION', 'ERROR_CONFIG']);
+/** FiscalConfigError del lote que el negocio responde como 409 (el comprobante no admite la baja ahora). */
+const CODIGOS_BAJA_CONFLICTO: ReadonlySet<string> = new Set([
+  'FISCAL_BAJA_FUERA_DE_PLAZO',
+  'FISCAL_DOC_NO_ENCONTRADO',
+  'FISCAL_ENVIO_EN_CURSO',
+  'FISCAL_DOC_OTRO_PROVEEDOR',
+  'FISCAL_AMBIENTE_CAMBIO',
+]);
 
 const DESCRIPCION_RECARGO_DEVOLUCION = `${DESCRIPCION_RECARGO_TARJETA} (devolucion proporcional)`;
 const CODIGO_AJUSTE_NOTA = 'AJUSTE-NC';
@@ -554,6 +571,8 @@ interface ResultadoAnulacion {
   cxc_cerradas: number;
   venta_anulada: boolean;
   avisos: string[];
+  /** Solo si la anulación fue por baja en SUNAT (`sin_nota`). */
+  baja?: BajaAnulacionResponse;
 }
 
 /** Comprobante de la venta que no hay que anular en SUNAT: se anula en el sistema junto con la venta. */
@@ -598,6 +617,8 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     private readonly emisor: EmisorNotasCredito,
     private readonly emision: EmisionDirecta,
     private readonly auditoria: FiscalAuditoriaRepository,
+    /** Baja (RA) y resumen (RC) para anular sin nota; sin él, `sin_nota` responde 409. */
+    @Optional() private readonly lotes?: LotesFiscales,
   ) {}
 
   /** El motor de comprobantes delega aquí la anulación desde Documentos y el saldo de cada comprobante. */
@@ -772,6 +793,51 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     return this.repo.notasConEfectosPendientes(limite);
   }
 
+  // ── Efectos al aceptarse una baja o un resumen (RA / RC) ─────
+
+  /**
+   * Aplica los efectos de una baja (RA) o resumen (RC) que SUNAT aceptó: anula la venta (stock, deuda) y el
+   * comprobante, reutilizando la misma anulación en el sistema de las ramas a/b. Idempotente: un comprobante
+   * ya anulado se salta y una venta ya anulada responde `ya_anulada`, así que el oyente de envíos, el barrido
+   * y la consulta pueden llamarlo las veces que haga falta. Devuelve cuántos comprobantes anuló ahora.
+   */
+  async aplicarBajaAceptada(idEnvio: number): Promise<number> {
+    const lotes = this.lotes;
+    if (!lotes) return 0;
+    const lote = await lotes.obtener(idEnvio);
+    if (!lote || !ESTADOS_ACEPTADO.has(lote.estado)) return 0;
+    let aplicados = 0;
+    for (const linea of lote.lineas) {
+      if (linea.estado !== 'ACEPTADO' || linea.condicion !== 3) continue;
+      const origen = await this.repo.origen(linea.id_comprobante);
+      if (!origen || origen.anulado) continue;
+      const venta = origen.id_venta ? await this.repo.ventaDeNota(origen.id_venta) : null;
+      const ventaActiva = venta && venta.estado.trim().toLowerCase() !== 'anulada' ? venta : null;
+      // Con la venta anulada no queda vigente ninguno de sus comprobantes: el dado de baja y los que nunca valieron.
+      // Uno que SUNAT sí tiene aceptado (o con su propia baja en curso) no se toca aquí: se anula por su propio camino.
+      const otros = ventaActiva
+        ? (await this.repo.principalesDeVenta(ventaActiva.id_venta)).filter(
+            (c) =>
+              !c.anulado
+              && c.id_comprobante !== origen.id_comprobante
+              && !(c.aceptada_sunat && ESTADOS_ACEPTADO.has(c.estado_sunat ?? ''))
+              && c.estado_sunat !== 'BAJA_PENDIENTE',
+          )
+        : [];
+      await this.anularEnSistema([origen, ...otros], ventaActiva, { motivo: `Baja aceptada por SUNAT (${lote.identificador})` }, [], [], null);
+      aplicados += 1;
+      this.logger.log(`Baja ${lote.identificador} aceptada por SUNAT: ${this.numeroDe(origen)} anulado${ventaActiva ? ` y venta ${ventaActiva.id_venta} anulada` : ''}.`);
+    }
+    return aplicados;
+  }
+
+  /** Bajas o resúmenes aceptados cuyo comprobante sigue sin anular (las recorre el barrido): ids de envío sin repetir. */
+  async bajasConEfectosPendientes(limite: number): Promise<number[]> {
+    if (!this.lotes) return [];
+    const lineas = await this.lotes.lineasAceptadasSinAnular(limite);
+    return [...new Set(lineas.map((l) => l.id_envio))];
+  }
+
   /** GestorNotasCredito: saldo acreditable y notas en curso por comprobante (acciones de Documentos). */
   resumenes(idsOrigen: number[]): Promise<Map<number, ResumenNotasOrigen>> {
     return this.repo.resumenes(idsOrigen);
@@ -801,6 +867,7 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       id_venta: idVenta,
       anulada: resultado.estado === 'anulada',
       ...(resultado.nota ? { nota: resultado.nota } : {}),
+      ...(resultado.baja ? { baja: resultado.baja } : {}),
       comprobantes_anulados: resultado.comprobantes_anulados,
       stock_devuelto: resultado.stock_devuelto,
       cxc_cerradas: resultado.cxc_cerradas,
@@ -826,7 +893,13 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       return { ...base, estado: 'anulada', aceptada_sunat: true, sunat_description: aviso, venta_estado: venta?.estado ?? null, avisos: [aviso] };
     }
 
-    const opciones = { motivo: dto.motivo, confirmar_verificado_sol: dto.confirmar_verificado_sol, existe_en_sunat: dto.existe_en_sunat, nota: dto.nota };
+    const opciones = {
+      motivo: dto.motivo,
+      sin_nota: dto.sin_nota,
+      confirmar_verificado_sol: dto.confirmar_verificado_sol,
+      existe_en_sunat: dto.existe_en_sunat,
+      nota: dto.nota,
+    };
     // Con la venta activa se anula la venta completa; si ya estaba anulada (anulación antigua), solo el comprobante.
     const ventaActiva = venta && venta.estado.trim().toLowerCase() !== 'anulada' ? venta : null;
     const resultado = ventaActiva
@@ -846,6 +919,7 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       sunat_description: resultado.avisos[0],
       venta_estado: ventaEstado,
       ...(resultado.nota ? { nota: resultado.nota } : {}),
+      ...(resultado.baja ? { baja: resultado.baja } : {}),
       avisos: resultado.avisos,
     };
   }
@@ -867,10 +941,15 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       .reverse()
       .find((n) => esNotaAnuladora(n) && (esNotaVigente(n) || n.estado_sunat === 'RECHAZADO'));
     if (comprobante.anulado) {
+      const deBaja = anuladora ? null : await this.consultaDeBaja(comprobante, base, numero);
+      if (deBaja) return deBaja;
       const aviso = anuladora ? `${numero} está anulado con la nota ${this.numero(anuladora.serie, anuladora.numero)}.` : `${numero} está anulado.`;
       return { ...base, estado: 'anulada', aceptada_sunat: true, sunat_description: aviso, ...(anuladora ? { nota: this.notaDeOrigenARespuesta(anuladora) } : {}), avisos: [aviso] };
     }
     if (!anuladora) {
+      // Anulación por baja en SUNAT (RA o resumen), sin nota: en curso, o aceptada con sus efectos pendientes.
+      const deBaja = await this.consultaDeBaja(comprobante, base, numero);
+      if (deBaja) return deBaja;
       const aviso = `${numero} no tiene una anulación registrada.`;
       return { ...base, estado: 'sin_anulacion', aceptada_sunat: false, sunat_description: aviso, avisos: [aviso] };
     }
@@ -913,6 +992,10 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     if (!modo.activo && modo.codigo === CODIGO_LECTURA_ERROR && comprobantes.some((c) => c.proveedor_fiscal === 'sunat_directo')) {
       throw new ServiceUnavailableException({ message: `No se anuló nada. ${motivoEmisionInactiva(modo)}`, codigo: modo.codigo });
     }
+    // Con una baja o un resumen en SUNAT todavía sin respuesta no se anula ni se emite una nota: se informa su estado.
+    const enBaja = comprobantes.find((c) => c.estado_sunat === 'BAJA_PENDIENTE');
+    if (enBaja) return this.bajaEnCurso(enBaja, venta);
+
     const descartes: DescarteEnvio[] = [];
     const aceptados: CabeceraComprobante[] = [];
     const sinValidez: SinValidez[] = [];
@@ -938,6 +1021,9 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
         message: `La venta tiene más de un comprobante aceptado por SUNAT (${aceptados.map((c) => this.numeroDe(c)).join(', ')}): anúlelos uno por uno desde Documentos.`,
         codigo: 'ANULACION_VARIOS_ACEPTADOS',
       });
+    }
+    if (aceptados.length === 1 && dto.sin_nota === true) {
+      return this.anularConBaja(aceptados[0], venta, dto, idUsuario, sinValidez, descartes);
     }
     if (aceptados.length === 1) {
       return this.anularConNota(aceptados[0], venta, dto, idUsuario, sinValidez, descartes);
@@ -1104,6 +1190,156 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       venta_anulada: false,
       avisos: [`SUNAT no aceptó la nota ${nota.numero_formateado}${respuesta.error ? ` (${respuesta.error})` : ''}: ${venta ? `la venta ${venta.id_venta} sigue activa` : `${numero} sigue vigente`}. Corrija el problema y vuelva a anular.`],
     };
+  }
+
+  /**
+   * Rama c alternativa (`sin_nota`): el comprobante aceptado se anula con una comunicación de baja (factura) o
+   * un resumen diario con la condición 3 (boleta), sin nota de crédito, hasta 7 días después de emitido. El
+   * lote se envía en el acto; la venta y el comprobante se anulan recién cuando SUNAT lo acepte (normalmente
+   * en minutos: el ticket se consulta desde la tarea), igual que con la nota.
+   */
+  private async anularConBaja(
+    aceptado: CabeceraComprobante,
+    venta: VentaDeNota | null,
+    dto: AnularVentaRequest,
+    idUsuario: number | null,
+    otros: SinValidez[],
+    descartes: DescarteEnvio[],
+  ): Promise<ResultadoAnulacion> {
+    const numero = this.numeroDe(aceptado);
+    const lotes = this.lotes;
+    if (!lotes) {
+      throw new ConflictException({ message: 'La baja en SUNAT no está disponible: anule con una nota de crédito.', codigo: 'BAJA_NO_DISPONIBLE' });
+    }
+    if (descartes.length) {
+      throw new ConflictException({
+        message: `La venta tiene el comprobante aceptado ${numero} y otro cuyo envío quedó sin confirmar: anúlelos por separado desde Documentos.`,
+        codigo: 'ANULACION_MIXTA',
+      });
+    }
+    // Una nota en envío (o ya vigente) cambia lo que SUNAT tiene del comprobante: la baja solo va sobre uno sin notas.
+    const resumen = (await this.repo.resumenes([aceptado.id_comprobante])).get(aceptado.id_comprobante);
+    if (resumen?.nota_en_curso) {
+      throw new ConflictException({
+        message: `${numero} tiene una nota de crédito que todavía se está enviando a SUNAT: espere su resultado.`,
+        codigo: 'NOTA_CREDITO_EN_CURSO',
+        id_comprobante: aceptado.id_comprobante,
+      });
+    }
+    if (resumen && resumen.saldo + 0.005 < aceptado.total) {
+      throw new ConflictException({
+        message: `${numero} ya tiene notas de crédito vigentes: no se da de baja, anúlelo con una nota de crédito.`,
+        codigo: 'BAJA_CON_NOTAS',
+        id_comprobante: aceptado.id_comprobante,
+      });
+    }
+
+    const motivo = this.limpiar(dto.motivo).slice(0, LONGITUD_MOTIVO_BAJA) || 'Anulación';
+    let lote: ResultadoLote;
+    try {
+      lote = await lotes.solicitarAnulacion({ id_comprobante: aceptado.id_comprobante, motivo, idUsuario });
+    } catch (error) {
+      if (FiscalConfigError.es(error) && CODIGOS_BAJA_CONFLICTO.has(error.codigo)) {
+        throw new ConflictException({ message: error.message, codigo: error.codigo });
+      }
+      throw aHttp(error);
+    }
+
+    const queSeAnula = venta ? `la venta ${venta.id_venta}` : numero;
+    const baja = this.bajaDe(lote);
+    const vacio = { comprobantes_anulados: [], stock_devuelto: false, cxc_cerradas: 0, venta_anulada: false, baja };
+    if (lote.aceptado && (await this.efectosDeBajaSinFallar(lote.id_envio, numero))) {
+      return {
+        ...vacio,
+        estado: 'anulada',
+        venta_anulada: !!venta,
+        avisos: [
+          `SUNAT aceptó la baja de ${numero} (${lote.identificador}): ${venta ? `la venta ${venta.id_venta} quedó anulada` : `${numero} quedó anulado`}.`,
+          ...otros.map((o) => this.avisoSinValidez(o, true)),
+          ...this.avisoDevolucionDinero(venta, true),
+        ],
+      };
+    }
+    if (ESTADOS_LOTE_SIN_EFECTO.has(lote.estado)) {
+      return {
+        ...vacio,
+        estado: 'anulacion_rechazada',
+        avisos: [`SUNAT no aceptó la baja de ${numero}${lote.mensaje ? ` (${lote.mensaje})` : ''}: ${venta ? `la venta ${venta.id_venta} sigue activa` : `${numero} sigue vigente`}. Corrija el problema y vuelva a anular.`],
+      };
+    }
+    return {
+      ...vacio,
+      estado: 'anulacion_en_curso',
+      avisos: [
+        this.avisoDeBaja(numero, queSeAnula, lote.identificador, lote.estado, lote.ticket),
+        ...otros.map((o) => this.avisoSinValidez(o, false)),
+        ...this.avisoDevolucionDinero(venta, true),
+      ],
+    };
+  }
+
+  /** El comprobante ya tiene una baja o un resumen en SUNAT sin resolver: se informa su estado, sin anular ni emitir nada. */
+  private async bajaEnCurso(c: CabeceraComprobante, venta: VentaDeNota | null): Promise<ResultadoAnulacion> {
+    const numero = this.numeroDe(c);
+    const lote = this.lotes ? await this.lotes.estadoDeComprobante(c.id_comprobante) : null;
+    if (!lote) {
+      throw new ConflictException({
+        message: `${numero} tiene una baja en SUNAT sin resolver: espere su resultado antes de anular.`,
+        codigo: 'BAJA_EN_CURSO',
+        id_comprobante: c.id_comprobante,
+      });
+    }
+    return {
+      estado: 'anulacion_en_curso',
+      comprobantes_anulados: [],
+      stock_devuelto: false,
+      cxc_cerradas: 0,
+      venta_anulada: false,
+      avisos: [this.avisoDeBaja(numero, venta ? `la venta ${venta.id_venta}` : numero, lote.identificador, lote.estado, lote.sunat_ticket)],
+      baja: this.bajaDe(lote),
+    };
+  }
+
+  /**
+   * consultarAnulacion de un comprobante sin nota anuladora: si tiene una baja o un resumen en SUNAT lo informa
+   * (en curso, o aceptado: aplica los efectos que hayan quedado pendientes). null si no tiene ninguno.
+   */
+  private async consultaDeBaja(
+    comprobante: CabeceraComprobante,
+    base: { id_comprobante: number; numero_formateado: string; numero: number },
+    numero: string,
+  ): Promise<ConsultaAnulacionResponse | null> {
+    if (!this.lotes) return null;
+    let lote: LoteDeComprobante | null;
+    try {
+      lote = await this.lotes.estadoDeComprobante(comprobante.id_comprobante);
+    } catch (error) {
+      this.logger.warn(`No se pudo leer la baja de ${numero}: ${this.mensajeDe(error)}`);
+      return null;
+    }
+    if (!lote) return null;
+    const baja = this.bajaDe(lote);
+    if (ESTADOS_ACEPTADO.has(lote.estado)) {
+      if (comprobante.anulado || (await this.efectosDeBajaSinFallar(lote.id_envio, numero))) {
+        const aviso = `${numero} se dio de baja en SUNAT (${lote.identificador}): quedó anulado.`;
+        return { ...base, estado: 'anulada', aceptada_sunat: true, sunat_description: aviso, avisos: [aviso], baja };
+      }
+      const aviso = `SUNAT aceptó la baja ${lote.identificador}, pero la venta y el comprobante todavía no se actualizaron: se reintentará en unos minutos (o vuelva a pedirlo).`;
+      return { ...base, estado: 'anulacion_en_curso', aceptada_sunat: false, sunat_description: aviso, avisos: [aviso], baja };
+    }
+    if (comprobante.anulado) return null;
+    const aviso = this.avisoDeBaja(numero, numero, lote.identificador, lote.estado, lote.sunat_ticket);
+    return { ...base, estado: 'anulacion_en_curso', aceptada_sunat: false, sunat_description: aviso, avisos: [aviso], baja };
+  }
+
+  /** Efectos de una baja aceptada sin tumbar la respuesta (el barrido los reintenta). true si quedaron aplicados. */
+  private async efectosDeBajaSinFallar(idEnvio: number, numero: string): Promise<boolean> {
+    try {
+      return (await this.aplicarBajaAceptada(idEnvio)) > 0;
+    } catch (error) {
+      this.logger.error(`La baja de ${numero} fue aceptada pero sus efectos no se aplicaron todavía: ${this.mensajeDe(error)}`);
+      return false;
+    }
   }
 
   /**
@@ -1489,6 +1725,17 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     return `${this.numeroDe(c)} ${origen}: no se anula en SUNAT desde aquí (se anuló en el sistema).`;
   }
 
+  /** Qué pasa con la baja o el resumen según su estado en SUNAT (en curso, sin llegar, sin respuesta). */
+  private avisoDeBaja(numero: string, queSeAnula: string, identificador: string, estado: string, ticket: string | null | undefined): string {
+    if (estado === 'PENDIENTE_REENVIO' || estado === 'ENVIANDO') {
+      return `La baja de ${numero} (${identificador}) todavía no llegó a SUNAT: se reintentará sola; ${queSeAnula} se anulará cuando SUNAT la confirme.`;
+    }
+    if (estado === 'EXCEPCION') {
+      return `SUNAT no resolvió la baja de ${numero} (${identificador}${ticket ? `, ticket ${ticket}` : ''}): consúltela de nuevo desde Facturación SUNAT; mientras tanto ${queSeAnula} sigue activa.`;
+    }
+    return `SUNAT recibió el pedido de baja de ${numero} (${identificador}${ticket ? `, ticket ${ticket}` : ''}): ${queSeAnula} se anulará cuando SUNAT lo confirme, normalmente en minutos.`;
+  }
+
   // ── Respuestas ───────────────────────────────────────────────
 
   private notaDeRespuesta(respuesta: ComprobanteResponse, plan: PlanNota): NotaAnulacionResponse {
@@ -1503,6 +1750,17 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       estado_sunat: respuesta.estado_sunat ?? null,
       aceptada_sunat: respuesta.aceptada_sunat === true,
       ...(respuesta.error ? { error: respuesta.error } : {}),
+    };
+  }
+
+  /** La baja o el resumen como lo ve el cliente de la API (a partir del resultado del envío o del lote vigente). */
+  private bajaDe(lote: ResultadoLote | LoteDeComprobante): BajaAnulacionResponse {
+    return {
+      id_envio: lote.id_envio,
+      operacion: lote.operacion,
+      identificador: lote.identificador,
+      estado: lote.estado,
+      ticket: 'ticket' in lote ? lote.ticket : lote.sunat_ticket,
     };
   }
 

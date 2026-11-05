@@ -13,6 +13,14 @@ export class AnularVentaRequest {
   @MaxLength(250, { message: 'El motivo admite hasta 250 caracteres' })
   motivo?: string;
 
+  /**
+   * true = anular dando de baja el comprobante en SUNAT (comunicación de baja o resumen diario), sin nota
+   * de crédito; solo hasta 7 días después de emitido y con un único comprobante aceptado.
+   */
+  @IsOptional()
+  @IsBoolean({ message: 'sin_nota debe ser verdadero o falso' })
+  sin_nota?: boolean;
+
   /** true = el administrador verificó el comprobante en SUNAT Operaciones en Línea (queda auditado). */
   @IsOptional()
   @IsBoolean({ message: 'confirmar_verificado_sol debe ser verdadero o falso' })

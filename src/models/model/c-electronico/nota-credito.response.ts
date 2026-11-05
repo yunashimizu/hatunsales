@@ -114,8 +114,22 @@ export interface NotaAnulacionResponse {
 }
 
 /**
- * anulada: la venta (o el comprobante) quedó anulada. anulacion_en_curso: se emitió la nota y se anula
- * cuando SUNAT la acepte. anulacion_rechazada: SUNAT rechazó la nota; nada cambió.
+ * Baja en SUNAT (comunicación de baja RA de una factura o resumen diario RC de una boleta) con la que se
+ * anula un comprobante aceptado sin nota de crédito. Presente cuando la anulación fue por baja.
+ */
+export interface BajaAnulacionResponse {
+  id_envio: number;
+  operacion: 'baja' | 'resumen';
+  /** RA-YYYYMMDD-NNNNN o RC-YYYYMMDD-NNNNN. */
+  identificador: string;
+  /** TICKET_PENDIENTE | ENVIANDO | PENDIENTE_REENVIO | ACEPTADO | ACEPTADO_OBS | EXCEPCION… */
+  estado: string;
+  ticket: string | null;
+}
+
+/**
+ * anulada: la venta (o el comprobante) quedó anulada. anulacion_en_curso: se emitió la nota (o se envió la
+ * baja) y se anula cuando SUNAT la acepte. anulacion_rechazada: SUNAT rechazó la nota; nada cambió.
  */
 export type EstadoAnulacion = 'anulada' | 'anulacion_en_curso' | 'anulacion_rechazada';
 
@@ -132,6 +146,8 @@ export interface AnulacionVentaResponse {
   stock_devuelto: boolean;
   cxc_cerradas: number;
   avisos: string[];
+  /** Solo con `sin_nota`: la baja o el resumen enviado a SUNAT. */
+  baja?: BajaAnulacionResponse;
 }
 
 /** POST /comprobante/anular (D9 aplicado al comprobante). Conserva los campos de la respuesta anterior. */
@@ -144,6 +160,8 @@ export interface AnulacionDocumentoResponse extends AnulacionResponse {
   venta_estado: string | null;
   nota?: NotaAnulacionResponse;
   avisos: string[];
+  /** Solo con `sin_nota`: la baja o el resumen enviado a SUNAT. */
+  baja?: BajaAnulacionResponse;
 }
 
 /** POST /comprobante/consultar-anulacion. */
@@ -153,4 +171,6 @@ export interface ConsultaAnulacionResponse extends AnulacionResponse {
   numero_formateado: string;
   nota?: NotaAnulacionResponse;
   avisos: string[];
+  /** Si el comprobante se está anulando (o se anuló) con una baja en SUNAT en lugar de una nota. */
+  baja?: BajaAnulacionResponse;
 }
