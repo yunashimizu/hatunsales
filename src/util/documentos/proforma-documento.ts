@@ -27,7 +27,7 @@ export const PALETA = {
   plata: '#C9CAC8',
   texto: '#262726',
   gris: '#5A5C5B',
-  grisClaro: '#8E908F',
+  grisClaro: '#6A6C6B',
   linea: '#D6D6D4',
   fondo: '#F3F3F2',
   cebra: '#F7F7F6',

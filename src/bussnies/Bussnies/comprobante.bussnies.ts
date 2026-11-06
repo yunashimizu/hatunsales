@@ -21,7 +21,7 @@ import {
 } from '../../repository/Repository/comprobante.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { ReceptorBussnies, TOPE_BOLETA_SIN_DOCUMENTO } from './receptor.bussnies';
-import { emisorConfig } from '../../config/emisor.config';
+import { emisorConfig, LOGO_EMISOR_OFICIAL } from '../../config/emisor.config';
 import {
   GenerarComprobanteRequest,
   ConsultarComprobanteRequest,
@@ -292,7 +292,10 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
         razon_social: emisor.razon_social,
         direccion: emisor.direccion,
         ubicacion: emisor.ubicacion,
-        logo_url: emisor.logo_url,
+        logo_url: emisor.logo_url?.trim() || LOGO_EMISOR_OFICIAL,
+        nombre_comercial: emisor.nombre_comercial,
+        telefono: emisor.telefono,
+        email: emisor.email,
       },
       id_tipo: dto.id_tipo,
       tipo_nombre: nombreTipoComprobante(dto.id_tipo),

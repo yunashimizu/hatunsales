@@ -1,5 +1,6 @@
-import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, Logger, Optional } from '@nestjs/common';
 import { ReportesRepository } from '../../repository/Repository/reportes.repository';
+import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { IReportesBussniees } from '../Ibussnies/IReportesBussniees';
 import {
   VentasEstadisticas,
@@ -13,6 +14,7 @@ import {
 } from '../../models/model/ventas-report.response';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { emisorConfig } from '../../config/emisor.config';
+import { obtenerLogoEmisor } from '../../util/documentos/logo-emisor';
 import {
   CabeceraReporte,
   REPORTE_TIPOS,
@@ -181,7 +183,11 @@ const PLANES: Record<string, string> = {
 export class ReportesBussnies implements IReportesBussniees {
   private readonly logger = new Logger(ReportesBussnies.name);
 
-  constructor(private readonly repo: ReportesRepository) {}
+  constructor(
+    private readonly repo: ReportesRepository,
+    /** Para leer el «Logo para documentos» del panel; sin él se usa el de la configuración de entorno. */
+    @Optional() private readonly config?: ConfiguracionRepository,
+  ) {}
 
   /**
    * Ventas netas del periodo (días de Lima). total_vendido = facturas y boletas + notas de
@@ -402,7 +408,7 @@ export class ReportesBussnies implements IReportesBussniees {
         limiteProductos: LIMITE_PRODUCTOS_EXPORT,
         limiteClientes: LIMITE_CLIENTES_EXPORT,
       });
-      const buffer = await generarReporteVentasExcel({ cabecera: this.armarCabecera(report), reporte: report });
+      const buffer = await generarReporteVentasExcel({ cabecera: await this.armarCabecera(report), reporte: report });
       return {
         buffer,
         filename: nombreArchivoReporte('ventas', report.periodo, 'xlsx', claveTipoReporte(report.filtro_tipo?.id_tipo)),
@@ -426,7 +432,7 @@ export class ReportesBussnies implements IReportesBussniees {
         limiteProductos: LIMITE_PRODUCTOS_PANTALLA,
         limiteClientes: LIMITE_CLIENTES_PANTALLA * 2,
       });
-      const buffer = await generarReporteVentasPdf({ cabecera: this.armarCabecera(report), reporte: report });
+      const buffer = await generarReporteVentasPdf({ cabecera: await this.armarCabecera(report), reporte: report });
       return {
         buffer,
         filename: nombreArchivoReporte('ventas', report.periodo, 'pdf', claveTipoReporte(report.filtro_tipo?.id_tipo)),
@@ -443,12 +449,19 @@ export class ReportesBussnies implements IReportesBussniees {
     }
   }
 
-  private armarCabecera(report: ReporteVentasNeto): CabeceraReporte {
+  private async armarCabecera(report: ReporteVentasNeto): Promise<CabeceraReporte> {
     // Días y hora de Lima: el servidor corre en UTC.
     const fechaInicio = ymdLegible(aFechaLima(new Date(report.fecha_inicio)));
     const fechaFin = ymdLegible(aFechaLima(new Date(report.fecha_fin)));
     const tipo = report.filtro_tipo ? report.filtro_tipo.nombre : 'Todos los comprobantes';
+    // El logo es decorativo: obtenerLogoEmisor no lanza (devuelve null si no se puede leer).
+    const configurado = await this.config
+      ?.obtenerVarias(['emisor_logo_url'])
+      .then((valores) => String(valores.emisor_logo_url ?? '').trim())
+      .catch(() => '');
+    const logo = await obtenerLogoEmisor(configurado || emisorConfig.logo_url).catch(() => null);
     return {
+      logo,
       empresa: emisorConfig.razon_social || 'HATUNSALES S.A.C.',
       ruc: emisorConfig.ruc || '—',
       direccion: [emisorConfig.direccion, emisorConfig.ubicacion].filter(Boolean).join(' · '),

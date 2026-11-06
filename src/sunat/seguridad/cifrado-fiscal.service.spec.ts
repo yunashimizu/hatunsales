@@ -66,6 +66,25 @@ describe('CifradoFiscalService (AES-256-GCM)', () => {
     expect(codigoDe(() => otro.descifrar(cifrado, 'secreto:sol_clave'))).toBe('FISCAL_SECRETO_ILEGIBLE');
   });
 
+  it('cuando la llave cambió, el error nombra CUÁL secreto no abre y no revela la huella del certificado', () => {
+    const otra = new CifradoFiscalService({ actual: OTRA });
+    const mensajeDe = (contexto: string): string => {
+      const cifrado = servicio.cifrarTexto('x', contexto);
+      try {
+        otra.descifrar(cifrado, contexto);
+      } catch (error) {
+        return (error as Error).message;
+      }
+      return '';
+    };
+    expect(mensajeDe('cert:pfx:beta:HUELLA-SECRETA')).toContain('el certificado digital de BETA');
+    expect(mensajeDe('cert:clave:produccion:HUELLA-SECRETA')).toContain('el certificado digital de producción');
+    expect(mensajeDe('secreto:sol_clave')).toContain('la clave SOL');
+    expect(mensajeDe('secreto:gre_client_secret')).toContain('las credenciales de la GRE');
+    expect(mensajeDe('otra:cosa')).toContain('un secreto fiscal guardado');
+    expect(mensajeDe('cert:pfx:beta:HUELLA-SECRETA')).not.toContain('HUELLA-SECRETA');
+  });
+
   it('rotación: con FISCAL_SECRET_KEY_ANTERIOR abre lo viejo e indica que conviene re-cifrar', () => {
     const viejo = new CifradoFiscalService({ actual: OTRA }).cifrarTexto('clave-vieja', 'secreto:sol_clave');
     const rotado = new CifradoFiscalService({ actual: LLAVE, anterior: OTRA });

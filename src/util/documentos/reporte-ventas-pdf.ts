@@ -181,10 +181,24 @@ export async function generarReporteVentasPdf(datos: DatosReporteVentas): Promis
   function encabezadoPrimera(): void {
     rect(0, 0, ANCHO_PAGINA, 82, COLOR.marca);
     rect(0, 82, ANCHO_PAGINA, 3, COLOR.acento);
-    texto(cabecera.empresa, MARGEN, 20, ANCHO * 0.58, { fuente: 'Helvetica-Bold', tam: 16, color: COLOR.blanco });
-    texto(`RUC ${cabecera.ruc}`, MARGEN, 42, ANCHO * 0.58, { tam: 8.5, color: COLOR.plata });
-    if (cabecera.direccion) texto(cabecera.direccion, MARGEN, 54, ANCHO * 0.58, { tam: 7.5, color: COLOR.plata });
-    texto(`Generado el ${cabecera.generadoEl} (hora de Lima)`, MARGEN, 66, ANCHO * 0.58, {
+    // El logo oficial tiene fondo blanco: va sobre una tarjeta blanca para que se lea en la banda grafito.
+    let xTexto = MARGEN;
+    if (cabecera.logo) {
+      try {
+        doc.save();
+        doc.roundedRect(MARGEN, 11, 60, 60, 4).fill(COLOR.blanco);
+        doc.restore();
+        doc.image(cabecera.logo, MARGEN + 3, 14, { fit: [54, 54], align: 'center', valign: 'center' });
+        xTexto = MARGEN + 72;
+      } catch {
+        // Logo ilegible: el reporte sale sin logo.
+      }
+    }
+    const anchoTexto = ANCHO * 0.58 - (xTexto - MARGEN);
+    texto(cabecera.empresa, xTexto, 20, anchoTexto, { fuente: 'Helvetica-Bold', tam: 16, color: COLOR.blanco });
+    texto(`RUC ${cabecera.ruc}`, xTexto, 42, anchoTexto, { tam: 8.5, color: COLOR.plata });
+    if (cabecera.direccion) texto(cabecera.direccion, xTexto, 54, anchoTexto, { tam: 7.5, color: COLOR.plata });
+    texto(`Generado el ${cabecera.generadoEl} (hora de Lima)`, xTexto, 66, anchoTexto, {
       tam: 7,
       color: COLOR.plata,
     });

@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException } from '@nestjs/common';
 import type { GenerarComprobanteRequest } from '../../models/model/c-electronico/comprobante.request';
 import type { DocumentoCpe } from '../../sunat/nucleo/documento-fiscal.types';
 import { DocumentoCpeInvalidoError } from '../../sunat/nucleo/errores-nucleo';
+import { LOGO_EMISOR_OFICIAL } from '../../config/emisor.config';
 import { MAXIMO_INTENTOS_NUMERO } from './comprobante.bussnies';
 import {
   COLUMNAS_FASE9,
@@ -104,6 +105,38 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
       expect(vista.aviso).toBe(CONTEXTO_BETA.aviso);
       expect(vista.emision_activa).toBe(true);
       expect(vista.advertencias).toEqual([]);
+    });
+
+    it('la vista previa trae nombre comercial, teléfono, correo y el logo configurado del emisor', async () => {
+      const { servicio, emision } = crearMotor({
+        bd: crearBdFalsa({ maximos: { BB01: [4] } }),
+        config: {
+          emisor_telefono: '999 111 222',
+          emisor_email: 'ventas@hatun.pe',
+          emisor_logo_url: '/uploads/otro-logo.png',
+        },
+      });
+
+      // Con la emisión activa el nombre comercial sale del emisor del contexto; el resto, de la configuración.
+      emision.contexto.mockResolvedValue({ ...CONTEXTO_BETA, emisor: { ...EMISOR_BETA, nombreComercial: 'FERRETERIA HATUN' } });
+
+      const vista = await servicio.previsualizar(boleta());
+
+      expect(vista.emisor.nombre_comercial).toBe('FERRETERIA HATUN');
+      expect(vista.emisor.telefono).toBe('999 111 222');
+      expect(vista.emisor.email).toBe('ventas@hatun.pe');
+      expect(vista.emisor.logo_url).toBe('/uploads/otro-logo.png');
+    });
+
+    it('con el logo vacío la vista previa devuelve el logo oficial', async () => {
+      const { servicio } = crearMotor({
+        bd: crearBdFalsa({ maximos: { BB01: [4] } }),
+        config: { emisor_logo_url: '   ' },
+      });
+
+      const vista = await servicio.previsualizar(boleta());
+
+      expect(vista.emisor.logo_url).toBe(LOGO_EMISOR_OFICIAL);
     });
   });
 

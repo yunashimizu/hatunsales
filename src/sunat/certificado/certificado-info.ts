@@ -24,6 +24,11 @@ export interface CertificadoInfoVista {
   nombre_archivo: string | null;
   subido_en: string;
   advertencias: string[];
+  /**
+   * false si lo guardado ya no abre con la FISCAL_SECRET_KEY actual (cambió la llave): hay que volver a
+   * subirlo. Ausente cuando no se comprobó (p. ej. la respuesta de una subida recién hecha).
+   */
+  legible?: boolean;
 }
 
 export interface ContextoInfoCertificado {

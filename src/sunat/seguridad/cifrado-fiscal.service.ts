@@ -138,7 +138,24 @@ export class CifradoFiscalService {
       const plano = CifradoFiscalService.abrir(llave, iv, tag, cuerpo, aad);
       if (plano) return { plano, conLlaveAnterior: anterior };
     }
-    throw ErroresFiscales.secretoIlegible('un secreto fiscal guardado');
+    throw ErroresFiscales.secretoIlegible(CifradoFiscalService.describirContexto(contexto));
+  }
+
+  /**
+   * Nombre legible del secreto según su contexto de cifrado (`cert:pfx:<ambiente>:…`, `secreto:<nombre>`),
+   * para que el error diga CUÁL no abre. Nunca incluye el contexto crudo (lleva la huella del certificado).
+   */
+  static describirContexto(contexto: string): string {
+    const partes = String(contexto ?? '').split(':');
+    if (partes[0] === 'cert') {
+      const ambiente = partes[2] === 'produccion' ? 'producción' : partes[2] === 'beta' ? 'BETA' : '';
+      return ambiente ? `el certificado digital de ${ambiente}` : 'el certificado digital';
+    }
+    if (partes[0] === 'secreto') {
+      if (partes[1] === 'sol_clave') return 'la clave SOL';
+      if (partes[1] === 'gre_client_id' || partes[1] === 'gre_client_secret') return 'las credenciales de la GRE';
+    }
+    return 'un secreto fiscal guardado';
   }
 
   private static abrir(llave: Buffer, iv: Buffer, tag: Buffer, cuerpo: Buffer, aad: Buffer): Buffer | null {

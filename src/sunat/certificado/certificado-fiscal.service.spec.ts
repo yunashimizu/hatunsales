@@ -328,6 +328,8 @@ describe('CertificadoFiscalService', () => {
     const sinAnterior = crear({ repo, llave: { actual: LLAVE_PRUEBA } }).servicio;
     expect(await codigoDe(sinAnterior.obtenerMaterialFirma('produccion'))).toBe('FISCAL_SECRETO_ILEGIBLE');
     expect((await sinAnterior.estadoParaChecklist()).produccion?.legible).toBe(false);
+    // El panel recibe el mismo dato para avisar «vuelva a subirlo» en la tarjeta del certificado.
+    expect((await sinAnterior.infoTodos()).produccion?.legible).toBe(false);
 
     const rotado = crear({ repo, llave: { actual: LLAVE_PRUEBA, anterior: OTRA_LLAVE_PRUEBA } }).servicio;
     expect((await rotado.obtenerMaterialFirma('produccion')).ruc).toBe(RUC_PRUEBA);
@@ -335,6 +337,7 @@ describe('CertificadoFiscalService', () => {
     expect(repo.recifrados).toEqual([1]);
     const soloNueva = crear({ repo, llave: { actual: LLAVE_PRUEBA } }).servicio;
     expect((await soloNueva.estadoParaChecklist()).produccion?.legible).toBe(true);
+    expect((await soloNueva.infoTodos()).produccion?.legible).toBe(true);
   });
 
   it('un certificado nuevo reanuda la emisión detenida de SU ambiente y retira la confirmación del RUC del anterior', async () => {

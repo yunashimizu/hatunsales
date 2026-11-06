@@ -178,7 +178,11 @@ export class CertificadoFiscalService {
     const [metadatos, snapshot] = await Promise.all([this.repositorio.metadatosActivos(), this.config.snapshot()]);
     const contexto = { ahora: this.reloj.ahora(), rucEmisor: snapshot.emisor.ruc };
     for (const meta of metadatos) {
-      if (AMBIENTES_FISCALES.includes(meta.ambiente)) resultado[meta.ambiente] = describirCertificado(meta, contexto);
+      if (!AMBIENTES_FISCALES.includes(meta.ambiente)) continue;
+      resultado[meta.ambiente] = {
+        ...describirCertificado(meta, contexto),
+        legible: await this.esLegible(meta.ambiente),
+      };
     }
     return resultado;
   }

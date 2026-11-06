@@ -267,6 +267,9 @@ export interface PreviewComprobanteResponse {
     direccion: string;
     ubicacion: string;
     logo_url: string;
+    nombre_comercial?: string | null;
+    telefono?: string | null;
+    email?: string | null;
   };
   id_tipo: number;
   tipo_nombre: string;

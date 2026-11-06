@@ -1,5 +1,14 @@
+import { emisorConfig } from '../../config/emisor.config';
 import { BadRequestException } from '@nestjs/common';
 import { ReportesBussnies, clasificarComprobanteReporte, diaLimaComprobante } from './reportes.bussnies';
+import { obtenerLogoEmisor } from '../../util/documentos/logo-emisor';
+
+// Por defecto el logo es el real (el oficial del repo); cada prueba de logo lo reemplaza con mockResolvedValueOnce.
+jest.mock('../../util/documentos/logo-emisor', () => {
+  const real = jest.requireActual('../../util/documentos/logo-emisor');
+  return { ...real, obtenerLogoEmisor: jest.fn(real.obtenerLogoEmisor) };
+});
+const logoMock = obtenerLogoEmisor as jest.MockedFunction<typeof obtenerLogoEmisor>;
 
 /**
  * Reporte de ventas: días de Lima (el servidor corre en UTC) y ventas NETAS.
@@ -467,5 +476,70 @@ describe('ReportesBussnies · exportes profesionales', () => {
 
     const paginas = (buffer.toString('latin1').match(/\/Type \/Page\b/g) ?? []).length;
     expect(paginas).toBeGreaterThan(5);
+  });
+
+  describe('logo del emisor en el reporte de ventas', () => {
+    const imagenesDelExcel = (libro: any) => libro.worksheets.reduce((n: number, h: any) => n + h.getImages().length, 0);
+    const imagenesDelPdf = (buffer: Buffer) => (buffer.toString('latin1').match(/\/Subtype \/Image/g) ?? []).length;
+
+    it('con logo, el Excel lo inserta en cada hoja y el PDF lo dibuja en la banda de empresa', async () => {
+      const { servicio } = armar(lista, vendidos, cotizados);
+
+      const excel = await servicio.exportVentasExcel('mensual', {});
+      const libro = await leer(excel.buffer);
+      const pdf = await servicio.exportVentasPdf('mensual', {});
+
+      expect(imagenesDelExcel(libro)).toBe(libro.worksheets.length);
+      // El texto del encabezado se corre a la derecha para no quedar debajo del logo.
+      expect(libro.getWorksheet('Resumen').getCell(1, 1).alignment.indent).toBeGreaterThan(0);
+      expect(imagenesDelPdf(pdf.buffer)).toBeGreaterThan(0);
+      expect(pdf.buffer.subarray(0, 5).toString()).toBe('%PDF-');
+    });
+
+    it('sin logo, el Excel y el PDF se generan igual, sin imagen ni sangría', async () => {
+      const { servicio } = armar(lista, vendidos, cotizados);
+      logoMock.mockResolvedValueOnce(null);
+      const excel = await servicio.exportVentasExcel('mensual', {});
+      logoMock.mockResolvedValueOnce(null);
+      const pdf = await servicio.exportVentasPdf('mensual', {});
+      const libro = await leer(excel.buffer);
+
+      expect(imagenesDelExcel(libro)).toBe(0);
+      expect(libro.getWorksheet('Resumen').getCell(1, 1).alignment.indent ?? 0).toBe(0);
+      expect(imagenesDelPdf(pdf.buffer)).toBe(0);
+      expect(pdf.buffer.subarray(0, 5).toString()).toBe('%PDF-');
+    });
+
+    it('un logo ilegible no impide el PDF y si falla la lectura del logo el reporte sale igual', async () => {
+      const { servicio } = armar(lista, vendidos, cotizados);
+      logoMock.mockResolvedValueOnce(Buffer.from('esto no es una imagen'));
+      const ilegible = await servicio.exportVentasPdf('mensual', {});
+      logoMock.mockRejectedValueOnce(new Error('sin red'));
+      const sinLectura = await servicio.exportVentasPdf('mensual', {});
+
+      for (const { buffer } of [ilegible, sinLectura]) {
+        expect(buffer.subarray(0, 5).toString()).toBe('%PDF-');
+        expect(buffer.subarray(-8).toString()).toContain('%%EOF');
+      }
+    });
+
+    it('usa el «Logo para documentos» del panel y, si no hay o falla la lectura, el de la configuración de entorno', async () => {
+      const repo = {
+        obtenerVentasPorPeriodo: jest.fn().mockResolvedValue(lista),
+        obtenerProductosVendidos: jest.fn().mockResolvedValue(vendidos),
+        obtenerProductosCotizados: jest.fn().mockResolvedValue(cotizados),
+      };
+      const obtenerVarias = jest.fn().mockResolvedValue({ emisor_logo_url: ' /uploads/otro.png ' });
+      const servicio = new ReportesBussnies(repo as any, { obtenerVarias } as any);
+
+      logoMock.mockClear();
+      await servicio.exportVentasPdf('mensual', {});
+      expect(obtenerVarias).toHaveBeenCalledWith(['emisor_logo_url']);
+      expect(logoMock).toHaveBeenLastCalledWith('/uploads/otro.png');
+
+      obtenerVarias.mockRejectedValueOnce(new Error('sin base'));
+      await servicio.exportVentasPdf('mensual', {});
+      expect(logoMock).toHaveBeenLastCalledWith(emisorConfig.logo_url);
+    });
   });
 });

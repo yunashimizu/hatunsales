@@ -1,5 +1,6 @@
 import * as ExcelJS from 'exceljs';
 import { argb, PALETA } from './proforma-documento';
+import { dimensionesImagen } from './logo-emisor';
 import {
   capitalizarEstado,
   DatosReporteVentas,
@@ -89,16 +90,53 @@ function pct(parte: number, todo: number): number | null {
   return todo > 0 ? parte / todo : null;
 }
 
-/** Encabezado común: empresa y RUC, título de la hoja con los filtros y cuándo se generó. */
+/** Alto máximo (px) del logo en el encabezado: cabe en las filas 1-3, que miden unos 85 px. */
+const ALTO_LOGO_PX = 56;
+/** Sangría (niveles de Excel, ~9 px cada uno) que se da al texto del encabezado para dejar sitio al logo. */
+const SANGRIA_POR_LOGO = 9;
+
+/** Imagen del logo ya registrada en el libro (una sola vez por libro); null si no hay logo o no se aceptó. */
+const logosDelLibro = new WeakMap<ExcelJS.Workbook, { id: number; ancho: number; alto: number } | null>();
+
+function registrarLogo(wb: ExcelJS.Workbook, logo?: Buffer | null): { id: number; ancho: number; alto: number } | null {
+  if (!logo) return null;
+  const guardado = logosDelLibro.get(wb);
+  if (guardado !== undefined) return guardado;
+  let registro: { id: number; ancho: number; alto: number } | null = null;
+  try {
+    const esJpeg = logo.length > 3 && logo[0] === 0xff && logo[1] === 0xd8 && logo[2] === 0xff;
+    const id = wb.addImage({ base64: logo.toString('base64'), extension: esJpeg ? 'jpeg' : 'png' });
+    // Con la proporción real del logo, sin deformarlo.
+    const medida = dimensionesImagen(logo) ?? { ancho: 3, alto: 2 };
+    const escala = ALTO_LOGO_PX / medida.alto;
+    registro = { id, ancho: Math.round(medida.ancho * escala), alto: ALTO_LOGO_PX };
+  } catch {
+    // Logo ilegible para ExcelJS: el reporte sale sin logo.
+  }
+  logosDelLibro.set(wb, registro);
+  return registro;
+}
+
+/** Encabezado común: logo, empresa y RUC, título de la hoja con los filtros y cuándo se generó. */
 function bloqueTitulo(ws: ExcelJS.Worksheet, datos: DatosReporteVentas, titulo: string, ultimaColumna: number): void {
   const { cabecera } = datos;
+  const logo = registrarLogo(ws.workbook, cabecera.logo);
+  let sangria = 0;
+  if (logo) {
+    try {
+      ws.addImage(logo.id, { tl: { col: 0.05, row: 0.1 }, ext: { width: logo.ancho, height: logo.alto } });
+      sangria = SANGRIA_POR_LOGO;
+    } catch {
+      // Sin logo en esta hoja.
+    }
+  }
   const combinar = (fila: number) => ws.mergeCells(fila, 1, fila, Math.max(ultimaColumna, 2));
 
   combinar(1);
   const empresa = ws.getCell(1, 1);
   empresa.value = `${cabecera.empresa}  ·  RUC ${cabecera.ruc}`;
   empresa.font = { name: FUENTE, size: 13, bold: true, color: { argb: ARGB.marca } };
-  empresa.alignment = { vertical: 'middle' };
+  empresa.alignment = { vertical: 'middle', horizontal: 'left', indent: sangria };
   ws.getRow(1).height = 24;
 
   // Las hojas estrechas (Tendencia, Clientes) no alcanzan para estos textos en una línea: se ajustan en varias.
@@ -112,14 +150,14 @@ function bloqueTitulo(ws: ExcelJS.Worksheet, datos: DatosReporteVentas, titulo: 
   const subtitulo = ws.getCell(2, 1);
   subtitulo.value = filtros ? `${titulo}  —  ${filtros}` : titulo;
   subtitulo.font = { name: FUENTE, size: 11, bold: true, color: { argb: ARGB.acentoTexto } };
-  subtitulo.alignment = { vertical: 'middle', wrapText: true };
+  subtitulo.alignment = { vertical: 'middle', horizontal: 'left', indent: sangria, wrapText: true };
   ws.getRow(2).height = Math.max(20, lineas(String(subtitulo.value), 1.15) * 15 + 5);
 
   combinar(3);
   const generado = ws.getCell(3, 1);
   generado.value = `Generado el ${cabecera.generadoEl} (hora de Lima)${cabecera.direccion ? `  ·  ${cabecera.direccion}` : ''}`;
   generado.font = { name: FUENTE, size: 8, italic: true, color: { argb: ARGB.grisClaro } };
-  generado.alignment = { vertical: 'top', wrapText: true };
+  generado.alignment = { vertical: 'top', horizontal: 'left', indent: sangria, wrapText: true };
   ws.getRow(3).height = Math.max(14, lineas(String(generado.value), 0.85) * 11 + 3);
 
   ws.getRow(4).height = 6;

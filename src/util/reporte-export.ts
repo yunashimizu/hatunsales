@@ -41,6 +41,8 @@ export type CabeceraReporte = {
   nota?: string;
   /** Filtros aplicados (periodo, rango, tipo…), listos para rotularlos en el documento. */
   filtros?: Array<{ etiqueta: string; valor: string }>;
+  /** Logo del emisor ya descargado (PNG/JPEG). Sin él, el reporte sale sin logo. */
+  logo?: Buffer | null;
 };
 
 /** Todo lo que necesitan los generadores de Excel y PDF del reporte de ventas. */
