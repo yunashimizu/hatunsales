@@ -1,28 +1,28 @@
-# Graph Report - hatunsales  (2026-11-05)
+# Graph Report - hatunsales  (2026-11-06)
 
 ## Corpus Check
-- 650 files · ~460,793 words
+- 658 files · ~473,242 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 8 file(s) not represented in the graph (top: (none) 3, .example 1, .sqlite 1)
 
 ## Summary
-- 7093 nodes · 22059 edges · 189 communities (136 shown, 53 thin omitted)
-- Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 1428 edges (avg confidence: 0.85)
+- 7214 nodes · 22454 edges · 196 communities (148 shown, 48 thin omitted)
+- Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 1441 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `b3756b7b`
+- Built from commit: `0249c536`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - certificado-fiscal.service.ts
-- pedido.bussnies.ts
-- app.module.ts
-- sunat-emision.service.ts
+- PedidoBussnies
+- CheckoutBussnies
+- SunatEmisionService
 - lotes-fiscales.service.ts
 - auth.bussnies.ts
-- ActorFiscal
+- AmbienteFiscal
 - venta.repository.ts
 - guia-remision.bussnies.ts
 - comprobante-pdf.ts
@@ -33,34 +33,34 @@
 - ComprobanteBussnies
 - venta-documentos.bussnies.ts
 - NotaCreditoBussnies
-- AmbienteFiscal
-- CatalogoRepository
-- Roles
+- EjecutorSql
+- CatalogoController
+- @nestjs/common
 - filasDe
 - proforma-documento.ts
 - caja-arqueo.bussnies.ts
 - ClienteRepository
-- gre-emision.service.ts
-- FiscalConfigError
-- firmador-xml.ts
+- @nestjs/typeorm
+- certificado-digital.util.ts
+- clasificador-gre.ts
 - validaciones-cpe.ts
 - validaciones-gre.ts
 - UsuarioToken
 - ref_crypto
-- carrito.bussnies.ts
-- nucleo/index.ts
+- Carrito
+- resumen-caja-pdf.ts
 - CuentaTiendaBussnies
-- documento-fiscal.types.ts
-- ProductoRepository
+- linea-cpe.ts
+- app.module.ts
 - el
-- emision.registro.spec.ts
+- lotes-fiscales.service.spec.ts
 - nota-credito.bussnies.spec.ts
-- EmisionDirectaService
+- constructor-resumen-diario.ts
 - ProductoImagen
-- nota-credito.integracion.spec.ts
+- caja-arqueo.repository.ts
 - Dinero
-- class-validator
-- sunat.bussnies.ts
+- FiscalAdminController
+- SunatBussnies
 - proforma.bussnies.ts
 - reportes.bussnies.ts
 - AdminController
@@ -68,355 +68,347 @@
 - package.json
 - Dinero
 - guia-remision-pdf.ts
-- correo.config.ts
+- axios
 - fecha-lima.ts
-- CajaPagosRepository
+- caja.request.ts
 - VentaController
-- caja-arqueo.repository.ts
+- relanzarHttp
 - culqi.pasarela.ts
 - RecepcionRepository
 - nota-credito.bussnies.ts
 - arqueo-pdf.ts
-- plataforma.registro.ts
+- salud.bussnies.ts
 - logo-emisor.ts
-- CajaSesionRepository
-- CajaArqueoBussnies
-- ComprobanteRepository
 - ConfiguracionRepository
+- sunat-emision.service.spec.ts
+- comprobante.repository.ts
+- EnvioFiscalRepository
 - ProformaController
-- pedido.controller.ts
-- venta.bussnies.ts
+- CarritoController
+- guia-remision.response.ts
 - ComprobanteController
 - ComprobanteCorreosRepository
-- construir-xml-cpe.ts
-- filtro-errores.filter.ts
+- documento-fiscal.types.ts
+- registro-peticiones.middleware.ts
 - dependencies
-- CreditoRepository
-- checklist-activacion.ts
-- firmador-xml.spec.ts
+- filasDe
+- FiscalConfigService
+- lote-fiscal.repository.ts
 - politica-limites.ts
-- cuerpoError
+- venta.bussnies.ts
 - devDependencies
 - GuardarGuiaRemisionRequest
-- RolBussnies
-- proforma.repository.ts
-- traductor-errores-bd.ts
-- EnviosAdminController
+- rol.bussnies.ts
+- ProformaRepository
+- enmascarar.ts
+- runtime.config.ts
 - DibujoProforma
 - main.ts
 - AlmacenLimitesMemoria
 - reporte-ventas-pdf.ts
 - sunat-soap-client.ts
 - compilerOptions
-- LotesAdminController
-- BovedaSecretosFiscales
-- ProveedorController
-- StockSucursalController
-- ReceptorBussnies
-- RespuestaSunat
+- fiscal-errores.ts
+- caja-turnos.bussnies.ts
+- PedidoRepository
+- StockSucursal
+- Empresa
+- ReceptorController
 - Categoria
-- AbonoCreditoRequest
-- GuiaRemisionController
+- CreditoRepository
+- EmisionGre
 - ProductoController
 - clasificador-respuesta.ts
-- producto-imagen.controller.ts
-- ActualizarInventarioRequest
+- plataforma.registro.ts
+- tipos-comprobante.ts
 - ProductoBussnies
-- CrearVentaRequest
+- FiscalConfigError
 - InventarioBussnies
-- nota-credito.controller.spec.ts
-- ReceptorController
-- caja-sesion.bussnies.ts
-- esquema-caja.service.ts
+- NotaCreditoController
+- CajaTurnosBussnies
+- registros.ts
+- BuscarDniRequest
 - RegistrarArqueoRequest
 - correo-comprobante.service.ts
-- ClasificadorRespuestaSunat
+- ReceptorBussnies
 - reporte-ventas-excel.ts
 - reglas-postgres.ts
-- RecepcionController
+- CajaArqueoController
 - InventarioRepository
 - WhatsappPasarela
-- sunat-soap-client.spec.ts
-- transporte-soap.ts
+- pago.bussnies.ts
+- carrito.bussnies.ts
 - MarcaController
-- ReceptorRepository
-- ErrorTraducido
-- traductor-http-exception.ts
+- correo.config.ts
+- filtro-errores.filter.ts
+- gre-emision.service.spec.ts
 - AuthController
 - InventarioController
 - UserController
-- Get
-- runtime.config.ts
+- listar-ventas.request.ts
+- SunatController
 - filtro-errores.filter.spec.ts
 - caja.registro.ts
 - mensajes-validacion.ts
-- AlmacenController
+- Sucursal
 - loginController
 - scripts
 - qr.ts
-- reporte-export.ts
-- GuiaRemision
-- Proforma
-- UserRequest
+- comprobante-correos.repository.ts
+- PagoBussnies
+- BuscarUbigeoRequest
+- espacios-ubl.ts
 - numero-letras.ts
 - jest
-- gre-tickets.tarea.ts
+- cifrado-fiscal.service.spec.ts
 - ReportesController
-- log.bussnies.ts
-- unidades-amigables.ts
-- ActualizarProductoRequest
-- compresion.ts
+- log-repository.ts
+- EsquemaCajaService
+- ProductoResponse
+- escritor-xml.ts
 - preparar-fiscal-local.cjs
 - AppService
-- ProductoResponse
-- Inventario
-- traductor-error-dominio.ts
+- GuiaRemisionController
+- CatalogoRepository
+- emision-directa.service.ts
 - deploy
 - README.md
-- ConfiguracionController
-- codigo-barras.util.ts
-- ReportesRepository
 - ConfiguracionFiscalBussnies
-- LogRepository
-- ConsultaDocumentoService
-- Usuario
+- codigo-barras.util.ts
+- reportes.repository.ts
+- traductor-errores-bd.ts
+- RegistroTypeorm
+- VentaTiendaRepository
+- UbigeoService
 - CertificadoFiscalRepository
 - StorageService
-- LogController
-- CreditoVencimientosTarea
-- correo.registro.ts
-- VentaDto
-- .buscar
+- Inventario
+- CarritoItem
+- PedidoPago
+- catalogo.response.ts
+- ConsultaDocumentoService
 - IRepository
-- SecretosFiscalesRepository
+- InventarioResponse
 - nest-cli.json
-- comprobante-correos.repository.spec.ts
-- Auditoria
+- CreditoVencimientosTarea
+- correo-comprobantes.tarea.ts
 - Log
-- ProductoAtributo
-- BuscarUbigeoRequest
-- CuentaPorCobrar
-- Seccion
-- Banner
+- CrearResenaRequest
+- Cliente
+- CatalogoBussnies
+- RepositorioCertificadosMemoria
+- compresion.ts
 - proforma-documento.paleta.spec.ts
 - tsconfig.build.json
-- Permiso
-- ILogRepository
+- SecretosFiscalesRepository
+- receptor.response.ts
 - auth.response.ts
 - login-response.ts
+- pedido.bussnies.spec.ts
+- eslint.config.mjs
+- CatalogoQueryRequest
+- correo-comprobante.service.spec.ts
 
 ## God Nodes (most connected - your core abstractions)
-1. `@nestjs/common` - 239 edges
-2. `Roles()` - 160 edges
-3. `UsuarioToken` - 130 edges
+1. `@nestjs/common` - 243 edges
+2. `Roles()` - 161 edges
+3. `UsuarioToken` - 138 edges
 4. `AmbienteFiscal` - 130 edges
 5. `typeorm` - 126 edges
 6. `FiscalConfigError` - 112 edges
 7. `ComprobanteBussnies` - 104 edges
-8. `UsuarioActual` - 83 edges
+8. `UsuarioActual` - 86 edges
 9. `FiscalConfigService` - 78 edges
 10. `Cliente` - 76 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `validar()` --calls--> `crearValidationPipe()`  [EXTRACTED]
-  src/api/controllers/nota-credito.controller.spec.ts → src/util/http/validacion/validation-pipe.factory.ts
+- `Registrado` --references--> `DocumentoPreparado`  [EXTRACTED]
+  src/bussnies/Bussnies/comprobante.bussnies.ts → src/sunat/emision/emision.contrato.ts
 - `crear()` --calls--> `ConfiguracionFiscalBussnies`  [EXTRACTED]
   src/bussnies/Bussnies/configuracion-fiscal.bussnies.spec.ts → src/bussnies/Bussnies/configuracion-fiscal.bussnies.ts
 - `SinValidez` --references--> `CabeceraComprobante`  [EXTRACTED]
   src/bussnies/Bussnies/nota-credito.bussnies.ts → src/repository/Repository/nota-credito.repository.ts
-- `crearServicio()` --calls--> `VentaBussnies`  [EXTRACTED]
-  src/bussnies/Bussnies/venta.bussnies.spec.ts → src/bussnies/Bussnies/venta.bussnies.ts
-- `MetaSesion` --references--> `SnapshotEsquema`  [EXTRACTED]
-  src/repository/Repository/caja-sesion.repository.ts → src/caja/esquema/esquema-caja.service.ts
+- `armar()` --calls--> `CarritoBussnies`  [EXTRACTED]
+  src/bussnies/Bussnies/tienda/carrito.bussnies.spec.ts → src/bussnies/Bussnies/tienda/carrito.bussnies.ts
+- `CuponAplicado` --references--> `Cupon`  [EXTRACTED]
+  src/bussnies/Bussnies/tienda/checkout.bussnies.ts → src/models/DBModel/tienda/cupon.entity.ts
 
 ## Import Cycles
 - None detected.
 
-## Communities (189 total, 53 thin omitted)
+## Communities (196 total, 48 thin omitted)
 
 ### Community 0 - "certificado-fiscal.service.ts"
 Cohesion: 0.04
-Nodes (111): AccionAuditoriaFiscal, ACCIONES_AUDITORIA_FISCAL, FiscalAuditoriaRepository, RegistroAuditoriaFiscal, FilaCertificadoFiscal, MetadatosCertificadoFiscal, VersionCertificadoFiscal, CertificadoFiscalService (+103 more)
+Nodes (79): AccionAuditoriaFiscal, ACCIONES_AUDITORIA_FISCAL, FiscalAuditoriaRepository, FilaCertificadoFiscal, MetadatosCertificadoFiscal, VersionCertificadoFiscal, CertificadoFiscalService, EXTENSIONES_ACEPTADAS (+71 more)
 
-### Community 1 - "pedido.bussnies.ts"
-Cohesion: 0.02
-Nodes (38): CheckoutController, PagoWebhookController, CheckoutBussnies, CuponAplicado, diaDe(), dos(), armar(), NOCHE_EN_LIMA (+30 more)
+### Community 1 - "PedidoBussnies"
+Cohesion: 0.18
+Nodes (3): PedidoBussnies, recortar(), PedidoResponse
 
-### Community 2 - "app.module.ts"
-Cohesion: 0.03
-Nodes (43): @nestjs/common, @nestjs/typeorm, typeorm, AppModule, ETIQUETA_MOTIVO, traducirErrorStock(), ResultadoAsignacionCodigosSunat, CONSUMIDOR_FINAL (+35 more)
+### Community 2 - "CheckoutBussnies"
+Cohesion: 0.07
+Nodes (10): CheckoutController, PagoWebhookController, CheckoutBussnies, CuponAplicado, diaDe(), dos(), armar(), NOCHE_EN_LIMA (+2 more)
 
-### Community 3 - "sunat-emision.service.ts"
-Cohesion: 0.04
-Nodes (71): EfectosNotasTarea, montar(), ConsultorTx, EnvioVista, EventoEnvioCompletado, FiltroEnvios, MAXIMO_ENVIOS_POR_PAGINA, OyenteEnvioFiscal (+63 more)
+### Community 3 - "SunatEmisionService"
+Cohesion: 0.12
+Nodes (11): DocumentoPreparado, ResultadoEmision, CierreEnvio, EnvioRegistrado, aEnvio(), esAceptado(), mensajeDe(), resumen() (+3 more)
 
 ### Community 4 - "lotes-fiscales.service.ts"
-Cohesion: 0.04
-Nodes (70): MaterialCargado, MaterialFirma, aLinea(), aLote(), ambienteDe(), aVista(), CabeceraBaja, efectoDelCierre() (+62 more)
+Cohesion: 0.07
+Nodes (48): adm-zip, MaterialCargado, MaterialFirma, CONDICION_ANULAR, LONGITUD_MAXIMA_MOTIVO_BAJA, EnvioVista, FiltroEnvios, TIPOS_ARCHIVO_ENVIO (+40 more)
 
 ### Community 5 - "auth.bussnies.ts"
 Cohesion: 0.03
-Nodes (36): bcrypt, @nestjs/jwt, RolesAdminController, AdminBussnies, AuthBussnies, esCorreoDuplicado(), JwtPayload, armar() (+28 more)
+Nodes (34): class-validator, @nestjs/jwt, RolesAdminController, AuthBussnies, esCorreoDuplicado(), JwtPayload, armar(), tick() (+26 more)
 
-### Community 6 - "ActorFiscal"
+### Community 6 - "AmbienteFiscal"
 Cohesion: 0.04
-Nodes (29): actorDe(), FiscalAdminBussnies, FiscalAdminController, OPCIONES_SUBIDA_CERTIFICADO, IFiscalAdminBussnies, sanitizarDetalle(), CertificadoLeido, ArchivoCertificado (+21 more)
+Nodes (69): main(), FiscalAdminBussnies, ACTOR, crear(), OPCIONES_SUBIDA_CERTIFICADO, IFiscalAdminBussnies, RegistroAuditoriaFiscal, ArchivoCertificado (+61 more)
 
 ### Community 7 - "venta.repository.ts"
-Cohesion: 0.03
-Nodes (43): EsquemaCajaService, SnapshotEsquema, snapshot(), FilaInventarioBloqueada, LineaPorDespachar, PlanSalida, SalidaStock, VentaHistorialFila (+35 more)
+Cohesion: 0.04
+Nodes (45): FilaInventarioBloqueada, LineaPorDespachar, planificarSalidas(), PlanSalida, SalidaStock, VentaHistorialFila, ProductoVentaResponse, booleano() (+37 more)
 
 ### Community 8 - "guia-remision.bussnies.ts"
-Cohesion: 0.03
-Nodes (68): campoFormularioGuia(), CAMPOS_FORMULARIO, cantidadTexto(), CODIGOS_YA_REGISTRADA, conGuiaGuardada(), conPlazo(), ContextoDocumento, DefectosGuardado (+60 more)
+Cohesion: 0.04
+Nodes (47): campoFormularioGuia(), CAMPOS_FORMULARIO, cantidadTexto(), CODIGOS_YA_REGISTRADA, ContextoDocumento, DESCRIPCION_MODALIDAD, DESCRIPCION_MOTIVO, ESPERA_CONSULTA_INMEDIATA_MS (+39 more)
 
 ### Community 9 - "comprobante-pdf.ts"
 Cohesion: 0.05
 Nodes (54): Alineacion, AVISO_BETA_PDF, cantidad(), ClientePdfComprobante, COLOR, comoError(), conMiles(), conSon() (+46 more)
 
 ### Community 10 - "fiscal-config.tipos.ts"
-Cohesion: 0.04
-Nodes (83): EventoAuditoriaFiscal, CodigoFaltante, FALTANTES, ItemChecklist, DEFECTOS_PRUEBA, DOCUMENTOS_PRUEBA, esMapaCorrelativoInicial(), FORMATOS_CERTIFICADO_PUBLICO (+75 more)
+Cohesion: 0.08
+Nodes (46): SeriesPosResponse, DEFECTOS_PRUEBA, ACTOR_SISTEMA, AMBIENTES_FISCALES, BloqueoEmision, CLAVES_BLOQUEO_EMISION, CLAVES_CONFIG_FISCAL, CLAVES_CONFIRMACIONES_ACTIVACION (+38 more)
 
 ### Community 11 - "gre-rest-client.ts"
 Cohesion: 0.05
-Nodes (77): adm-zip, base(), clasificarConsultaGre(), clasificarEnvioGre(), codigoParaBuscar(), CODIGOS_CONFIGURACION, CODIGOS_YA_REGISTRADA, comoObjeto() (+69 more)
+Nodes (61): consultaSinRespuesta(), envioSinRespuesta(), MotivoSinRespuestaGre, RespuestaHttpLeidaGre, esperada, ESPACIO_DESPATCH_ADVICE, nombreBaseGre(), ResultadoXmlGre (+53 more)
 
 ### Community 12 - "comprobante.bussnies.ts"
-Cohesion: 0.04
-Nodes (51): AccionesComprobante, BaseRespuesta, EmisorConfigurado, EmisorDocumento, ESTADOS_ACEPTADO, ESTADOS_EN_CURSO, FORMA_MOTIVO_NOTA_CREDITO, MONEDAS (+43 more)
+Cohesion: 0.05
+Nodes (42): AccionesComprobante, BaseRespuesta, ComprobantePreparado, EmisorConfigurado, EmisorDocumento, ESTADOS_ACEPTADO, ESTADOS_EN_CURSO, FORMA_MOTIVO_NOTA_CREDITO (+34 more)
 
 ### Community 13 - "GuiaRemisionBussnies"
-Cohesion: 0.05
-Nodes (29): estadoDe(), GuiaRemisionBussnies, mensajeDe(), numeroFormateado(), IGuiaRemisionBussniees, EstadoGuia, AccionesGuiaResponse, CatalogosGuiaResponse (+21 more)
+Cohesion: 0.10
+Nodes (14): conPlazo(), estadoDe(), GuiaRemisionBussnies, mensajeDe(), numeroFormateado(), pausa(), GuiaRemisionResponse, OperacionGuiaResponse (+6 more)
 
 ### Community 14 - "ComprobanteBussnies"
-Cohesion: 0.06
-Nodes (14): ComprobanteBussnies, ComprobantePreparado, banderas(), ComprobanteDetalleResponse, ComprobanteResponse, ItemPreviewResponse, DatosFiscalesComprobante, FiltroComprobantes (+6 more)
+Cohesion: 0.05
+Nodes (14): ComprobanteBussnies, banderas(), Comprobante, ComprobanteDetalleResponse, ComprobanteResponse, DatosFiscalesComprobante, FiltroComprobantes, fechaLima() (+6 more)
 
 ### Community 15 - "venta-documentos.bussnies.ts"
-Cohesion: 0.06
-Nodes (63): clasificarParaAnular(), motivoEmisionInactiva(), ResumenNotasOrigen, AccionesDetalle, estadoGuia(), ESTADOS_ACEPTADO, fechaLegible(), mensajeDe() (+55 more)
+Cohesion: 0.07
+Nodes (48): clasificarParaAnular(), motivoEmisionInactiva(), ResumenNotasOrigen, AccionesDetalle, estadoGuia(), ESTADOS_ACEPTADO, fechaLegible(), mensajeDe() (+40 more)
 
 ### Community 16 - "NotaCreditoBussnies"
-Cohesion: 0.08
-Nodes (21): calcularAcreditable(), esNotaEnCurso(), esNotaVigente(), NotaCreditoBussnies, AnulacionVentaResponse, NotaAnulacionResponse, AnularVentaRequest, booleano() (+13 more)
+Cohesion: 0.07
+Nodes (20): esNotaEnCurso(), esNotaVigente(), NotaCreditoBussnies, EmisorNotasCredito, AnulacionVentaResponse, NotaAnulacionResponse, AnularVentaRequest, booleano() (+12 more)
 
-### Community 17 - "AmbienteFiscal"
-Cohesion: 0.04
-Nodes (20): certificadoPublico(), FormatoCertificadoPublico, NuevoCertificadoFiscal, RepositorioCertificadosFiscales, DescargaCertificadoPublico, OpcionesSubidaCertificado, RepositorioCertificadosMemoria, CredencialesSol (+12 more)
-
-### Community 18 - "CatalogoRepository"
+### Community 17 - "EjecutorSql"
 Cohesion: 0.05
-Nodes (22): CatalogoController, limitePedido(), CatalogoBussnies, limiteSeguro(), armar(), textoBusqueda(), CatalogoQueryRequest, CategoriaTiendaResponse (+14 more)
+Nodes (9): sanitizarDetalle(), RepositorioCertificadosFiscales, ConfigFiscalRepository, GestorCredencialesFiscalesService, EjecutorSql, BovedaSecretosFiscales, enmascararIdentificador(), validarClientIdGre() (+1 more)
 
-### Community 19 - "Roles"
-Cohesion: 0.09
-Nodes (25): @nestjs/core, @nestjs/swagger, @nestjs/testing, supertest, FORMATOS_PDF, CUERPO_VALIDO, servicio, opcionesSubida (+17 more)
+### Community 19 - "@nestjs/common"
+Cohesion: 0.06
+Nodes (43): class-transformer, @nestjs/common, @nestjs/core, @nestjs/passport, @nestjs/swagger, @nestjs/testing, supertest, FORMATOS_PDF (+35 more)
 
 ### Community 20 - "filasDe"
 Cohesion: 0.07
-Nodes (32): aFila(), AlmacenSalidaGuia, ArchivoGuia, archivosDe(), CierreConsultaGuia, COLUMNAS_GUARDADO, DatosGuardarGuia, decimal() (+24 more)
+Nodes (29): aFila(), AlmacenSalidaGuia, archivosDe(), COLUMNAS_GUARDADO, DatosGuardarGuia, decimal(), entero(), EnvioGuiaEnCursoError (+21 more)
 
 ### Community 21 - "proforma-documento.ts"
-Cohesion: 0.06
-Nodes (67): contraste(), luminancia(), argb(), avisoEstadoCliente(), condicionesComerciales(), cuentasUtiles(), DatosProformaDocumento, describirCuenta() (+59 more)
+Cohesion: 0.07
+Nodes (65): argb(), avisoEstadoCliente(), condicionesComerciales(), contactoEmisor(), cuentasUtiles(), DatosProformaDocumento, describirCuenta(), describirCuentaTabla() (+57 more)
 
 ### Community 22 - "caja-arqueo.bussnies.ts"
-Cohesion: 0.07
-Nodes (55): ICajaArqueoBussniees, ResultadoPreparacionCierre, arqueoDetalleResponse(), arqueoResumenResponse(), CLAVES_RESERVADAS, codigoArqueo(), denominacionesValidas(), efectivoResponse() (+47 more)
+Cohesion: 0.08
+Nodes (47): ICajaArqueoBussniees, ResultadoPreparacionCierre, arqueoDetalleResponse(), arqueoResumenResponse(), CLAVES_RESERVADAS, codigoArqueo(), denominacionesValidas(), efectivoResponse() (+39 more)
 
 ### Community 23 - "ClienteRepository"
 Cohesion: 0.06
 Nodes (10): ClienteController, ClienteBussnies, armar(), IClienteBussniees, IBussniesCrud, ActualizarClienteRequest, CrearClienteRequest, ClienteResponse (+2 more)
 
-### Community 24 - "gre-emision.service.ts"
-Cohesion: 0.07
-Nodes (42): EnvioParaConsulta, RegistroEmisionGuia, ContextoGre, EmisionGre, GreEsperada, GrePreparada, ModoEmisionGre, ResultadoConsultaGre (+34 more)
+### Community 24 - "@nestjs/typeorm"
+Cohesion: 0.04
+Nodes (30): @nestjs/typeorm, ETIQUETA_MOTIVO, traducirErrorStock(), ResultadoAsignacionCodigosSunat, Marca, Usuario, CANTIDAD_MAXIMA_OPERACION, MAX_ASIGNACIONES_CODIGO_SUNAT (+22 more)
 
-### Community 25 - "FiscalConfigError"
+### Community 25 - "certificado-digital.util.ts"
+Cohesion: 0.09
+Nodes (35): RFC-8017, node-forge, armarCertificado(), atributos(), buscarRuc(), CertificadoLeido, certificadoPublico(), decodificarValor() (+27 more)
+
+### Community 26 - "clasificador-gre.ts"
 Cohesion: 0.05
-Nodes (50): RFC-8017, node-forge, armarCertificado(), atributos(), BITS_MINIMOS_SUNAT, BITS_RECOMENDADOS, buscarRuc(), decodificarValor() (+42 more)
-
-### Community 26 - "firmador-xml.ts"
-Cohesion: 0.08
-Nodes (60): xml-crypto, enlaceQrDeCdr(), constructor, ORDEN_XSD, violacionesDeOrden(), CDR_ILEGIBLE, CdrLeido, EstadoCdr (+52 more)
+Nodes (86): @xmldom/xmldom, base(), clasificarConsultaGre(), clasificarEnvioGre(), codigoParaBuscar(), CODIGOS_CONFIGURACION, CODIGOS_YA_REGISTRADA, comoObjeto() (+78 more)
 
 ### Community 27 - "validaciones-cpe.ts"
-Cohesion: 0.11
-Nodes (33): esAfectacionGratuita(), esAfectacionOnerosa(), esMotivoNotaDebito(), LineaCpe, OpcionesValidacionCpe, ResultadoValidacionCpe, PATRON_SERIE_BOLETA, PATRON_SERIE_FACTURA (+25 more)
+Cohesion: 0.12
+Nodes (28): esAfectacionGratuita(), esAfectacionOnerosa(), esMotivoNotaDebito(), CuotaCpe, LineaCpe, ResultadoValidacionCpe, AcumuladorValidacion, ContextoValidacionCpe (+20 more)
 
 ### Community 28 - "validaciones-gre.ts"
-Cohesion: 0.07
-Nodes (58): CATALOGO_18_MODALIDAD_TRASLADO, CATALOGO_20_MOTIVOS_TRASLADO, CATALOGO_61_DOCUMENTOS_RELACIONADOS, DOCUMENTOS_RELACIONADOS_CON_SERIE, ID_ENVIO_GRE, MAXIMO_CONDUCTORES_GRE, MAXIMO_ITEMS_GRE, MOTIVO_GRE_OTROS (+50 more)
+Cohesion: 0.06
+Nodes (65): DefectosGuardado, CATALOGO_06_TIPOS_VALIDOS, CATALOGO_18_MODALIDAD_TRASLADO, CATALOGO_20_MOTIVOS_TRASLADO, CATALOGO_61_DOCUMENTOS_RELACIONADOS, DOCUMENTOS_RELACIONADOS_CON_SERIE, ID_ENVIO_GRE, MAXIMO_CONDUCTORES_GRE (+57 more)
 
 ### Community 29 - "UsuarioToken"
-Cohesion: 0.07
-Nodes (6): CajaArqueoController, CajaSesionController, CarritoController, ContextoCarrito, UsuarioActual, UsuarioToken
+Cohesion: 0.08
+Nodes (6): CajaSesionController, CuentaTiendaController, PedidoAdminController, PedidoController, UsuarioActual, UsuarioToken
 
 ### Community 30 - "ref_crypto"
 Cohesion: 0.06
-Nodes (21): ArchivoController, ArchivoSubido, almacenamientoConfig, cloudinary, ProveedorAlmacen, ProductoImagenRepository, LineaRecepcionInput, NuevaRecepcion (+13 more)
+Nodes (21): @nestjs/platform-express, ArchivoController, opcionesSubida, ErroresSubidaImagenInterceptor, MAXIMO_FOTOS_POR_LOTE, comoNest, traducirErrorSubidaImagen(), ArchivoSubido (+13 more)
 
-### Community 31 - "carrito.bussnies.ts"
-Cohesion: 0.06
-Nodes (15): CarritoBussnies, CarritoItemTienda, CarritoTienda, carritoVacio(), centavos(), esViolacionUnica(), armar(), VACIO (+7 more)
+### Community 31 - "Carrito"
+Cohesion: 0.11
+Nodes (5): CarritoBussnies, carritoVacio(), esViolacionUnica(), Carrito, CarritoRepository
 
-### Community 32 - "nucleo/index.ts"
-Cohesion: 0.07
-Nodes (44): CATALOGO_06_TIPOS_VALIDOS, esConsumidorFinal(), PLAZOS_ENVIO_DIAS, construirCadenaQr(), TIPOS_QR, DatosCadenaQr, esDniValido(), PESOS_RUC (+36 more)
+### Community 32 - "resumen-caja-pdf.ts"
+Cohesion: 0.13
+Nodes (15): dibujarFranjaMarca(), LienzoPdf, Alineacion, COLOR, DibujoResumenCaja, EmisorResumenCajaPdf, Fuente, generarResumenCajaPdf() (+7 more)
 
-### Community 33 - "CuentaTiendaBussnies"
-Cohesion: 0.06
-Nodes (9): idOpcional(), CuentaTiendaController, CuentaTiendaBussnies, UsuarioAutenticado, CrearResenaRequest, GuardarDireccionRequest, CuentaTiendaRepository, IdEnteroPipe (+1 more)
+### Community 34 - "linea-cpe.ts"
+Cohesion: 0.16
+Nodes (19): afectacionDesdeTipoIgv(), crearDocumentoPruebaBeta(), crearDocumentoPruebaUnidades(), serieBetaDe(), serieDePrueba(), AHORA, EMISOR, NUEVOS (+11 more)
 
-### Community 34 - "documento-fiscal.types.ts"
-Cohesion: 0.07
-Nodes (44): @xmldom/xmldom, facturaAceptada(), venta(), afectacionDesdeTipoIgv(), crearDocumentoPruebaBeta(), crearDocumentoPruebaUnidades(), serieBetaDe(), serieDePrueba() (+36 more)
-
-### Community 35 - "ProductoRepository"
-Cohesion: 0.04
-Nodes (9): StockSucursalBussnies, Almacen, MovimientoInventario, StockSucursal, Sucursal, conQuery(), crear(), ProductoRepository (+1 more)
+### Community 35 - "app.module.ts"
+Cohesion: 0.03
+Nodes (31): typeorm, CANCELABLE_POR_CLIENTE, FLUJO_ESTADOS, OpcionSsl, postgresConfig, postgresEntities, DataSourceSinConexion, Registrador (+23 more)
 
 ### Community 36 - "el"
-Cohesion: 0.11
-Nodes (15): ConstructorGreUbl, texto(), MonedaCpe, identificadorCpe(), nombreArchivoResumen(), ConstructorComunicacionBajaUbl, ConstructorResumenDiarioUbl, LineaResumenDiario (+7 more)
+Cohesion: 0.15
+Nodes (12): ConstructorGreUbl, texto(), formatearDecimal(), MonedaCpe, identificadorCpe(), nombreArchivoResumen(), ConstructorComunicacionBajaUbl, ConstructorResumenDiarioUbl (+4 more)
 
-### Community 37 - "emision.registro.spec.ts"
-Cohesion: 0.06
-Nodes (23): main(), REGISTRO_CORREO, REGISTRO_NOTAS_CREDITO, REGISTRO_PLATAFORMA, RegistroModulo, unirRegistros(), REGISTROS, REGISTRO_VENTA_DOCUMENTOS (+15 more)
+### Community 37 - "lotes-fiscales.service.spec.ts"
+Cohesion: 0.08
+Nodes (22): EfectosNotasTarea, montar(), CabeceraBaja, ESTADOS_LOTE_ABIERTOS, RegistroLoteNuevo, ESPERA_TICKET_MINUTOS, MAXIMO_CONSULTAS_TICKET, CDR_ACEPTADO (+14 more)
 
 ### Community 38 - "nota-credito.bussnies.spec.ts"
-Cohesion: 0.07
-Nodes (46): MAXIMO_INTENTOS_NUMERO, cpe(), crear(), envio(), fila(), fiscal(), generarPdf, motorConOrigen() (+38 more)
+Cohesion: 0.08
+Nodes (45): MAXIMO_INTENTOS_NUMERO, cpe(), crear(), envio(), fila(), fiscal(), generarPdf, motorConOrigen() (+37 more)
 
-### Community 39 - "EmisionDirectaService"
-Cohesion: 0.06
-Nodes (13): Registrado, tokenApiPeruDeEntorno(), VARIABLES_TOKEN_APIPERU, DiagnosticoArranqueFiscal, SnapshotConfigFiscal, BetaAdminController, DocumentoPreparado, copiaEmisor() (+5 more)
+### Community 39 - "constructor-resumen-diario.ts"
+Cohesion: 0.09
+Nodes (31): PLAZOS_ENVIO_DIAS, hoyDeReferencia(), aMilisegundosUtc(), compactarFecha(), diasEntre(), esFechaIso(), esHoraValida(), formatoFechaLima (+23 more)
 
 ### Community 40 - "ProductoImagen"
 Cohesion: 0.07
-Nodes (5): ProductoImagenController, ProductoImagenBussnies, armar(), armarSubidas(), ProductoImagen
+Nodes (6): ProductoImagenController, ProductoImagenBussnies, armar(), armarSubidas(), ProductoImagen, ProductoImagenRepository
 
-### Community 41 - "nota-credito.integracion.spec.ts"
-Cohesion: 0.05
-Nodes (27): aceptarNota(), EMISOR, eventoAceptado(), LineaOrigen, marcarAceptado(), SERIES, ADMIN, cliente() (+19 more)
+### Community 41 - "caja-arqueo.repository.ts"
+Cohesion: 0.09
+Nodes (11): OpcionesSqlEsperado, sqlEsperadoTurno(), LineaConteo, FilaFuenteCaja, FuenteCaja, ICajaArqueoRepository, MovimientoGuardado, NuevoArqueo (+3 more)
 
 ### Community 42 - "Dinero"
 Cohesion: 0.08
-Nodes (10): DecimalExacto, Dinero, dividirRedondeando(), formatearDecimal(), formatearMonto(), potencia10(), potenciasDe10, redondear() (+2 more)
+Nodes (9): DecimalExacto, Dinero, dividirRedondeando(), formatearMonto(), potencia10(), potenciasDe10, redondear(), valorAbsoluto() (+1 more)
 
-### Community 43 - "class-validator"
-Cohesion: 0.05
-Nodes (13): class-transformer, class-validator, @nestjs/passport, OptionalJwtGuard, CANTIDAD_MAXIMA_OPERACION, AsignarCodigosSunatRequest, MAX_ASIGNACIONES_CODIGO_SUNAT, ActualizarItemCarritoRequest (+5 more)
-
-### Community 44 - "sunat.bussnies.ts"
-Cohesion: 0.09
-Nodes (9): SunatController, SunatBussnies, ISunatBussniees, BuscarDniRequest, BuscarRucEmpresaRequest, BuscarRucProveedorRequest, DniResponse, RucResponse (+1 more)
+### Community 43 - "FiscalAdminController"
+Cohesion: 0.11
+Nodes (3): actorDe(), FiscalAdminController, EnviosAdminController
 
 ### Community 45 - "proforma.bussnies.ts"
-Cohesion: 0.10
-Nodes (15): ConfigEmisor, CUENTAS_DOCUMENTO_POR_DEFECTO, DocumentoProforma, ProformaBussnies, IProformaBussniees, ProformaItemResponse, ProformaResponse, CuentaBancariaProforma (+7 more)
+Cohesion: 0.09
+Nodes (20): ConfigEmisor, CUENTAS_DOCUMENTO_POR_DEFECTO, DocumentoProforma, ProformaBussnies, IProformaBussniees, CLAVE_CONDICIONES_PROFORMA, CLAVES_EMISOR, CLAVES_SERIES (+12 more)
 
 ### Community 46 - "reportes.bussnies.ts"
 Cohesion: 0.08
@@ -424,279 +416,295 @@ Nodes (32): exceljs, ClaseReporte, clasificarComprobanteReporte(), ComprobanteRe
 
 ### Community 47 - "AdminController"
 Cohesion: 0.05
-Nodes (5): AdminController, ActualizarEmpleadoRequest, CambiarRolRequest, CrearEmpleadoRequest, EliminarUsuarioRequest
+Nodes (6): AdminController, AdminBussnies, ActualizarEmpleadoRequest, CambiarRolRequest, CrearEmpleadoRequest, EliminarUsuarioRequest
 
 ### Community 48 - "sunat.catalogos.ts"
-Cohesion: 0.05
-Nodes (44): motivosDisponibles(), AFECTACIONES_GRATUITAS, AFECTACIONES_ONEROSAS, AfectacionIgv, CATALOGO_01_BOLETA, CATALOGO_01_FACTURA, CATALOGO_01_GUIA_REMISION_REMITENTE, CATALOGO_01_NOTA_CREDITO (+36 more)
+Cohesion: 0.04
+Nodes (60): motivosDisponibles(), CatalogoMotivosResponse, AFECTACIONES_GRATUITAS, AFECTACIONES_ONEROSAS, AfectacionIgv, ALIAS_UNIDADES, ATRIBUTOS_CATALOGO_01, CATALOGO_01_BOLETA (+52 more)
 
 ### Community 49 - "package.json"
 Cohesion: 0.05
-Nodes (44): author, description, license, name, private, version, @anthropic-ai/sdk, better-sqlite3 (+36 more)
+Nodes (43): author, description, license, name, private, version, @anthropic-ai/sdk, bcrypt (+35 more)
 
 ### Community 50 - "Dinero"
-Cohesion: 0.06
-Nodes (11): DeclaracionMedio, buscarDenominacion(), ConteoDenominacionEntrada, ConteoEfectivo, Denominacion, DENOMINACIONES_PEN, leerValor(), TipoDenominacion (+3 more)
+Cohesion: 0.07
+Nodes (9): buscarDenominacion(), ConteoDenominacionEntrada, ConteoEfectivo, Denominacion, DENOMINACIONES_PEN, leerValor(), TipoDenominacion, Dinero (+1 more)
 
 ### Community 51 - "guia-remision-pdf.ts"
-Cohesion: 0.09
-Nodes (21): pdfkit, cantidad(), COLOR, DatosGuiaRemisionPdf, DibujoGuia, fecha(), Fila, generarGuiaRemisionPdf() (+13 more)
+Cohesion: 0.11
+Nodes (19): pdfkit, cantidad(), COLOR, DatosGuiaRemisionPdf, DibujoGuia, fecha(), Fila, generarGuiaRemisionPdf() (+11 more)
 
-### Community 52 - "correo.config.ts"
-Cohesion: 0.13
-Nodes (24): axios, ConfigCorreo, Entorno, fabricarEnviador(), leerConfigCorreo(), ProveedorCorreo, texto(), EnviadorArchivo (+16 more)
+### Community 52 - "axios"
+Cohesion: 0.20
+Nodes (14): axios, config, mensaje, post, URL_BREVO, ErrorEnvioCorreo, MensajeCorreo, ResultadoEnvioCorreo (+6 more)
 
 ### Community 53 - "fecha-lima.ts"
 Cohesion: 0.13
-Nodes (36): escaparComodines(), aFechaLima(), cuatro(), DESFASE_LIMA_MINUTOS, diasEntreYmd(), dos(), fechaHoraLimaLegible(), FechaLimaInvalidaError (+28 more)
+Nodes (35): aFechaLima(), cuatro(), DESFASE_LIMA_MINUTOS, diasEntreYmd(), dos(), fechaHoraLimaLegible(), FechaLimaInvalidaError, FiltroFechasLima (+27 more)
 
-### Community 54 - "CajaPagosRepository"
-Cohesion: 0.08
-Nodes (3): CajaPagosController, CajaPagosBussnies, CajaPagosRepository
+### Community 54 - "caja.request.ts"
+Cohesion: 0.07
+Nodes (11): CajaPagosController, AbrirCajaRequest, ActualizarCuentaBancariaRequest, AperturasCajaQuery, CerrarCajaRequest, CuentaBancariaRequest, IniciarYapeRequest, MovimientoCajaRequest (+3 more)
 
-### Community 55 - "VentaController"
-Cohesion: 0.08
-Nodes (16): contexto(), crear(), mensajes(), Metodo, metodoDe(), rutasGet(), validar(), VentaController (+8 more)
-
-### Community 56 - "caja-arqueo.repository.ts"
-Cohesion: 0.08
-Nodes (13): OpcionesSqlEsperado, sqlEsperadoTurno(), LineaConteo, FilaFuenteCaja, FuenteCaja, ArqueoGuardado, ICajaArqueoRepository, MovimientoGuardado (+5 more)
+### Community 56 - "relanzarHttp"
+Cohesion: 0.13
+Nodes (8): CajaArqueoBussnies, esAdmin(), movimientoResponse(), turnoResponse(), relanzarHttp(), ArqueoGuardado, TurnoArqueo, CajaArqueoRepository
 
 ### Community 57 - "culqi.pasarela.ts"
 Cohesion: 0.09
 Nodes (15): ENTORNO_ORIGINAL, escenario(), Estado, pasarelaConfig, esProduccion(), CulqiPasarela, EventoWebhook, PASARELA_PAGO (+7 more)
 
 ### Community 58 - "RecepcionRepository"
-Cohesion: 0.09
-Nodes (6): RecepcionBussnies, armar(), tick(), RecepcionRepository, armar(), fila
+Cohesion: 0.04
+Nodes (8): ProveedorController, RecepcionController, RecepcionBussnies, armar(), tick(), RecepcionRepository, armar(), fila
 
 ### Community 59 - "nota-credito.bussnies.ts"
-Cohesion: 0.10
-Nodes (38): AVISO_MOTIVO, buscarAcreditable(), centesimas(), centimos(), ClaseAnulacion, CODIGOS_BAJA_CONFLICTO, conDosDecimales(), DecisionIncierto (+30 more)
+Cohesion: 0.06
+Nodes (43): AVISO_MOTIVO, buscarAcreditable(), calcularAcreditable(), centesimas(), centimos(), ClaseAnulacion, CODIGOS_BAJA_CONFLICTO, conDosDecimales() (+35 more)
 
 ### Community 60 - "arqueo-pdf.ts"
-Cohesion: 0.17
-Nodes (15): Alineacion, COLOR, colorEstado(), DibujoArqueo, EmisorArqueoPdf, etiquetaEstado(), fecha(), Fuente (+7 more)
+Cohesion: 0.16
+Nodes (16): Alineacion, COLOR, colorEstado(), DatosArqueoPdf, DibujoArqueo, EmisorArqueoPdf, etiquetaEstado(), fecha() (+8 more)
 
-### Community 61 - "plataforma.registro.ts"
+### Community 61 - "salud.bussnies.ts"
 Cohesion: 0.10
-Nodes (11): SaludController, CACHE_PING_MS, SaludBussnies, TIEMPO_MAXIMO_PING_MS, ISaludBussniees, versionDespliegue(), EstadoPingBd, ResultadoPingBd (+3 more)
+Nodes (10): SaludController, CACHE_PING_MS, SaludBussnies, TIEMPO_MAXIMO_PING_MS, ISaludBussniees, EstadoPingBd, ResultadoPingBd, SaludResponse (+2 more)
 
 ### Community 62 - "logo-emisor.ts"
-Cohesion: 0.10
-Nodes (28): SeriesPosResponse, CLAVE_CONDICIONES_PROFORMA, CLAVES_EMISOR, CLAVES_SERIES, emisorConfig, LOGO_EMISOR_OFICIAL, SERIES_POR_DEFECTO, SERIES_FISCALES_POR_DEFECTO (+20 more)
+Cohesion: 0.09
+Nodes (28): LOGO_EMISOR_OFICIAL, logoPrueba(), cache, codificarPng(), crc32(), dimensionesImagen(), esJpeg(), esPng() (+20 more)
 
-### Community 63 - "CajaSesionRepository"
-Cohesion: 0.10
-Nodes (5): CajaSesionBussnies, CajaSesionRepository, apertura, armar(), snapshot()
+### Community 63 - "ConfiguracionRepository"
+Cohesion: 0.07
+Nodes (7): CajaSesionBussnies, montoInicialDeApertura(), armar(), usuario, CajaSesionRepository, ConfiguracionRepository, repositorio()
 
-### Community 64 - "CajaArqueoBussnies"
-Cohesion: 0.14
-Nodes (7): CajaArqueoBussnies, esAdmin(), movimientoResponse(), turnoResponse(), ErrorCaja, relanzarHttp(), TurnoArqueo
+### Community 64 - "sunat-emision.service.spec.ts"
+Cohesion: 0.13
+Nodes (19): NUMERO_PRUEBA_CREDENCIALES, ABIERTOS, cdrDe(), certificado, crear(), CREDENCIALES_PRODUCCION, EnviosMemoria, material (+11 more)
 
-### Community 65 - "ComprobanteRepository"
-Cohesion: 0.08
-Nodes (9): ComprobanteRepository, esViolacionUnicaSerieNumero(), NumeroOcupadoError, numeroONulo(), pisoValido(), COLUMNAS_FASE9, crearRepositorio(), ITEM (+1 more)
+### Community 65 - "comprobante.repository.ts"
+Cohesion: 0.07
+Nodes (23): PlanRegistro, COLUMNAS_EFECTOS_NOTA, COLUMNAS_NOTA, COLUMNAS_OPCIONALES, ComprobanteRepository, ComprobanteVigenteVenta, Consultor, DatosListadoComprobante (+15 more)
 
-### Community 66 - "ConfiguracionRepository"
-Cohesion: 0.08
-Nodes (15): planificarSalidas(), sunatConfig, ConfiguracionRepository, repositorio(), FUENTE_CATALOGO, OpcionesBusqueda, LineaReserva, ModoStockTienda (+7 more)
+### Community 66 - "EnvioFiscalRepository"
+Cohesion: 0.06
+Nodes (24): restriccionUnica(), sha256(), consultorFalso(), crear(), Llamada, LOTE, RESPUESTAS_REGISTRO, ConsultorTx (+16 more)
 
 ### Community 67 - "ProformaController"
 Cohesion: 0.10
 Nodes (5): ProformaController, CrearProformaRequest, EnviarCotizacionWaRequest, MarcarProformaRequest, ProformaItemRequest
 
-### Community 68 - "pedido.controller.ts"
-Cohesion: 0.12
-Nodes (5): PedidoAdminController, PedidoController, CambiarEstadoPedidoRequest, CrearPedidoRequest, RegistrarPagoRequest
+### Community 68 - "CarritoController"
+Cohesion: 0.14
+Nodes (4): CarritoController, ActualizarItemCarritoRequest, AgregarItemCarritoRequest, FusionarCarritoRequest
 
-### Community 69 - "venta.bussnies.ts"
+### Community 69 - "guia-remision.response.ts"
 Cohesion: 0.10
-Nodes (28): ItemRecargo, SIN_RECARGO, calcularLinea(), desagregarIgv(), LineaFiscal, LineaFiscalEntrada, normalizarTipoIgv(), PORCENTAJE_IGV_POR_DEFECTO (+20 more)
-
-### Community 70 - "ComprobanteController"
-Cohesion: 0.13
-Nodes (3): ComprobanteController, nombreDescarga(), crear()
+Nodes (18): EstadoGuia, AccionesGuiaResponse, ConductorGuiaResponse, ContextoVentaGuiaResponse, DocumentoRelacionadoGuiaResponse, EnvioGuiaResponse, GuiaRemisionItemResponse, GuiaRemisionResumenResponse (+10 more)
 
 ### Community 71 - "ComprobanteCorreosRepository"
 Cohesion: 0.11
-Nodes (4): ComprobanteCorreosRepository, CorreoFila, CorreoComprobanteService, correoValido()
+Nodes (3): ComprobanteCorreosRepository, CorreoFila, CorreoComprobanteService
 
-### Community 72 - "construir-xml-cpe.ts"
-Cohesion: 0.12
-Nodes (20): ATRIBUTOS_CATALOGO_01, CATALOGO_51_VENTA_INTERNA, construirXmlCpe(), construirXmlCpeValidado(), FabricaConstructoresXmlCpe, fabricaPorOmision, FormaPagoCpe, ResultadoXmlCpe (+12 more)
+### Community 72 - "documento-fiscal.types.ts"
+Cohesion: 0.05
+Nodes (62): esConsumidorFinal(), boleta(), factura(), construirCadenaQr(), TIPOS_QR, documentoConCaracteresEspeciales(), construirXmlCpe(), construirXmlCpeValidado() (+54 more)
 
-### Community 73 - "filtro-errores.filter.ts"
-Cohesion: 0.12
-Nodes (20): CABECERA_ID_PETICION, Cabeceras, ContextoPeticion, DatosPeticion, decodificarSeguro(), enmascararDatosPersonales(), enmascararTexto(), LARGO_MAXIMO_RUTA (+12 more)
+### Community 73 - "registro-peticiones.middleware.ts"
+Cohesion: 0.17
+Nodes (8): CABECERA_ID_PETICION, Cabeceras, ContextoPeticion, DatosPeticion, crearMiddlewareRegistroPeticiones(), MARCA_ERROR_REGISTRADO, OpcionesRegistroPeticiones, rutaParaLog()
 
 ### Community 74 - "dependencies"
 Cohesion: 0.06
 Nodes (33): dependencies, adm-zip, @anthropic-ai/sdk, axios, bcrypt, better-sqlite3, class-transformer, class-validator (+25 more)
 
-### Community 76 - "checklist-activacion.ts"
-Cohesion: 0.13
-Nodes (26): advertenciasCertificado(), describirCertificado(), advertencias(), checklist(), ChecklistDocumento, detalleSecreto(), evaluarPreparacion(), fechaCorta() (+18 more)
+### Community 75 - "filasDe"
+Cohesion: 0.16
+Nodes (9): filasDe(), ESTADOS_CXC, LineaCredito, MetodoPagoActivo, LineaRecepcionInput, NuevaRecepcion, ObservacionCreada, RecepcionRegistrada (+1 more)
 
-### Community 77 - "firmador-xml.spec.ts"
-Cohesion: 0.09
-Nodes (22): CertificadoDigitalError, FirmaDemoNoPermitidaError, firmarXmlDemo(), MENSAJE_DEMO_EN_PRODUCCION, OpcionesFirmaDemo, ALGORITMOS_FIRMA_SUNAT, BITS_MINIMOS_CLAVE, CertificadoPreparado (+14 more)
+### Community 76 - "FiscalConfigService"
+Cohesion: 0.05
+Nodes (9): CertificadoParaChecklist, HechosPreparacion, ResultadoPreparacion, FiscalConfigService, SnapshotConfigFiscal, ProductosSinCodigoSunatRepository, SaludFiscalService, construirVistaConfigFiscal() (+1 more)
+
+### Community 77 - "lote-fiscal.repository.ts"
+Cohesion: 0.05
+Nodes (36): aLinea(), aLote(), ambienteDe(), aVista(), efectoDelCierre(), ESTADOS_COMPROBANTE_ACEPTADO, iso(), LineaLoteNueva (+28 more)
 
 ### Community 78 - "politica-limites.ts"
-Cohesion: 0.08
-Nodes (19): LimitePeticionesGuard, claveIp(), coincide(), ConfigLimites, correoDe(), CUALQUIERA, ESCRITURAS, expandirIpv6() (+11 more)
+Cohesion: 0.10
+Nodes (20): ConsumoLimite, claveIp(), coincide(), ConfigLimites, ConsumoCubeta, correoDe(), CUALQUIERA, ESCRITURAS (+12 more)
 
-### Community 79 - "cuerpoError"
-Cohesion: 0.15
-Nodes (3): VentaBussnies, VentaResponse, cuerpoError()
+### Community 79 - "venta.bussnies.ts"
+Cohesion: 0.04
+Nodes (48): aceptarNota(), EMISOR, eventoAceptado(), facturaAceptada(), LineaOrigen, marcarAceptado(), SERIES, venta() (+40 more)
 
 ### Community 80 - "devDependencies"
 Cohesion: 0.06
 Nodes (31): devDependencies, eslint, eslint-config-prettier, @eslint/eslintrc, @eslint/js, eslint-plugin-prettier, globals, jest (+23 more)
 
 ### Community 81 - "GuardarGuiaRemisionRequest"
-Cohesion: 0.19
-Nodes (12): AnularGuiaRemisionRequest, CODIGOS_UNIDAD, ConductorGuiaRequest, DestinatarioGuiaRequest, GuardarGuiaRemisionRequest, ItemGuiaRequest, ListarGuiasRemisionRequest, PuntoGuiaRequest (+4 more)
+Cohesion: 0.09
+Nodes (21): IGuiaRemisionBussniees, AnularGuiaRemisionRequest, CODIGOS_UNIDAD, ConductorGuiaRequest, DestinatarioGuiaRequest, ESTADOS_GUIA, GuardarGuiaRemisionRequest, ItemGuiaRequest (+13 more)
 
-### Community 82 - "RolBussnies"
-Cohesion: 0.11
-Nodes (4): RolController, RolBussnies, ActualizarRolRequest, CrearRolRequest
+### Community 82 - "rol.bussnies.ts"
+Cohesion: 0.10
+Nodes (5): RolController, RolBussnies, ROLES_PROTEGIDOS, ActualizarRolRequest, CrearRolRequest
 
-### Community 83 - "proforma.repository.ts"
+### Community 83 - "ProformaRepository"
+Cohesion: 0.10
+Nodes (9): Proforma, codigoErrorBd(), codigoProforma(), detalleBd(), esChoqueDeCodigo(), esChoqueDePk(), ProformaRepository, restriccionBd() (+1 more)
+
+### Community 84 - "enmascarar.ts"
+Cohesion: 0.24
+Nodes (10): decodificarSeguro(), enmascararDatosPersonales(), enmascararTexto(), LARGO_MAXIMO_RUTA, LARGO_MAXIMO_SQL, recortar(), rutaSegura(), sqlSeguro() (+2 more)
+
+### Community 85 - "runtime.config.ts"
 Cohesion: 0.12
-Nodes (15): codigoErrorBd(), codigoProforma(), detalleBd(), esChoqueDeCodigo(), esChoqueDePk(), LIMITE_NUMERO_HEREDADO, NuevaProforma, NuevoItemProforma (+7 more)
+Nodes (17): nombreAplicacionBd(), opcionesComunes(), opcionesPoolPostgres(), opcionesSsl(), postgresDesdeEnv(), FALSOS, LimitesNumericos, numeroEntorno() (+9 more)
 
-### Community 84 - "traductor-errores-bd.ts"
-Cohesion: 0.13
-Nodes (17): Registrador, RegistroTypeorm, mensajePgSeguro(), sqlSeguro(), mensajePorEstado(), esErrorPgOperativo(), reglaParaErrorPg(), BD_NO_DISPONIBLE (+9 more)
-
-### Community 85 - "EnviosAdminController"
-Cohesion: 0.12
-Nodes (3): EnviosAdminController, ConfirmarAceptadoDto, ListarEnviosDto
+### Community 86 - "DibujoProforma"
+Cohesion: 0.23
+Nodes (3): DibujoProforma, generarProformaPdf(), PDFDocument
 
 ### Community 87 - "main.ts"
-Cohesion: 0.12
-Nodes (23): cookie-parser, postgresConfigurado(), JWT_DEFAULT_DEV, booleanoEntorno(), bootstrap(), montarSwagger(), validarEntornoProduccion(), crearMiddlewareCabecerasSeguridad() (+15 more)
-
-### Community 88 - "AlmacenLimitesMemoria"
-Cohesion: 0.11
-Nodes (10): AlmacenLimites, AlmacenLimitesMemoria, ConsumoLimite, Contador, ResultadoLimite, CODIGO_DEMASIADAS_SOLICITUDES, DemasiadasPeticionesException, ALMACEN_LIMITES (+2 more)
+Cohesion: 0.13
+Nodes (22): postgresConfigurado(), JWT_DEFAULT_DEV, booleanoEntorno(), bootstrap(), montarSwagger(), validarEntornoProduccion(), crearMiddlewareCabecerasSeguridad(), OpcionesCabecerasSeguridad (+14 more)
 
 ### Community 89 - "reporte-ventas-pdf.ts"
 Cohesion: 0.16
 Nodes (26): ABREVIATURA_TIPO, Alineacion, cantidad(), COLOR, ColumnaPdf, entero(), Fuente, generarReporteVentasPdf() (+18 more)
 
 ### Community 90 - "sunat-soap-client.ts"
-Cohesion: 0.15
-Nodes (21): EstadoComprobanteSunat, ConfiguracionSoapInvalidaError, ENDPOINTS_SUNAT, endpointsSunat, esEndpointProduccion(), HOSTS_PRODUCCION_SUNAT, DESCRIPCIONES_CONSULTA_SUNAT, estadoDeConsulta() (+13 more)
+Cohesion: 0.06
+Nodes (47): ConfiguracionSoapInvalidaError, ENDPOINTS_SUNAT, endpointsSunat, esEndpointProduccion(), HOSTS_PRODUCCION_SUNAT, DESCRIPCIONES_CONSULTA_SUNAT, estadoDeConsulta(), ESTADOS_CONSULTA_SUNAT (+39 more)
 
 ### Community 91 - "compilerOptions"
 Cohesion: 0.07
 Nodes (26): compilerOptions, allowSyntheticDefaultImports, declaration, emitDecoratorMetadata, esModuleInterop, experimentalDecorators, forceConsistentCasingInFileNames, ignoreDeprecations (+18 more)
 
-### Community 97 - "RespuestaSunat"
-Cohesion: 0.16
-Nodes (12): RespuestaSunat, ArgumentosSoap, construirSobreSoap(), CredencialesSoap, ESPACIO_SERVICIO_SUNAT, ESPACIO_SOAP_11, ESPACIO_WSSE, MetodoSoapSunat (+4 more)
+### Community 92 - "fiscal-errores.ts"
+Cohesion: 0.06
+Nodes (12): CAMPOS_RESERVADOS, CodigoFiscal, CODIGOS_FISCALES_EMISION, ESTADO_HTTP, LotesAdminController, ListarLotesDto, Transformacion, descargaDeEnvio() (+4 more)
 
-### Community 99 - "AbonoCreditoRequest"
-Cohesion: 0.14
-Nodes (3): CreditoController, AbonoCreditoRequest, LineaCreditoRequest
+### Community 93 - "caja-turnos.bussnies.ts"
+Cohesion: 0.08
+Nodes (30): MONTO_INICIAL_MAXIMO, AperturaListada, ConsultaAperturas, ConsultaResumen, ResumenSucursal, CodigoErrorCaja, CodigoErrorCajaTipo, cuerpoErrorCaja() (+22 more)
+
+### Community 94 - "PedidoRepository"
+Cohesion: 0.13
+Nodes (3): codigoPedido(), codigoProvisional(), PedidoRepository
+
+### Community 95 - "StockSucursal"
+Cohesion: 0.08
+Nodes (3): StockSucursalController, StockSucursalBussnies, StockSucursal
+
+### Community 99 - "CreditoRepository"
+Cohesion: 0.06
+Nodes (5): CreditoController, CreditoBussnies, AbonoCreditoRequest, LineaCreditoRequest, CreditoRepository
+
+### Community 100 - "EmisionGre"
+Cohesion: 0.15
+Nodes (3): GreTicketsTarea, montar(), EmisionGre
+
+### Community 101 - "ProductoController"
+Cohesion: 0.12
+Nodes (3): ProductoController, AsignarCodigosSunatRequest, UnidadAmigable
 
 ### Community 102 - "clasificador-respuesta.ts"
-Cohesion: 0.09
-Nodes (20): clasificadorPorOmision, clasificarRespuesta(), CODIGOS_BAJA_FUERA_DE_PLAZO, CODIGOS_CERTIFICADO, CODIGOS_CREDENCIAL_SOL, CODIGOS_DOCUMENTO_ALTERADO, CODIGOS_EMISOR_NO_HABILITADO, CODIGOS_FAULT_CONFIGURACION (+12 more)
+Cohesion: 0.12
+Nodes (27): clasificadorPorOmision, ClasificadorRespuestaSunat, clasificarRespuesta(), CODIGOS_BAJA_FUERA_DE_PLAZO, CODIGOS_CERTIFICADO, CODIGOS_CREDENCIAL_SOL, CODIGOS_DOCUMENTO_ALTERADO, CODIGOS_EMISOR_NO_HABILITADO (+19 more)
 
-### Community 103 - "producto-imagen.controller.ts"
+### Community 103 - "plataforma.registro.ts"
 Cohesion: 0.14
-Nodes (10): @nestjs/platform-express, rxjs, opcionesSubida, ErroresSubidaImagenInterceptor, MAXIMO_FOTOS_POR_LOTE, comoNest, traducirErrorSubidaImagen(), ErroresFiscalesInterceptor (+2 more)
+Nodes (8): LimitePeticionesGuard, AlmacenLimites, Contador, ResultadoLimite, CODIGO_DEMASIADAS_SOLICITUDES, DemasiadasPeticionesException, ALMACEN_LIMITES, PROVEEDORES_LIMITE_PETICIONES
 
-### Community 104 - "ActualizarInventarioRequest"
-Cohesion: 0.13
-Nodes (3): IInventarioBussniees, ActualizarInventarioRequest, InventarioResponse
+### Community 104 - "tipos-comprobante.ts"
+Cohesion: 0.11
+Nodes (17): ymdLegible(), NOMBRE_TIPO, TIPO_BOLETA, TIPO_DOC_DNI, TIPO_DOC_RUC, TIPO_NOTA_DEBITO, TIPO_SUNAT, TipoCatalogo01 (+9 more)
 
-### Community 106 - "CrearVentaRequest"
-Cohesion: 0.16
-Nodes (7): crear(), crearServicio(), ventaGuardada(), CrearVentaRequest, EmitirComprobanteVentaRequest, ItemVentaRequest, PagoVentaRequest
+### Community 106 - "FiscalConfigError"
+Cohesion: 0.06
+Nodes (64): EventoAuditoriaFiscal, BITS_MINIMOS_SUNAT, BITS_RECOMENDADOS, InfoCertificado, advertenciasCertificado(), ContextoInfoCertificado, describirCertificado(), ContextoValidacionCertificado (+56 more)
 
 ### Community 107 - "InventarioBussnies"
-Cohesion: 0.18
-Nodes (3): InventarioBussnies, AjustarStockRequest, TransferirStockRequest
+Cohesion: 0.15
+Nodes (4): InventarioBussnies, ActualizarInventarioRequest, AjustarStockRequest, TransferirStockRequest
 
-### Community 108 - "nota-credito.controller.spec.ts"
-Cohesion: 0.11
-Nodes (7): NotaCreditoController, Clase, contexto(), crear(), metodoDe(), rutas(), validar()
+### Community 109 - "CajaTurnosBussnies"
+Cohesion: 0.08
+Nodes (17): admin, armar(), cajero, filasEfectivo140, turno(), admin, armar(), cajero (+9 more)
 
-### Community 110 - "caja-sesion.bussnies.ts"
-Cohesion: 0.29
-Nodes (6): AbrirCajaRequest, ActualizarCuentaBancariaRequest, CerrarCajaRequest, CuentaBancariaRequest, IniciarYapeRequest, MovimientoCajaRequest
+### Community 110 - "registros.ts"
+Cohesion: 0.20
+Nodes (11): REGISTRO_CAJA, REGISTRO_CORREO, REGISTRO_GUIAS, REGISTRO_NOTAS_CREDITO, REGISTRO_PLATAFORMA, RegistroModulo, unirRegistros(), REGISTROS (+3 more)
 
-### Community 111 - "esquema-caja.service.ts"
-Cohesion: 0.14
-Nodes (17): CodigoErrorCaja, CodigoErrorCajaTipo, cuerpoErrorCaja(), mensajeScriptPendiente(), SCRIPT_FASE11, CapacidadCaja, EFECTO_SI_FALTA, REQUISITOS (+9 more)
+### Community 111 - "BuscarDniRequest"
+Cohesion: 0.25
+Nodes (6): ISunatBussniees, BuscarDniRequest, BuscarRucEmpresaRequest, BuscarRucProveedorRequest, DniResponse, RucResponse
 
 ### Community 112 - "RegistrarArqueoRequest"
 Cohesion: 0.19
 Nodes (6): MAX_CANTIDAD_POR_DENOMINACION, DenominacionArqueoRequest, MedioDeclaradoRequest, PdfArqueoQuery, RegistrarArqueoRequest, TurnoQuery
 
 ### Community 113 - "correo-comprobante.service.ts"
-Cohesion: 0.13
-Nodes (17): CLAVE_CORREO_ENVIO_ACTIVO, DetalleParaCorreo, EstadoCorreoDetalle, ESTADOS_ACEPTADOS, ResultadoProceso, ResumenCorreoComprobante, detalle(), fila() (+9 more)
-
-### Community 114 - "ClasificadorRespuestaSunat"
-Cohesion: 0.34
-Nodes (6): ClasificadorRespuestaSunat, cuatroDigitos(), decision(), numero(), ClasificacionRespuesta, ContextoClasificacion
+Cohesion: 0.16
+Nodes (14): CLAVE_CORREO_ENVIO_ACTIVO, DetalleParaCorreo, EstadoCorreoDetalle, ESTADOS_ACEPTADOS, ResultadoProceso, ResumenCorreoComprobante, AdjuntoCorreo, armarCorreoComprobante() (+6 more)
 
 ### Community 115 - "reporte-ventas-excel.ts"
 Cohesion: 0.18
 Nodes (20): aFecha(), agregarHoja(), agregarResumen(), ARGB, bloqueTitulo(), bordeFino, bordes, cabeceraTabla() (+12 more)
 
 ### Community 116 - "reglas-postgres.ts"
-Cohesion: 0.12
-Nodes (16): BD_NO_DISPONIBLE, campo(), claveForanea(), columnasDeDetalle(), DATO_INVALIDO, duplicado(), ESQUEMA_PENDIENTE, Fabrica (+8 more)
+Cohesion: 0.13
+Nodes (15): BD_NO_DISPONIBLE, campo(), claveForanea(), columnasDeDetalle(), DATO_INVALIDO, duplicado(), ESQUEMA_PENDIENTE, Fabrica (+7 more)
 
 ### Community 118 - "InventarioRepository"
-Cohesion: 0.13
+Cohesion: 0.12
 Nodes (3): InventarioRepository, armar(), fila
 
 ### Community 119 - "WhatsappPasarela"
 Cohesion: 0.19
 Nodes (6): armar(), armarCreacion(), whatsappCloudListo(), whatsappConfig, ResultadoEnvioWa, WhatsappPasarela
 
-### Community 120 - "sunat-soap-client.spec.ts"
-Cohesion: 0.19
-Nodes (17): cdrDe(), cdrPrueba(), OpcionesCdrPrueba, respuestaFault(), respuestaGetStatus(), respuestaGetStatusCdr(), respuestaSendBill(), respuestaSendSummary() (+9 more)
+### Community 120 - "pago.bussnies.ts"
+Cohesion: 0.09
+Nodes (15): UsuarioAutenticado, CambiarEstadoPedidoRequest, CrearPedidoRequest, RegistrarPagoRequest, PedidoEstadoResponse, PedidoItemResponse, FUENTE_CATALOGO, OpcionesBusqueda (+7 more)
 
-### Community 121 - "transporte-soap.ts"
+### Community 121 - "carrito.bussnies.ts"
 Cohesion: 0.16
-Nodes (10): DependenciasClienteSoap, agenteHttps(), CODIGOS_RED_TRANSITORIOS, ErrorTransporteSoap, MAXIMO_BYTES_RESPUESTA_SOAP, normalizarErrorRed(), PeticionSoap, RespuestaHttpSoap (+2 more)
+Nodes (10): CarritoItemTienda, CarritoTienda, centavos(), ContextoCarrito, armar(), VACIO, TASA_IGV, CarritoItemResponse (+2 more)
 
-### Community 123 - "ReceptorRepository"
-Cohesion: 0.15
-Nodes (3): OrigenReceptor, SugerenciaReceptor, ReceptorRepository
+### Community 123 - "correo.config.ts"
+Cohesion: 0.26
+Nodes (11): ConfigCorreo, correoValido(), Entorno, fabricarEnviador(), leerConfigCorreo(), ProveedorCorreo, texto(), EnviadorArchivo (+3 more)
 
-### Community 124 - "ErrorTraducido"
+### Community 124 - "filtro-errores.filter.ts"
+Cohesion: 0.10
+Nodes (38): CAMPOS_RESERVADOS, ErrorConCodigo, esErrorConCodigo(), esObjetoPlano(), estadoDeclarado(), sinCamposReservados(), ErrorTraducido, NivelRegistro (+30 more)
+
+### Community 125 - "gre-emision.service.spec.ts"
+Cohesion: 0.13
+Nodes (21): Cambios, CERTIFICADO, certificadoInfo(), crear(), CREDENCIALES, snapshot(), GreInvalidaError, aplicar() (+13 more)
+
+### Community 128 - "UserController"
+Cohesion: 0.11
+Nodes (4): UserController, UserService, UserRequest, UserMapper
+
+### Community 129 - "listar-ventas.request.ts"
 Cohesion: 0.18
-Nodes (11): ErrorTraducido, NivelRegistro, TraductorError, traductoresPorDefecto(), CODIGOS_DE_RED, ErrorAxios, ErrorHttpCrudo, estadoHttpCrudo() (+3 more)
-
-### Community 125 - "traductor-http-exception.ts"
-Cohesion: 0.20
-Nodes (15): codigoPorEstado(), CODIGOS, esFraseInglesaDeNest(), estadoDeError(), FRASES, FRASES_INGLES, MENSAJES, comoTexto() (+7 more)
-
-### Community 130 - "runtime.config.ts"
-Cohesion: 0.17
-Nodes (11): FALSOS, LimitesNumericos, numeroEntorno(), VERDADEROS, RITMO_MAXIMO_MS, RITMO_MINIMO_POR_OMISION_MS, RITMO_SUNAT, ritmoMinimoDesdeEntorno() (+3 more)
+Nodes (9): diaLima(), ESTADOS_VENTA, ListarVentasRequest, ListarVentasSinComprobanteRequest, noAntesDeDesde(), OPCIONES_TIENE_COMPROBANTE, PaginaVentasRequest, recortar() (+1 more)
 
 ### Community 131 - "filtro-errores.filter.spec.ts"
 Cohesion: 0.16
 Nodes (6): ErrorDominio, EsquemaPendienteError, consultaFallida(), ejecutar(), errorPg(), RespuestaFalsa
 
-### Community 132 - "caja.registro.ts"
-Cohesion: 0.17
-Nodes (3): REGISTRO_CAJA, CajaArqueoDenominacion, CajaArqueo
-
 ### Community 133 - "mensajes-validacion.ts"
-Cohesion: 0.22
-Nodes (12): aplanarErroresValidacion(), CODIGO_VALIDACION, cuerpoErrorValidacion, ErrorDeCampo, etiquetaCampo(), legible(), PREDICADOS, LineaDto (+4 more)
+Cohesion: 0.12
+Nodes (13): aplanarErroresValidacion(), CODIGO_VALIDACION, cuerpoErrorValidacion, ErrorDeCampo, etiquetaCampo(), legible(), PREDICADOS, LineaDto (+5 more)
+
+### Community 134 - "Sucursal"
+Cohesion: 0.06
+Nodes (4): AlmacenController, Almacen, MovimientoInventario, Sucursal
 
 ### Community 136 - "scripts"
 Cohesion: 0.14
@@ -706,9 +714,13 @@ Nodes (14): scripts, build, fiscal:preparar-local, format, lint, start, start:de
 Cohesion: 0.22
 Nodes (11): qrcode, codificarQrPng(), CORRECCIONES, CorreccionQr, crc32(), generarQrPng(), OpcionesQrPng, leerModulos() (+3 more)
 
-### Community 138 - "reporte-export.ts"
-Cohesion: 0.20
-Nodes (9): TIPO_NOTA_DEBITO, CabeceraReporte, claveTipoReporte(), FilaDetalleReporte, formatearFechaEs(), formatearFechaHoraEs(), nombreArchivoReporte(), REPORTE_COLUMNAS_DETALLE (+1 more)
+### Community 138 - "comprobante-correos.repository.ts"
+Cohesion: 0.27
+Nodes (8): DIAS_SIEMBRA_CORREO, EstadoCorreo, OrigenCorreo, SEGUNDOS_RECLAMO_CORREO, consultorFalso(), crear(), Llamada, TIPO_FACTURA
+
+### Community 141 - "espacios-ubl.ts"
+Cohesion: 0.19
+Nodes (10): FirmaDemoNoPermitidaError, firmarXmlDemo(), MENSAJE_DEMO_EN_PRODUCCION, OpcionesFirmaDemo, ID_FIRMA_UBL, ID_SIGNATURE_XMLDSIG, PATRON_RAIZ_DOCUMENTO_SUNAT, RAICES_DOCUMENTO_SUNAT (+2 more)
 
 ### Community 142 - "numero-letras.ts"
 Cohesion: 0.26
@@ -718,29 +730,37 @@ Nodes (12): apocopar(), CENTENAS, centenasALetras(), DECENAS, decenasALetras(), 
 Cohesion: 0.17
 Nodes (12): jest, collectCoverageFrom, coverageDirectory, maxWorkers, moduleFileExtensions, moduleNameMapper, rootDir, testEnvironment (+4 more)
 
-### Community 146 - "log.bussnies.ts"
-Cohesion: 0.30
-Nodes (4): LogBussnies, SCRIPT_TABLA_AUDITORIA, ILogBussniees, RegistroLogResponse
+### Community 144 - "cifrado-fiscal.service.spec.ts"
+Cohesion: 0.17
+Nodes (6): LLAVE, OTRA, AYUDA_LLAVE_MAESTRA, interpretarLlaveMaestra(), LARGO_LLAVE_MAESTRA, LlaveInterpretada
 
-### Community 147 - "unidades-amigables.ts"
-Cohesion: 0.20
-Nodes (9): Base, GRUPOS_UNIDADES, GrupoUnidad, FRECUENTES_PLAN, OCULTAS_PLAN, UnidadAmigable, UNIDADES_AMIGABLES, UNIDADES_FRECUENTES (+1 more)
+### Community 146 - "log-repository.ts"
+Cohesion: 0.08
+Nodes (10): LogController, LogBussnies, SCRIPT_TABLA_AUDITORIA, ILogBussniees, Auditoria, RegistroLogResponse, ILogRepository, esTablaInexistente() (+2 more)
 
-### Community 148 - "ActualizarProductoRequest"
-Cohesion: 0.30
-Nodes (3): ActualizarProductoRequest, AsignacionCodigoSunat, CrearProductoRequest
+### Community 147 - "EsquemaCajaService"
+Cohesion: 0.10
+Nodes (9): EsquemaCajaService, SnapshotEsquema, snapshot(), MetaSesion, apertura, armar(), armarCaja(), snapshot() (+1 more)
 
-### Community 149 - "compresion.ts"
-Cohesion: 0.24
-Nodes (8): compression, debeComprimir(), JSON_GRANDE, peticion, TEXTO_GRANDE, textoCabecera(), TIPOS_SIN_COMPRESION, UMBRAL_COMPRESION_BYTES
+### Community 148 - "ProductoResponse"
+Cohesion: 0.16
+Nodes (5): IProductoBussniees, ActualizarProductoRequest, AsignacionCodigoSunat, CrearProductoRequest, ProductoResponse
+
+### Community 149 - "escritor-xml.ts"
+Cohesion: 0.23
+Nodes (6): aplanar(), escaparXml(), EscritorXml, limpiarTextoXml(), OpcionesSerializacion, ValorAtributoXml
 
 ### Community 150 - "preparar-fiscal-local.cjs"
 Cohesion: 0.18
 Nodes (6): archivoLlave, dotenv, fs, path, raiz, { randomBytes, X509Certificate }
 
-### Community 154 - "traductor-error-dominio.ts"
-Cohesion: 0.36
-Nodes (8): CAMPOS_RESERVADOS, ErrorConCodigo, esErrorConCodigo(), esObjetoPlano(), estadoDeclarado(), sinCamposReservados(), cuerpoPropio(), TraductorErrorDominio
+### Community 153 - "CatalogoRepository"
+Cohesion: 0.13
+Nodes (5): ProductoDetalleResponse, CatalogoRepository, patronContiene(), armar(), FILTROS
+
+### Community 154 - "emision-directa.service.ts"
+Cohesion: 0.03
+Nodes (32): rxjs, conGuiaGuardada(), tokenApiPeruDeEntorno(), ErroresFiscalesInterceptor, traducirErrorFiscal(), DiagnosticoArranqueFiscal, aHttp(), defectosDesdeEntorno() (+24 more)
 
 ### Community 155 - "deploy"
 Cohesion: 0.20
@@ -751,24 +771,44 @@ Cohesion: 0.20
 Nodes (9): Compile and run the project, Deployment, Description, License, Project setup, Resources, Run tests, Stay in touch (+1 more)
 
 ### Community 158 - "codigo-barras.util.ts"
-Cohesion: 0.40
+Cohesion: 0.35
 Nodes (7): armar(), conSecuencia(), digitoVerificadorEan13(), ean13Interno(), esEan13Valido(), MAX_SECUENCIA_INTERNA, variantesCodigo()
 
-### Community 159 - "ReportesRepository"
-Cohesion: 0.24
-Nodes (3): ReportesRepository, armar(), aTimestampUtc()
+### Community 159 - "reportes.repository.ts"
+Cohesion: 0.15
+Nodes (7): FilaProductoCotizado, FilaProductoVendido, ReportesQueryFilters, ReportesRepository, armar(), aTimestampUtc(), TIPO_NOTA_CREDITO
 
-### Community 161 - "LogRepository"
-Cohesion: 0.33
-Nodes (3): esTablaInexistente(), limitar(), LogRepository
+### Community 160 - "traductor-errores-bd.ts"
+Cohesion: 0.25
+Nodes (13): mensajePgSeguro(), InfoErrorPg, reglaParaErrorPg(), BD_NO_DISPONIBLE, CODIGOS_DE_RED, desdeSqlState(), ErrorPgCrudo, esFallaDeConexion() (+5 more)
+
+### Community 162 - "VentaTiendaRepository"
+Cohesion: 0.21
+Nodes (3): armar(), PAGADO, VentaTiendaRepository
+
+### Community 163 - "UbigeoService"
+Cohesion: 0.11
+Nodes (10): FilaUbigeo, UBIGEOS_INEI, aUbigeo(), Entrada, MAXIMO_RESULTADOS_UBIGEO, MINIMO_CARACTERES_BUSQUEDA_UBIGEO, normalizarTextoUbigeo(), Ubigeo (+2 more)
+
+### Community 169 - "catalogo.response.ts"
+Cohesion: 0.14
+Nodes (8): CategoriaTiendaResponse, EspecificacionResponse, FiltrosDisponiblesResponse, FiltroValorResponse, ImagenResponse, MarcaTiendaResponse, PaginaResponse, StockSucursalResponse
 
 ### Community 173 - "nest-cli.json"
 Cohesion: 0.33
 Nodes (5): collection, compilerOptions, deleteOutDir, $schema, sourceRoot
 
-### Community 174 - "comprobante-correos.repository.spec.ts"
-Cohesion: 0.40
-Nodes (5): DIAS_SIEMBRA_CORREO, SEGUNDOS_RECLAMO_CORREO, consultorFalso(), crear(), Llamada
+### Community 178 - "Cliente"
+Cohesion: 0.06
+Nodes (19): CONSUMIDOR_FINAL, ADMIN, cliente(), comprobante(), ComprobanteNuevo, EMISOR, guia(), SERIES (+11 more)
+
+### Community 179 - "CatalogoBussnies"
+Cohesion: 0.30
+Nodes (5): CatalogoBussnies, limiteSeguro(), armar(), textoBusqueda(), ProductoTiendaResponse
+
+### Community 181 - "compresion.ts"
+Cohesion: 0.24
+Nodes (8): compression, debeComprimir(), JSON_GRANDE, peticion, TEXTO_GRANDE, textoCabecera(), TIPOS_SIN_COMPRESION, UMBRAL_COMPRESION_BYTES
 
 ### Community 182 - "proforma-documento.paleta.spec.ts"
 Cohesion: 0.50
@@ -778,25 +818,37 @@ Nodes (4): ColorPaleta, contraste(), luminancia(), PARES
 Cohesion: 0.50
 Nodes (3): ./tsconfig.json, exclude, extends
 
+### Community 190 - "pedido.bussnies.spec.ts"
+Cohesion: 0.47
+Nodes (3): armar(), itemCarrito(), pedidoBase()
+
+### Community 191 - "eslint.config.mjs"
+Cohesion: 0.40
+Nodes (4): @eslint/js, eslint-plugin-prettier, globals, typescript-eslint
+
+### Community 195 - "correo-comprobante.service.spec.ts"
+Cohesion: 0.83
+Nodes (3): detalle(), fila(), montar()
+
 ## Knowledge Gaps
-- **839 isolated node(s):** `$schema`, `collection`, `sourceRoot`, `deleteOutDir`, `name` (+834 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1891 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **53 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **862 isolated node(s):** `$schema`, `collection`, `sourceRoot`, `deleteOutDir`, `name` (+857 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1928 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **48 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `@nestjs/common` connect `app.module.ts` to `certificado-fiscal.service.ts`, `pedido.bussnies.ts`, `sunat-emision.service.ts`, `lotes-fiscales.service.ts`, `auth.bussnies.ts`, `ActorFiscal`, `venta.repository.ts`, `guia-remision.bussnies.ts`, `filtro-errores.filter.spec.ts`, `mensajes-validacion.ts`, `comprobante.bussnies.ts`, `venta-documentos.bussnies.ts`, `gre-tickets.tarea.ts`, `NotaCreditoBussnies`, `log.bussnies.ts`, `Roles`, `CatalogoRepository`, `filasDe`, `caja-arqueo.bussnies.ts`, `AppService`, `gre-emision.service.ts`, `FiscalConfigError`, `ref_crypto`, `codigo-barras.util.ts`, `carrito.bussnies.ts`, `CuentaTiendaBussnies`, `emision.registro.spec.ts`, `nota-credito.bussnies.spec.ts`, `correo.registro.ts`, `nota-credito.integracion.spec.ts`, `class-validator`, `sunat.bussnies.ts`, `proforma.bussnies.ts`, `reportes.bussnies.ts`, `package.json`, `correo.config.ts`, `VentaController`, `caja-arqueo.repository.ts`, `culqi.pasarela.ts`, `RecepcionRepository`, `nota-credito.bussnies.ts`, `plataforma.registro.ts`, `logo-emisor.ts`, `ConfiguracionRepository`, `pedido.controller.ts`, `venta.bussnies.ts`, `ComprobanteController`, `filtro-errores.filter.ts`, `proforma.repository.ts`, `traductor-errores-bd.ts`, `main.ts`, `AlmacenLimitesMemoria`, `producto-imagen.controller.ts`, `CrearVentaRequest`, `nota-credito.controller.spec.ts`, `caja-sesion.bussnies.ts`, `esquema-caja.service.ts`, `correo-comprobante.service.ts`, `WhatsappPasarela`, `traductor-http-exception.ts`?**
-  _High betweenness centrality (0.263) - this node is a cross-community bridge._
+- **Why does `@nestjs/common` connect `@nestjs/common` to `certificado-fiscal.service.ts`, `CheckoutBussnies`, `filtro-errores.filter.spec.ts`, `lotes-fiscales.service.ts`, `auth.bussnies.ts`, `AmbienteFiscal`, `venta.repository.ts`, `guia-remision.bussnies.ts`, `mensajes-validacion.ts`, `fiscal-config.tipos.ts`, `comprobante-correos.repository.ts`, `comprobante.bussnies.ts`, `venta-documentos.bussnies.ts`, `NotaCreditoBussnies`, `log-repository.ts`, `filasDe`, `caja-arqueo.bussnies.ts`, `AppService`, `@nestjs/typeorm`, `emision-directa.service.ts`, `ref_crypto`, `codigo-barras.util.ts`, `reportes.repository.ts`, `app.module.ts`, `UbigeoService`, `lotes-fiscales.service.spec.ts`, `nota-credito.bussnies.spec.ts`, `caja-arqueo.repository.ts`, `proforma.bussnies.ts`, `reportes.bussnies.ts`, `correo-comprobantes.tarea.ts`, `package.json`, `Cliente`, `caja.request.ts`, `culqi.pasarela.ts`, `RecepcionRepository`, `nota-credito.bussnies.ts`, `salud.bussnies.ts`, `pedido.bussnies.spec.ts`, `ConfiguracionRepository`, `sunat-emision.service.spec.ts`, `comprobante.repository.ts`, `EnvioFiscalRepository`, `correo-comprobante.service.spec.ts`, `logo-emisor.ts`, `registro-peticiones.middleware.ts`, `filasDe`, `lote-fiscal.repository.ts`, `venta.bussnies.ts`, `rol.bussnies.ts`, `main.ts`, `fiscal-errores.ts`, `caja-turnos.bussnies.ts`, `EmisionGre`, `plataforma.registro.ts`, `CajaTurnosBussnies`, `registros.ts`, `correo-comprobante.service.ts`, `WhatsappPasarela`, `pago.bussnies.ts`, `carrito.bussnies.ts`, `correo.config.ts`, `filtro-errores.filter.ts`?**
+  _High betweenness centrality (0.271) - this node is a cross-community bridge._
 - **What connects `$schema`, `collection`, `sourceRoot` to the rest of the system?**
-  _839 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _862 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `certificado-fiscal.service.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.03512291052114061 - nodes in this community are weakly interconnected._
-- **Why does `Roles()` connect `Roles` to `UserController`, `app.module.ts`, `auth.bussnies.ts`, `AlmacenController`, `ActorFiscal`, `ReportesController`, `ClienteRepository`, `ConfiguracionController`, `UsuarioToken`, `LogController`, `EmisionDirectaService`, `ProductoImagen`, `class-validator`, `sunat.bussnies.ts`, `AdminController`, `CajaPagosRepository`, `VentaController`, `ProformaController`, `pedido.controller.ts`, `ComprobanteController`, `RolBussnies`, `EnviosAdminController`, `LotesAdminController`, `ProveedorController`, `StockSucursalController`, `Categoria`, `AbonoCreditoRequest`, `GuiaRemisionController`, `ProductoController`, `producto-imagen.controller.ts`, `ActualizarInventarioRequest`, `InventarioBussnies`, `nota-credito.controller.spec.ts`, `ReceptorController`, `RecepcionController`, `MarcaController`, `ReceptorRepository`, `InventarioController`?**
-  _High betweenness centrality (0.048) - this node is a cross-community bridge._
-- **Should `pedido.bussnies.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.022030350601779172 - nodes in this community are weakly interconnected._
-- **Why does `UsuarioToken` connect `UsuarioToken` to `ActorFiscal`, `venta-documentos.bussnies.ts`, `NotaCreditoBussnies`, `Roles`, `caja-arqueo.bussnies.ts`, `ref_crypto`, `CuentaTiendaBussnies`, `nota-credito.integracion.spec.ts`, `class-validator`, `VentaController`, `RecepcionRepository`, `CajaSesionRepository`, `CajaArqueoBussnies`, `pedido.controller.ts`, `venta.bussnies.ts`, `ComprobanteController`, `CreditoRepository`, `cuerpoError`, `EnviosAdminController`, `AbonoCreditoRequest`, `GuiaRemisionController`, `ProductoController`, `nota-credito.controller.spec.ts`, `caja-sesion.bussnies.ts`, `esquema-caja.service.ts`, `RecepcionController`?**
-  _High betweenness centrality (0.038) - this node is a cross-community bridge._
-- **Should `app.module.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.03085491506544138 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.0432183908045977 - nodes in this community are weakly interconnected._
+- **Why does `UsuarioToken` connect `UsuarioToken` to `AmbienteFiscal`, `venta-documentos.bussnies.ts`, `NotaCreditoBussnies`, `@nestjs/common`, `caja-arqueo.bussnies.ts`, `GuiaRemisionController`, `emision-directa.service.ts`, `FiscalAdminController`, `Cliente`, `VentaController`, `relanzarHttp`, `RecepcionRepository`, `ConfiguracionRepository`, `.cambiarEstadoPosBeta`, `CarritoController`, `ComprobanteController`, `venta.bussnies.ts`, `caja-turnos.bussnies.ts`, `CreditoRepository`, `ProductoController`, `CajaTurnosBussnies`, `CajaArqueoController`?**
+  _High betweenness centrality (0.063) - this node is a cross-community bridge._
+- **Should `CheckoutBussnies` be split into smaller, more focused modules?**
+  _Cohesion score 0.07435897435897436 - nodes in this community are weakly interconnected._
+- **Why does `Roles()` connect `@nestjs/common` to `UserController`, `SunatController`, `auth.bussnies.ts`, `Sucursal`, `AmbienteFiscal`, `ReportesController`, `log-repository.ts`, `ClienteRepository`, `GuiaRemisionController`, `emision-directa.service.ts`, `ConfiguracionFiscalBussnies`, `UsuarioToken`, `ref_crypto`, `ProductoImagen`, `FiscalAdminController`, `AdminController`, `caja.request.ts`, `VentaController`, `RecepcionRepository`, `ProformaController`, `ComprobanteController`, `rol.bussnies.ts`, `fiscal-errores.ts`, `StockSucursal`, `Empresa`, `ReceptorController`, `Categoria`, `CreditoRepository`, `ProductoController`, `InventarioBussnies`, `NotaCreditoController`, `CajaArqueoController`, `MarcaController`, `InventarioController`?**
+  _High betweenness centrality (0.049) - this node is a cross-community bridge._
+- **Should `SunatEmisionService` be split into smaller, more focused modules?**
+  _Cohesion score 0.1191919191919192 - nodes in this community are weakly interconnected._

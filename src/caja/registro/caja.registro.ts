@@ -4,6 +4,7 @@ import { CajaArqueoDenominacion } from '../../models/DBModel/caja-arqueo-denomin
 import { CajaArqueoController } from '../../api/controllers/caja-arqueo.controller';
 import { CajaArqueoRepository } from '../../repository/Repository/caja-arqueo.repository';
 import { CajaArqueoBussnies } from '../../bussnies/Bussnies/caja-arqueo.bussnies';
+import { CajaTurnosBussnies } from '../../bussnies/Bussnies/caja-turnos.bussnies';
 import { EsquemaCajaService } from '../esquema/esquema-caja.service';
 import { CreditoVencimientosTarea } from '../tareas/credito-vencimientos.tarea';
 
@@ -15,5 +16,5 @@ import { CreditoVencimientosTarea } from '../tareas/credito-vencimientos.tarea';
 export const REGISTRO_CAJA: RegistroModulo = {
   entidades: [CajaArqueo, CajaArqueoDenominacion],
   controladores: [CajaArqueoController],
-  proveedores: [EsquemaCajaService, CajaArqueoRepository, CajaArqueoBussnies, CreditoVencimientosTarea],
+  proveedores: [EsquemaCajaService, CajaArqueoRepository, CajaArqueoBussnies, CajaTurnosBussnies, CreditoVencimientosTarea],
 };

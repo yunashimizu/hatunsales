@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { FiscalAuditoriaRepository, RegistroAuditoriaFiscal } from '../auditoria/fiscal-auditoria.repository';
 import {
   ArchivoCertificado,
@@ -19,7 +19,8 @@ import {
 } from '../config/fiscal-config.dto';
 import { FiscalConfigError } from '../config/fiscal-errores';
 import { ActorFiscal, AmbienteFiscal } from '../config/fiscal-config.tipos';
-import { ResultadoGuardadoFiscal } from '../config/fiscal-tokens';
+import { EMISOR_PRUEBA_BETA } from '../config/fiscal-tokens';
+import type { EmisorPruebaBeta, ResultadoGuardadoFiscal } from '../config/fiscal-tokens';
 import { GestorConfigFiscalService } from '../config/gestor-config-fiscal.service';
 import { GestorCredencialesFiscalesService } from '../config/gestor-credenciales-fiscales.service';
 import { PruebaConexionFiscalService, ResultadoPruebaConexion } from '../config/prueba-conexion-fiscal.service';
@@ -42,6 +43,8 @@ export class FiscalAdminBussnies implements IFiscalAdminBussnies {
     private readonly pruebaConexion: PruebaConexionFiscalService,
     private readonly salud: SaludFiscalService,
     private readonly auditoriaFiscal: FiscalAuditoriaRepository,
+    /** EmisorBetaService (módulo de emisión) por su token: el certificado de prueba lleva el RUC del emisor BETA. */
+    @Inject(EMISOR_PRUEBA_BETA) private readonly emisorBeta: EmisorPruebaBeta,
   ) {}
 
   obtenerConfiguracion(): Promise<ConfiguracionFiscalVista> {
@@ -62,8 +65,10 @@ export class FiscalAdminBussnies implements IFiscalAdminBussnies {
     return info;
   }
 
-  subirCertificado(archivo: ArchivoCertificado | undefined, dto: SubirCertificadoDto, actor: ActorFiscal): Promise<CertificadoSubido> {
-    return this.certificadosFiscales.subir(archivo, dto.clave, { ambiente: dto.ambiente, forzar: dto.forzar }, actor);
+  async subirCertificado(archivo: ArchivoCertificado | undefined, dto: SubirCertificadoDto, actor: ActorFiscal): Promise<CertificadoSubido> {
+    // Solo para BETA: el certificado de pruebas se valida contra el emisor BETA (puede ser otro RUC).
+    const emisor = dto.ambiente === 'beta' ? await this.emisorBeta.obtenerEmisor() : undefined;
+    return this.certificadosFiscales.subir(archivo, dto.clave, { ambiente: dto.ambiente, forzar: dto.forzar }, actor, emisor);
   }
 
   eliminarCertificado(ambiente: AmbienteFiscal, actor: ActorFiscal) {
@@ -78,8 +83,9 @@ export class FiscalAdminBussnies implements IFiscalAdminBussnies {
     return this.certificadosFiscales.exportarPublico(ambiente ?? 'produccion', formato === 'pem' ? 'pem' : 'cer');
   }
 
-  generarCertificadoAutofirmado(dto: GenerarAutofirmadoDto, actor: ActorFiscal): Promise<CertificadoSubido> {
-    return this.certificadosFiscales.generarAutofirmadoBeta(actor, dto.dias ?? 365);
+  async generarCertificadoAutofirmado(dto: GenerarAutofirmadoDto, actor: ActorFiscal): Promise<CertificadoSubido> {
+    const e = await this.emisorBeta.obtenerEmisor();
+    return this.certificadosFiscales.generarAutofirmadoBeta(actor, dto.dias ?? 365, { ruc: e.ruc, razonSocial: e.razonSocial });
   }
 
   guardarCredencialesSol(dto: CredencialesSolDto, actor: ActorFiscal): Promise<EstadoCredencialesSol> {

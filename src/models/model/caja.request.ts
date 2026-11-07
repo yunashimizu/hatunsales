@@ -22,13 +22,82 @@ export class AbrirCajaRequest {
   @Min(1, { message: 'Indique la caja a abrir (id_caja)' })
   id_caja!: number;
 
-  /** Efectivo con el que arranca el turno (sencillo). null = sin monto. */
+  /**
+   * Efectivo con el que arranca el turno. Si no viene, se guarda 0.00 explícito. La validación
+   * (negativo, NaN, > 9 999 999.99) la hace la capa de negocio para responder con el código
+   * estable CAJA_MONTO_INICIAL_INVALIDO en lugar del mensaje genérico de validación.
+   */
   @IsOptional()
   @Type(() => Number)
-  @IsNumber({}, { message: 'El monto inicial debe ser un número' })
-  @Min(0, { message: 'El monto inicial no puede ser negativo' })
-  @Max(MAX_MONTO_CAJA, { message: 'El monto inicial es demasiado alto' })
   monto_inicial?: number | null;
+
+  /** true = «Sin efectivo»: se guarda 0.00 y se ignora monto_inicial. */
+  @IsOptional()
+  @IsBoolean({ message: 'sin_efectivo debe ser verdadero o falso' })
+  sin_efectivo?: boolean;
+}
+
+/** GET /caja/aperturas */
+export class AperturasCajaQuery {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'id_sucursal debe ser un entero' })
+  @Min(1)
+  id_sucursal?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'id_caja debe ser un entero' })
+  @Min(1)
+  id_caja?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'id_usuario debe ser un entero' })
+  @Min(1)
+  id_usuario?: number;
+
+  /** AAAA-MM-DD (día de Lima); la valida la capa de negocio (código FECHA_INVALIDA). */
+  @IsOptional()
+  @IsString()
+  desde?: string;
+
+  @IsOptional()
+  @IsString()
+  hasta?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'pagina debe ser un entero' })
+  @Min(1)
+  pagina?: number;
+
+  /** 20 por defecto; la capa de negocio lo limita a 100. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'por_pagina debe ser un entero' })
+  @Min(1)
+  por_pagina?: number;
+}
+
+/** GET /caja/resumen-sucursales */
+export class ResumenSucursalesQuery {
+  @IsOptional()
+  @IsString()
+  desde?: string;
+
+  @IsOptional()
+  @IsString()
+  hasta?: string;
+}
+
+/** GET /caja/resumen-sucursales/pdf */
+export class ResumenSucursalesPdfQuery extends ResumenSucursalesQuery {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'id_sucursal debe ser un entero' })
+  @Min(1)
+  id_sucursal?: number;
 }
 
 /** POST /caja/cerrar */

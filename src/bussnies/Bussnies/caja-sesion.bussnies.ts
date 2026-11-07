@@ -12,6 +12,35 @@ import { AbrirCajaRequest, CerrarCajaRequest } from '../../models/model/caja.req
 import { CajaArqueoBussnies } from './caja-arqueo.bussnies';
 import type { ResultadoPreparacionCierre } from '../Ibussnies/ICajaArqueoBussniees';
 import { relanzarHttp } from '../../caja/http/errores-caja.http';
+import { Dinero } from '../../caja/dominio/dinero';
+import { CodigoErrorCaja, ErrorCaja } from '../../caja/dominio/errores-caja';
+
+/** Tope del efectivo inicial de un turno (S/). */
+export const MONTO_INICIAL_MAXIMO = 9_999_999.99;
+
+/**
+ * Efectivo inicial del turno. «Sin efectivo» → 0.00 (ignora el monto). Sin monto → 0.00
+ * explícito (compatibilidad con el front viejo). Negativo, NaN, con más de 2 decimales o
+ * mayor al tope → 400 CAJA_MONTO_INICIAL_INVALIDO.
+ */
+export function montoInicialDeApertura(body: Pick<AbrirCajaRequest, 'monto_inicial' | 'sin_efectivo'>): Dinero {
+  if (body?.sin_efectivo === true) return Dinero.CERO;
+  const crudo: unknown = body?.monto_inicial;
+  if (crudo === undefined || crudo === null || (typeof crudo === 'string' && crudo.trim() === '')) {
+    return Dinero.CERO;
+  }
+  const invalido = (mensaje: string) =>
+    ErrorCaja.datoInvalido(mensaje, CodigoErrorCaja.CAJA_MONTO_INICIAL_INVALIDO);
+  const n = typeof crudo === 'number' ? crudo : Number(crudo);
+  if (!Number.isFinite(n)) throw invalido('El efectivo inicial debe ser un número.');
+  if (n < 0) throw invalido('El efectivo inicial no puede ser negativo.');
+  if (n > MONTO_INICIAL_MAXIMO) throw invalido('El efectivo inicial es demasiado alto (máximo S/ 9,999,999.99).');
+  try {
+    return Dinero.deSoles(n);
+  } catch {
+    throw invalido('El efectivo inicial admite como máximo 2 decimales.');
+  }
+}
 
 /**
  * Turno de caja (apertura / cierre). Sin DDL: el esquema se lee del catálogo una sola vez
@@ -72,6 +101,12 @@ export class CajaSesionBussnies {
     if (!Number.isInteger(idCaja) || idCaja <= 0) {
       throw new BadRequestException('Indique la caja a abrir (id_caja)');
     }
+    let monto: Dinero;
+    try {
+      monto = montoInicialDeApertura(body);
+    } catch (e) {
+      relanzarHttp(e);
+    }
     if (!(await this.repo.cajaExiste(idCaja))) {
       throw new NotFoundException(
         cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Caja no encontrada'),
@@ -79,11 +114,15 @@ export class CajaSesionBussnies {
     }
 
     try {
-      return await this.repo.abrir({
-        idCaja,
-        idUsuario,
-        montoInicial: body?.monto_inicial,
-      });
+      // El sugerido es informativo: si no se puede leer, el turno se abre igual.
+      const sugerido = await this.repo.sugeridoInicial(idCaja).catch(() => null);
+      const sesion = await this.repo.abrir({ idCaja, idUsuario, montoInicial: monto.aNumero() });
+      return {
+        ...sesion,
+        sugerido_inicial: sugerido,
+        diferencia_sugerido:
+          sugerido == null ? null : monto.restar(Dinero.desdeNumeroRedondeado(sugerido)).aNumero(),
+      };
     } catch (e: any) {
       this.mapError(e);
     }

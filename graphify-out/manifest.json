@@ -72,9 +72,9 @@
     "semantic_hash": ""
   },
   "src/api/controllers/caja-sesion.controller.ts": {
-    "mtime": 1791908484.3442776,
-    "seen": 1793923208.506688,
-    "ast_hash": "636e7958a014c540d1a22a4c65805af7",
+    "mtime": 1794012736.6258628,
+    "seen": 1794012893.8604076,
+    "ast_hash": "db6324b86344b16b71e91a041b1a19b8",
     "semantic_hash": ""
   },
   "src/api/controllers/categoria.controller.ts": {
@@ -210,9 +210,9 @@
     "semantic_hash": ""
   },
   "src/api/controllers/reportes.controller.ts": {
-    "mtime": 1792984583.4452872,
-    "seen": 1793923208.5067184,
-    "ast_hash": "c1381c3cd1e01a9d7a098c835a101c6e",
+    "mtime": 1794024962.809984,
+    "seen": 1794025088.6711135,
+    "ast_hash": "f6420c0ccc3dd930f6395c242bf60989",
     "semantic_hash": ""
   },
   "src/api/controllers/rol.controller.ts": {
@@ -384,9 +384,9 @@
     "semantic_hash": ""
   },
   "src/bussnies/Bussnies/caja-sesion.bussnies.ts": {
-    "mtime": 1791908482.129222,
-    "seen": 1793923208.506767,
-    "ast_hash": "df5bea102d2a9319e910763128e1c568",
+    "mtime": 1794011358.953242,
+    "seen": 1794012705.9789479,
+    "ast_hash": "6d68e1838f0385458ba85d757bb1d70d",
     "semantic_hash": ""
   },
   "src/bussnies/Bussnies/cliente.bussnies.spec.ts": {
@@ -564,15 +564,15 @@
     "semantic_hash": ""
   },
   "src/bussnies/Bussnies/reportes.bussnies.spec.ts": {
-    "mtime": 1793922983.3007996,
-    "seen": 1793923208.5068069,
-    "ast_hash": "c3e571b63aa154b6ce82a7a2abb1f056",
+    "mtime": 1793924382.280656,
+    "seen": 1794010256.7722,
+    "ast_hash": "43825cf9138e9bc8f340c7e5443bc2b3",
     "semantic_hash": ""
   },
   "src/bussnies/Bussnies/reportes.bussnies.ts": {
-    "mtime": 1793922932.1249475,
-    "seen": 1793923208.506808,
-    "ast_hash": "24f33959d301570640858e3e6f8460a9",
+    "mtime": 1794024962.8097794,
+    "seen": 1794025088.6743557,
+    "ast_hash": "8e2b6f45670e3ba1bb11feea8503439a",
     "semantic_hash": ""
   },
   "src/bussnies/Bussnies/rol.bussnies.ts": {
@@ -834,9 +834,9 @@
     "semantic_hash": ""
   },
   "src/caja/dominio/errores-caja.ts": {
-    "mtime": 1791906308.0549347,
-    "seen": 1793923208.5068638,
-    "ast_hash": "62582e298caf91f17c7696b1d1e3be2a",
+    "mtime": 1794011343.015334,
+    "seen": 1794012705.9840546,
+    "ast_hash": "a93127fa9518adae76bfe9b772cb999f",
     "semantic_hash": ""
   },
   "src/caja/dominio/esperado-caja.ts": {
@@ -870,9 +870,9 @@
     "semantic_hash": ""
   },
   "src/caja/registro/caja.registro.ts": {
-    "mtime": 1791908681.787539,
-    "seen": 1793923208.5068712,
-    "ast_hash": "d44931dfbd293275eca2ff790cb65ff8",
+    "mtime": 1794011405.5835192,
+    "seen": 1794012705.984615,
+    "ast_hash": "33273ecba6d5d9751c0b020f19c48314",
     "semantic_hash": ""
   },
   "src/caja/tareas/credito-vencimientos.tarea.ts": {
@@ -1506,9 +1506,9 @@
     "semantic_hash": ""
   },
   "src/models/model/caja.request.ts": {
-    "mtime": 1791907197.8666255,
-    "seen": 1793923208.5070093,
-    "ast_hash": "b8fbf2ea324cc7c5039e60011e086eee",
+    "mtime": 1794012736.625695,
+    "seen": 1794012893.8767118,
+    "ast_hash": "8bdb15d58a76e323eaf285ecc7927d97",
     "semantic_hash": ""
   },
   "src/models/model/cliente.request.ts": {
@@ -1728,9 +1728,9 @@
     "semantic_hash": ""
   },
   "src/models/model/venta/venta.response.ts": {
-    "mtime": 1792614717.0405672,
-    "seen": 1793923208.5070562,
-    "ast_hash": "27ff6329b50d150c758dee97163e8616",
+    "mtime": 1794024980.9516456,
+    "seen": 1794025088.686097,
+    "ast_hash": "bb21da8aaa81613e7f27e5862bcd2b42",
     "semantic_hash": ""
   },
   "src/models/model/ventas-report.response.ts": {
@@ -1830,15 +1830,15 @@
     "semantic_hash": ""
   },
   "src/repository/Repository/caja-sesion.repository.spec.ts": {
-    "mtime": 1792617114.313067,
-    "seen": 1793923208.507078,
-    "ast_hash": "815ec9cec002747c0e1e9a0af40223be",
+    "mtime": 1794011519.1285882,
+    "seen": 1794012706.007397,
+    "ast_hash": "f09f91d327704ad58a2fbb8479a5407c",
     "semantic_hash": ""
   },
   "src/repository/Repository/caja-sesion.repository.ts": {
-    "mtime": 1792617018.9884925,
-    "seen": 1793923208.5070791,
-    "ast_hash": "0b6d63bb2ec8602407b4c80da2f289c3",
+    "mtime": 1794011338.4642918,
+    "seen": 1794012706.007404,
+    "ast_hash": "ea8366d349bcf3a3bb4dd2a10c65b38a",
     "semantic_hash": ""
   },
   "src/repository/Repository/categoria.repository.ts": {
@@ -2112,9 +2112,9 @@
     "semantic_hash": ""
   },
   "src/repository/Repository/venta.repository.ts": {
-    "mtime": 1793910432.7192326,
-    "seen": 1793923208.50714,
-    "ast_hash": "224fcd91697270b92f1dfc100156af7e",
+    "mtime": 1794024980.945761,
+    "seen": 1794025088.6899955,
+    "ast_hash": "f5e1ae1da4a7ac62cc00ef67feabdfa6",
     "semantic_hash": ""
   },
   "src/sunat/admin/actor-fiscal.ts": {
@@ -2136,9 +2136,9 @@
     "semantic_hash": ""
   },
   "src/sunat/admin/fiscal-admin.bussnies.ts": {
-    "mtime": 1792088979.2714298,
-    "seen": 1793923208.507145,
-    "ast_hash": "5e7385414fb81b296d7242679fe0b936",
+    "mtime": 1794012616.7968361,
+    "seen": 1794012706.0155003,
+    "ast_hash": "63a4fa4debc27de4fa8354f8b7c65217",
     "semantic_hash": ""
   },
   "src/sunat/admin/fiscal-admin.controller.ts": {
@@ -2202,15 +2202,15 @@
     "semantic_hash": ""
   },
   "src/sunat/certificado/certificado-fiscal.service.spec.ts": {
-    "mtime": 1793922244.8175998,
-    "seen": 1793923208.5071588,
-    "ast_hash": "720faefb51b105d3f7c2904c5c2ac6b7",
+    "mtime": 1794012628.7644985,
+    "seen": 1794012706.0173233,
+    "ast_hash": "4ff5da22a8fef32156695b81f306518e",
     "semantic_hash": ""
   },
   "src/sunat/certificado/certificado-fiscal.service.ts": {
-    "mtime": 1793922229.205997,
-    "seen": 1793923208.5071597,
-    "ast_hash": "2a60d0708546b596769feb9aa1deb49a",
+    "mtime": 1794012731.3528843,
+    "seen": 1794012893.885378,
+    "ast_hash": "db37a1280ef7927f0a188fbdd16faa33",
     "semantic_hash": ""
   },
   "src/sunat/certificado/certificado-info.ts": {
@@ -3204,9 +3204,9 @@
     "semantic_hash": ""
   },
   "src/util/documentos/comprobante-pdf.spec.ts": {
-    "mtime": 1793923195.5413167,
-    "seen": 1793923208.5074127,
-    "ast_hash": "2dc12de8be5bb7accc3385c0ab35943a",
+    "mtime": 1793923683.4645576,
+    "seen": 1794010256.7952116,
+    "ast_hash": "f07de222822574452c1bfe6fe2c74a81",
     "semantic_hash": ""
   },
   "src/util/documentos/comprobante-pdf.ts": {
@@ -3237,12 +3237,6 @@
     "mtime": 1793141287.5074267,
     "seen": 1793923208.507419,
     "ast_hash": "fcb08333b3fa8569f2ab4b64c091596e",
-    "semantic_hash": ""
-  },
-  "src/util/documentos/paleta-contraste.spec.ts": {
-    "mtime": 1793923125.6142046,
-    "seen": 1793923208.5074203,
-    "ast_hash": "9771e3d4c65d69a055383b24ba3936cd",
     "semantic_hash": ""
   },
   "src/util/documentos/proforma-documento.paleta.spec.ts": {
@@ -3306,9 +3300,9 @@
     "semantic_hash": ""
   },
   "src/util/errores-operativos.ts": {
-    "mtime": 1791906317.414032,
-    "seen": 1793923208.5074346,
-    "ast_hash": "9be79e5b69887157592dd02421aa4126",
+    "mtime": 1794011343.014146,
+    "seen": 1794012706.042604,
+    "ast_hash": "d0012da257589f55366d94eeeeebc6ea",
     "semantic_hash": ""
   },
   "src/util/fecha-lima.spec.ts": {
@@ -3699,6 +3693,60 @@
     "mtime": 1793140901.8316274,
     "seen": 1793923208.5075207,
     "ast_hash": "4c8b978f9093b3f4cc17c399eed7e4ff",
+    "semantic_hash": ""
+  },
+  "src/sunat/admin/fiscal-admin.bussnies.spec.ts": {
+    "mtime": 1794012628.7648134,
+    "seen": 1794012706.015494,
+    "ast_hash": "807ce9075ecda895537f2101dc277c0e",
+    "semantic_hash": ""
+  },
+  "src/bussnies/Bussnies/caja-aperturas.bussnies.spec.ts": {
+    "mtime": 1794011456.2982028,
+    "seen": 1794012705.9788146,
+    "ast_hash": "92b7eaf1af5f22f60c8a56da70bcffc3",
+    "semantic_hash": ""
+  },
+  "src/bussnies/Bussnies/caja-resumen-sucursales.bussnies.spec.ts": {
+    "mtime": 1794012953.1671712,
+    "seen": 1794025088.6726458,
+    "ast_hash": "9f2e4bb95f7cd990949d296cfd1ab0d0",
+    "semantic_hash": ""
+  },
+  "src/bussnies/Bussnies/caja-sesion.bussnies.spec.ts": {
+    "mtime": 1794011424.1748106,
+    "seen": 1794012705.9789455,
+    "ast_hash": "eae578621aeece1281009a385887370e",
+    "semantic_hash": ""
+  },
+  "src/bussnies/Bussnies/caja-turnos.bussnies.ts": {
+    "mtime": 1794012929.7428412,
+    "seen": 1794025088.672748,
+    "ast_hash": "14a0bb9aa511b4228b281233249015f0",
+    "semantic_hash": ""
+  },
+  "src/util/documentos/resumen-caja-pdf.spec.ts": {
+    "mtime": 1794012770.8932846,
+    "seen": 1794012893.898385,
+    "ast_hash": "5bc6418e646a710be5989bcf2024007b",
+    "semantic_hash": ""
+  },
+  "src/util/documentos/resumen-caja-pdf.ts": {
+    "mtime": 1794012798.3807476,
+    "seen": 1794012893.8983877,
+    "ast_hash": "b11bbc1e097a54484333f23da4a78cf6",
+    "semantic_hash": ""
+  },
+  "src/bussnies/Bussnies/reportes-ventas-por-hora.bussnies.spec.ts": {
+    "mtime": 1794025002.33822,
+    "seen": 1794025088.674295,
+    "ast_hash": "82bf5ebdd6cb60bd3c96cda06d2ed240",
+    "semantic_hash": ""
+  },
+  "src/repository/Repository/venta.repository.catalogo.spec.ts": {
+    "mtime": 1794025002.33622,
+    "seen": 1794025088.6898751,
+    "ast_hash": "ffa49debf6b9bbf74682d85ae058298f",
     "semantic_hash": ""
   }
 }

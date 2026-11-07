@@ -31,6 +31,7 @@ import {
   esFechaYmd,
   fechaHoraLimaLegible,
   finDiaLima,
+  horaLima,
   hoyLima,
   inicioAnioLima,
   inicioMesLima,
@@ -38,6 +39,7 @@ import {
   inicioSemanaLima,
   rangoDiaLima,
   rangoFechasLima,
+  sumarDiasYmd,
   validarFechaYmd,
 } from '../../util/fecha-lima';
 import { TIPO_NOTA_CREDITO, TIPO_NOTA_DEBITO } from '../../util/fiscal/tipos-comprobante';
@@ -135,6 +137,22 @@ export interface ReporteVentasNeto extends VentasReportResponse {
   top_productos_vendidos: VentasTopProducto[];
   /** Ranking de las cotizaciones del periodo (no depende del tipo de comprobante). */
   top_productos_cotizados: VentasTopProductoCotizado[];
+}
+
+export interface VentasPorHora {
+  /** Hora de Lima, 0..23. */
+  hora: number;
+  /** Ventas netas en soles (2 decimales). */
+  total: number;
+  /** Cantidad de comprobantes de venta (facturas y boletas). */
+  ventas: number;
+}
+
+export interface VentasPorHoraResponse {
+  fecha: string;
+  horas: VentasPorHora[];
+  /** El mismo día de la semana anterior (fecha − 7 días). */
+  comparacion: { fecha: string; horas: VentasPorHora[] };
 }
 
 interface RangoReporte {
@@ -389,6 +407,48 @@ export class ReportesBussnies implements IReportesBussniees {
       );
       return { vendidos: [], cotizados: [] };
     }
+  }
+
+  /**
+   * Ventas netas por hora de Lima de un día (`fecha` 'YYYY-MM-DD'; por omisión, hoy en Lima) y
+   * del mismo día de la semana anterior (fecha − 7 días). Siempre 24 horas (0 si no hubo
+   * ventas). Misma regla que reporteVentas (clasificarComprobanteReporte): factura, boleta y
+   * nota de débito suman, la nota de crédito resta; no cuentan anulados, errores, rechazados
+   * ni pruebas BETA. `ventas` = cantidad de comprobantes de venta (facturas y boletas).
+   * La hora es la del registro (creado_en) en Lima: el servidor corre en UTC. Solo lectura.
+   */
+  async ventasPorHora(fecha?: string): Promise<VentasPorHoraResponse> {
+    const texto = typeof fecha === 'string' ? fecha.trim() : '';
+    if (texto && !esFechaYmd(texto)) {
+      throw new BadRequestException(
+        cuerpoError(CodigoError.REPORTE_FECHA_INVALIDA, 'Formato de fecha inválido en fecha: use AAAA-MM-DD'),
+      );
+    }
+    const dia = texto || hoyLima();
+    const anterior = sumarDiasYmd(dia, -7);
+
+    const [actual, comparacion] = await Promise.all([this.horasDelDia(dia), this.horasDelDia(anterior)]);
+    return { fecha: dia, horas: actual, comparacion: { fecha: anterior, horas: comparacion } };
+  }
+
+  private async horasDelDia(ymd: string): Promise<VentasPorHora[]> {
+    const { desde, hasta } = rangoDiaLima(ymd);
+    const lista = await this.repo.obtenerVentasPorPeriodo(desde, hasta, {});
+    const totales = Array.from({ length: 24 }, () => Dinero.cero());
+    const cantidades = new Array<number>(24).fill(0);
+
+    for (const item of lista) {
+      const clase = clasificarComprobanteReporte(item);
+      if (!clase.cuenta) continue;
+      const instante = item.creado_en ? new Date(item.creado_en) : null;
+      if (!instante || Number.isNaN(instante.getTime()) || aFechaLima(instante) !== ymd) continue;
+      const hora = Number(horaLima(instante).slice(0, 2));
+      const importe = Dinero.desdeBd(item.total);
+      totales[hora] = totales[hora].sumar(clase.signo < 0 ? importe.negar() : importe);
+      if (clase.tipo === 'venta') cantidades[hora] += 1;
+    }
+
+    return totales.map((total, hora) => ({ hora, total: total.aNumero(), ventas: cantidades[hora] }));
   }
 
   async reportePorCategoria(filters: any = {}) {

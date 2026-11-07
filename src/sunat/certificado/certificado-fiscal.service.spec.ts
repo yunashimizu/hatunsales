@@ -270,6 +270,31 @@ describe('CertificadoFiscalService', () => {
     );
   });
 
+  it('subir a beta con emisor BETA distinto del principal no pide forzar', async () => {
+    const { servicio } = crear();
+    expect(OTRO_RUC).not.toBe(RUC_PRUEBA);
+    const ajeno = pfxConCadena(CLAVE, OTRO_RUC).contenido;
+    const info = await servicio.subir({ buffer: ajeno, originalname: 'beta.pfx' }, CLAVE, { ambiente: 'beta' }, ACTOR, { ruc: OTRO_RUC });
+    expect(info).toMatchObject({ ambiente: 'beta', ruc: OTRO_RUC });
+    expect(info.advertencias.join(' ')).not.toMatch(OTRO_RUC);
+  });
+
+  it('subir a produccion ignora el emisor BETA y rechaza un RUC distinto del principal', async () => {
+    const { servicio } = crear();
+    const ajeno = pfxConCadena(CLAVE, OTRO_RUC).contenido;
+    expect(
+      await codigoDe(servicio.subir({ buffer: ajeno, originalname: 'x.pfx' }, CLAVE, { ambiente: 'produccion' }, ACTOR, { ruc: OTRO_RUC })),
+    ).toBe('FISCAL_CERT_RUC_NO_COINCIDE');
+  });
+
+  it('subir a beta sin emisor pasado sigue validando contra el principal', async () => {
+    const { servicio } = crear();
+    const ajeno = pfxConCadena(CLAVE, OTRO_RUC).contenido;
+    expect(await codigoDe(servicio.subir({ buffer: ajeno, originalname: 'x.pfx' }, CLAVE, { ambiente: 'beta' }, ACTOR))).toBe(
+      'FISCAL_CERT_RUC_NO_COINCIDE',
+    );
+  });
+
   it('no deja eliminar el certificado de producción en uso; si no está en uso lo retira y audita', async () => {
     const { servicio, auditoria, cambiarSnapshot, consultas } = crear();
     await servicio.subir({ buffer: pfxConCadena(CLAVE).contenido, originalname: 'cdt.pfx' }, CLAVE, {}, ACTOR);
@@ -284,6 +309,19 @@ describe('CertificadoFiscalService', () => {
     expect((auditoria.registrar.mock.calls.at(-1) as unknown as [{ accion: string }])[0].accion).toBe('CERT_ELIMINADO');
     expect(await codigoDe(servicio.obtenerMaterialFirma('produccion'))).toBe('FISCAL_CERT_NO_CARGADO');
     expect(await codigoDe(servicio.eliminar('produccion', ACTOR))).toBe('FISCAL_CERT_NO_CARGADO');
+  });
+
+  it('el autofirmado usa el RUC y la razón social del emisor BETA cuando se le pasan', async () => {
+    const { servicio } = crear();
+    const info = await servicio.generarAutofirmadoBeta(ACTOR, 90, { ruc: OTRO_RUC, razonSocial: 'EMISOR BETA SEPARADO SAC' });
+    expect(OTRO_RUC).not.toBe(RUC_PRUEBA);
+    expect(info).toMatchObject({ ambiente: 'beta', autofirmado: true, ruc: OTRO_RUC });
+    expect(info.titular).toContain('EMISOR BETA SEPARADO SAC');
+    expect((await servicio.obtenerMaterialFirma('beta')).ruc).toBe(OTRO_RUC);
+
+    // Sin emisor sigue usando el del snapshot (emisor principal).
+    const { servicio: sinEmisor } = crear();
+    expect(await sinEmisor.generarAutofirmadoBeta(ACTOR, 90)).toMatchObject({ ruc: RUC_PRUEBA });
   });
 
   it('el autofirmado se genera solo con el ambiente BETA', async () => {

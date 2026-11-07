@@ -15,6 +15,10 @@ export interface ProductoVentaResponse {
   imagen_url: string;
   /** Código de producto SUNAT (catálogo 25, 8 dígitos). Solo lo trae la carga de productos de una venta. */
   codigo_sunat?: string | null;
+  /** Nombre de la categoría; null si no tiene. Solo lo trae el catálogo del mostrador. */
+  categoria?: string | null;
+  /** Producto destacado. Solo lo trae el catálogo del mostrador. */
+  destacado?: boolean;
 }
 
 export interface ItemVentaResponse {

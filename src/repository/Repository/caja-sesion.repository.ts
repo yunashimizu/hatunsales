@@ -4,6 +4,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { ConfiguracionRepository } from './configuracion.repository';
 import { EsquemaCajaService, SnapshotEsquema } from '../../caja/esquema/esquema-caja.service';
 import { Dinero } from '../../caja/dominio/dinero';
+import { sqlFinExclusivoDiaLima, sqlInicioDiaLima } from '../../util/fecha-lima';
 
 export type AperturaSesion = {
   id_apertura: number;
@@ -22,6 +23,35 @@ export type CajaDisponible = {
   id_sucursal: number | null;
   sucursal_nombre: string | null;
   ocupada: boolean;
+  /** Efectivo contado (monto_conteo) en el último cierre de esta caja; null si no hay o no existe la columna. */
+  sugerido_inicial: number | null;
+};
+
+/** Filtros de turnos (aperturas). Las fechas son AAAA-MM-DD en días de Lima, ya validadas. */
+export type FiltroTurnos = {
+  idSucursal?: number;
+  idCaja?: number;
+  idUsuario?: number;
+  desde?: string;
+  hasta?: string;
+};
+
+/** Un turno (apertura + su cierre si lo tiene) listo para el arqueo por sucursal. */
+export type FilaTurno = {
+  id_apertura: number;
+  id_caja: number;
+  caja_nombre: string;
+  id_sucursal: number | null;
+  sucursal_nombre: string | null;
+  id_usuario: number | null;
+  usuario_nombre: string | null;
+  abierta_en: string | null;
+  cerrada_en: string | null;
+  /** null = turno antiguo sin dato (no es lo mismo que 0.00). */
+  monto_inicial: Dinero | null;
+  /** Efectivo contado al cerrar; null si el turno sigue abierto o el cierre no lo guardó. */
+  monto_conteo: Dinero | null;
+  cerrada: boolean;
 };
 
 export type ResumenTurno = {
@@ -66,6 +96,8 @@ interface MetaSesion {
 }
 
 const CANDADO_APERTURA_USUARIO = 'caja:apertura:usuario:';
+/** Instante UTC de una columna `timestamp` sin zona que guarda hora UTC. */
+const ISO_UTC = `'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'`;
 
 /**
  * Sesión de caja (apertura / cierre).
@@ -207,6 +239,29 @@ export class CajaSesionRepository {
     return filas.length > 0;
   }
 
+  /**
+   * Subconsulta (correlacionada con `c.id_caja`) del efectivo contado en el último cierre de esa
+   * caja. Sin columna de conteo en cierres_caja devuelve NULL: el sugerido simplemente no existe.
+   */
+  private sqlSugerido(m: MetaSesion, refCaja: string): string {
+    if (!m.cierre.colMonto) return 'NULL::text';
+    return `(SELECT ci.${m.cierre.colMonto}::text
+               FROM aperturas_caja a2
+               JOIN cierres_caja ci ON ci.id_apertura = a2.id_apertura
+              WHERE a2.id_caja = ${refCaja}
+              ORDER BY a2.id_apertura DESC
+              LIMIT 1)`;
+  }
+
+  /** Efectivo contado al cerrar el último turno de la caja (null si no hay dato). */
+  async sugeridoInicial(idCaja: number): Promise<number | null> {
+    const m = await this.metaSesion();
+    if (!m.cierre.colMonto) return null;
+    const filas = await this.dataSource.query(`SELECT ${this.sqlSugerido(m, '$1::int')} AS sugerido`, [idCaja]);
+    const v = filas[0]?.sugerido;
+    return v != null && v !== '' ? Dinero.desdeBd(v).aNumero() : null;
+  }
+
   async listarDisponibles(): Promise<CajaDisponible[]> {
     const m = await this.metaSesion();
     const filas = await this.dataSource.query(
@@ -219,7 +274,8 @@ export class CajaSesionRepository {
                    AND NOT EXISTS (
                          SELECT 1 FROM cierres_caja ci WHERE ci.id_apertura = a.id_apertura
                        )
-              ) AS ocupada
+              ) AS ocupada,
+              ${this.sqlSugerido(m, 'c.id_caja')} AS sugerido_inicial
          FROM cajas c
          ${m.caja.tieneSucursal ? 'LEFT JOIN sucursales s ON s.id_sucursal = c.id_sucursal' : ''}
         ORDER BY c.id_caja ASC`,
@@ -231,7 +287,140 @@ export class CajaSesionRepository {
       id_sucursal: f.id_sucursal != null ? Number(f.id_sucursal) : null,
       sucursal_nombre: f.sucursal_nombre != null ? String(f.sucursal_nombre) : null,
       ocupada: f.ocupada === true || f.ocupada === 't' || f.ocupada === 1,
+      sugerido_inicial: f.sugerido_inicial != null && f.sugerido_inicial !== '' ? Dinero.desdeBd(f.sugerido_inicial).aNumero() : null,
     }));
+  }
+
+  // ── Turnos para el arqueo por sucursal ───────────────────────
+
+  /** Sucursales de las cajas donde el usuario tuvo turnos (null = caja sin sucursal). Es "su sede". */
+  async sucursalesDeUsuario(idUsuario: number): Promise<(number | null)[]> {
+    const m = await this.metaSesion();
+    const filas = await this.dataSource.query(
+      `SELECT DISTINCT ${m.caja.tieneSucursal ? 'c.id_sucursal' : 'NULL::int AS id_sucursal'}
+         FROM aperturas_caja a
+         JOIN cajas c ON c.id_caja = a.id_caja
+        WHERE a.id_usuario = $1`,
+      [idUsuario],
+    );
+    return (filas as any[]).map((f) => (f.id_sucursal != null ? Number(f.id_sucursal) : null));
+  }
+
+  /** Sucursal de una caja: undefined si la caja no existe, null si no tiene sucursal. */
+  async sucursalDeCaja(idCaja: number): Promise<number | null | undefined> {
+    const m = await this.metaSesion();
+    const filas = await this.dataSource.query(
+      `SELECT ${m.caja.tieneSucursal ? 'c.id_sucursal' : 'NULL::int AS id_sucursal'} FROM cajas c WHERE c.id_caja = $1 LIMIT 1`,
+      [idCaja],
+    );
+    if (!filas[0]) return undefined;
+    return filas[0].id_sucursal != null ? Number(filas[0].id_sucursal) : null;
+  }
+
+  /** FROM/WHERE común de los listados de turnos. Todo valor del usuario va como parámetro. */
+  private armarTurnos(m: MetaSesion, filtro: FiltroTurnos): { from: string; where: string; params: unknown[] } {
+    const params: unknown[] = [];
+    const ph = (valor: unknown) => {
+      params.push(valor);
+      return `$${params.length}`;
+    };
+    const condiciones: string[] = [];
+    if (filtro.idSucursal != null) {
+      condiciones.push(m.caja.tieneSucursal ? `c.id_sucursal = ${ph(filtro.idSucursal)}` : 'FALSE');
+    }
+    if (filtro.idCaja != null) condiciones.push(`a.id_caja = ${ph(filtro.idCaja)}`);
+    if (filtro.idUsuario != null) condiciones.push(`a.id_usuario = ${ph(filtro.idUsuario)}`);
+    if (m.apertura.colFecha) {
+      if (filtro.desde) condiciones.push(`a.${m.apertura.colFecha} >= ${sqlInicioDiaLima(ph(filtro.desde))}`);
+      if (filtro.hasta) condiciones.push(`a.${m.apertura.colFecha} < ${sqlFinExclusivoDiaLima(ph(filtro.hasta))}`);
+    }
+
+    const cierreFecha = m.cierre.colFecha ?? 'NULL::timestamp';
+    const cierreMonto = m.cierre.colMonto ? `${m.cierre.colMonto}::text` : 'NULL::text';
+    const ordenCierre = m.cierre.colFecha ? `${m.cierre.colFecha} ASC NULLS LAST` : 'id_apertura';
+    const from = `FROM aperturas_caja a
+         JOIN cajas c ON c.id_caja = a.id_caja
+         ${m.caja.tieneSucursal ? 'LEFT JOIN sucursales s ON s.id_sucursal = c.id_sucursal' : ''}
+         LEFT JOIN usuarios u ON u.id_usuario = a.id_usuario
+         LEFT JOIN LATERAL (
+                SELECT ${cierreFecha} AS fecha, ${cierreMonto} AS monto
+                  FROM cierres_caja
+                 WHERE id_apertura = a.id_apertura
+                 ORDER BY ${ordenCierre}
+                 LIMIT 1
+              ) ci ON TRUE`;
+    return { from, where: condiciones.length ? `WHERE ${condiciones.join(' AND ')}` : '', params };
+  }
+
+  /**
+   * Turnos (más recientes primero). Con `pagina` devuelve una página y el total; sin ella,
+   * todos los del filtro (para sumar por sucursal).
+   */
+  async listarTurnos(
+    filtro: FiltroTurnos,
+    pagina?: { limite: number; offset: number },
+  ): Promise<{ filas: FilaTurno[]; total: number }> {
+    const m = await this.metaSesion();
+    const { from, where, params } = this.armarTurnos(m, filtro);
+    const selFecha = m.apertura.colFecha ? `a.${m.apertura.colFecha}` : 'NULL::timestamp';
+    const selMonto = m.apertura.colMonto ? `a.${m.apertura.colMonto}::text` : 'NULL::text';
+    const selSuc = m.caja.tieneSucursal
+      ? 'c.id_sucursal, s.nombre AS sucursal_nombre'
+      : 'NULL::int AS id_sucursal, NULL::text AS sucursal_nombre';
+    const orden = m.apertura.colFecha ? `${selFecha} DESC, a.id_apertura DESC` : 'a.id_apertura DESC';
+
+    const paramsPagina = [...params];
+    let limite = '';
+    if (pagina) {
+      paramsPagina.push(pagina.limite, pagina.offset);
+      limite = `LIMIT $${paramsPagina.length - 1} OFFSET $${paramsPagina.length}`;
+    }
+
+    const [filas, conteo] = await Promise.all([
+      this.dataSource.query(
+        `SELECT a.id_apertura,
+                a.id_caja,
+                ${m.caja.exprNombre} AS caja_nombre,
+                ${selSuc},
+                a.id_usuario,
+                NULLIF(TRIM(CONCAT_WS(' ', u.nombre, u.apellido_paterno)), '') AS usuario_nombre,
+                to_char(${selFecha}, ${ISO_UTC}) AS abierta_en,
+                to_char(ci.fecha, ${ISO_UTC}) AS cerrada_en,
+                ${selMonto} AS monto_inicial,
+                ci.monto AS monto_conteo,
+                EXISTS (SELECT 1 FROM cierres_caja x WHERE x.id_apertura = a.id_apertura) AS cerrada
+           ${from}
+           ${where}
+          ORDER BY ${orden}
+          ${limite}`,
+        paramsPagina,
+      ),
+      pagina
+        ? this.dataSource.query(
+            `SELECT COUNT(*)::int AS total
+               FROM aperturas_caja a
+               JOIN cajas c ON c.id_caja = a.id_caja
+               ${where}`,
+            params,
+          )
+        : Promise.resolve(null),
+    ]);
+
+    const mapeadas: FilaTurno[] = (filas as any[]).map((f) => ({
+      id_apertura: Number(f.id_apertura),
+      id_caja: Number(f.id_caja),
+      caja_nombre: String(f.caja_nombre ?? `Caja ${f.id_caja}`),
+      id_sucursal: f.id_sucursal != null ? Number(f.id_sucursal) : null,
+      sucursal_nombre: f.sucursal_nombre != null ? String(f.sucursal_nombre) : null,
+      id_usuario: f.id_usuario != null ? Number(f.id_usuario) : null,
+      usuario_nombre: f.usuario_nombre != null ? String(f.usuario_nombre) : null,
+      abierta_en: f.abierta_en ?? null,
+      cerrada_en: f.cerrada_en ?? null,
+      monto_inicial: f.monto_inicial != null && f.monto_inicial !== '' ? Dinero.desdeBd(f.monto_inicial) : null,
+      monto_conteo: f.monto_conteo != null && f.monto_conteo !== '' ? Dinero.desdeBd(f.monto_conteo) : null,
+      cerrada: f.cerrada === true || f.cerrada === 't' || f.cerrada === 1,
+    }));
+    return { filas: mapeadas, total: conteo ? Number(conteo[0]?.total ?? 0) : mapeadas.length };
   }
 
   /**

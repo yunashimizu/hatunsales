@@ -20,6 +20,8 @@ export const CodigoErrorCaja = {
   /** 404: no hay turno abierto para el usuario. */
   CAJA_NO_ABIERTA: 'CAJA_NO_ABIERTA',
   CAJA_APERTURA_NO_ENCONTRADA: 'CAJA_APERTURA_NO_ENCONTRADA',
+  /** 400: monto inicial del turno negativo, no numérico o fuera de rango. */
+  CAJA_MONTO_INICIAL_INVALIDO: 'CAJA_MONTO_INICIAL_INVALIDO',
   /** 400: ingreso/egreso mal formado. */
   CAJA_MOVIMIENTO_INVALIDO: 'CAJA_MOVIMIENTO_INVALIDO',
   /** 409: el egreso supera el efectivo que debería haber en caja. */

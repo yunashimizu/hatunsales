@@ -242,8 +242,12 @@ export class VentaRepository {
               COALESCE(p.descuento, 0)       AS descuento,
               COALESCE(rm.reglas, '[]'::json) AS reglas_mayoristas,
               COALESCE(inv.stock, 0)         AS stock_disponible,
-              COALESCE(img.url, '')          AS imagen_url
+              COALESCE(img.url, '')          AS imagen_url,
+              cat.nombre                     AS categoria,
+              -- Vía JSON: si la columna aún no existe en esa instalación devuelve false en vez de fallar.
+              COALESCE((to_jsonb(p) ->> 'destacado')::boolean, false) AS destacado
          FROM productos p
+         LEFT JOIN categorias cat ON cat.id_categoria = p.id_categoria
          ${joinSql}
          -- Catálogo completo: reglas e imagen se calculan UNA vez para todos los productos
          -- (una subconsulta por producto costaba miles de búsquedas con 5 000+ productos).
@@ -269,7 +273,11 @@ export class VentaRepository {
       [...stock.params, tope],
     );
 
-    return filas.map((f: any) => this.mapProducto(f));
+    return filas.map((f: any) => ({
+      ...this.mapProducto(f),
+      categoria: f.categoria ? String(f.categoria) : null,
+      destacado: f.destacado === true || f.destacado === 't' || f.destacado === 'true',
+    }));
   }
 
   /**

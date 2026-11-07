@@ -176,9 +176,12 @@ export class CertificadoFiscalService {
     const resultado: Record<AmbienteFiscal, CertificadoInfoVista | null> = { beta: null, produccion: null };
     if (!(await this.esquema.tiene('secretos'))) return resultado;
     const [metadatos, snapshot] = await Promise.all([this.repositorio.metadatosActivos(), this.config.snapshot()]);
-    const contexto = { ahora: this.reloj.ahora(), rucEmisor: snapshot.emisor.ruc };
+    const ahora = this.reloj.ahora();
     for (const meta of metadatos) {
       if (!AMBIENTES_FISCALES.includes(meta.ambiente)) continue;
+      // BETA puede usar un emisor de pruebas distinto del principal: el aviso «RUC distinto del emisor» no aplica
+      // (la activación de las pruebas del POS ya exige que el certificado sea del emisor BETA).
+      const contexto = { ahora, rucEmisor: meta.ambiente === 'beta' && meta.ruc ? meta.ruc : snapshot.emisor.ruc };
       resultado[meta.ambiente] = {
         ...describirCertificado(meta, contexto),
         legible: await this.esLegible(meta.ambiente),
@@ -213,6 +216,7 @@ export class CertificadoFiscalService {
     clave: string,
     opciones: OpcionesSubidaCertificado,
     actor: ActorFiscal,
+    emisor?: { ruc: string },
   ): Promise<CertificadoSubido> {
     await this.esquema.exigir('secretos');
     this.cifrado.exigirDisponible();
@@ -227,11 +231,20 @@ export class CertificadoFiscalService {
       nombreArchivo: archivo?.originalname ?? null,
       accion: 'subido',
       actor,
+      // Solo BETA puede tener un emisor propio; producción siempre se valida contra el emisor principal.
+      rucEmisor: ambiente === 'beta' ? emisor?.ruc : undefined,
     });
   }
 
-  /** Certificado autofirmado (RSA 2048, OU = RUC) SOLO para SUNAT BETA. */
-  async generarAutofirmadoBeta(actor: ActorFiscal, dias = 365): Promise<CertificadoSubido> {
+  /**
+   * Certificado autofirmado (RSA 2048, OU = RUC) SOLO para SUNAT BETA. Con `emisor` (el emisor BETA, que
+   * puede ser distinto del principal) se genera con su RUC y razón social; sin él, con los del emisor principal.
+   */
+  async generarAutofirmadoBeta(
+    actor: ActorFiscal,
+    dias = 365,
+    emisor?: { ruc: string; razonSocial: string },
+  ): Promise<CertificadoSubido> {
     const snapshot = await this.config.snapshotFresco();
     if (snapshot.ambiente !== 'beta') {
       throw new FiscalConfigError(
@@ -244,8 +257,8 @@ export class CertificadoFiscalService {
 
     const clave = randomBytes(18).toString('base64url');
     const pfx = await generarAutofirmado({
-      ruc: snapshot.emisor.ruc,
-      razonSocial: snapshot.emisor.razonSocial,
+      ruc: emisor?.ruc ?? snapshot.emisor.ruc,
+      razonSocial: emisor?.razonSocial ?? snapshot.emisor.razonSocial,
       clave,
       dias,
       ahora: this.reloj.ahora(),
@@ -257,6 +270,7 @@ export class CertificadoFiscalService {
       nombreArchivo: 'autofirmado-beta.pfx',
       accion: 'autofirmado',
       actor,
+      rucEmisor: emisor?.ruc,
     });
   }
 
@@ -347,6 +361,8 @@ export class CertificadoFiscalService {
       nombreArchivo: string | null;
       accion: 'subido' | 'autofirmado';
       actor: ActorFiscal;
+      /** RUC contra el que se valida el certificado; por omisión el del emisor principal. */
+      rucEmisor?: string;
     },
   ): Promise<CertificadoSubido> {
     const { ambiente, actor } = opciones;
@@ -354,7 +370,7 @@ export class CertificadoFiscalService {
     const ahora = this.reloj.ahora();
     const { advertencias } = validarCertificadoParaUso(leido.info, {
       ambiente,
-      rucEmisor: snapshot.emisor.ruc,
+      rucEmisor: opciones.rucEmisor ?? snapshot.emisor.ruc,
       ahora,
       forzar: opciones.forzar,
     });
@@ -441,7 +457,7 @@ export class CertificadoFiscalService {
       subido_por: actor.id_usuario,
       subido_en: ahora,
     };
-    const info = describirCertificado(meta, { ahora, rucEmisor: snapshot.emisor.ruc });
+    const info = describirCertificado(meta, { ahora, rucEmisor: opciones.rucEmisor ?? snapshot.emisor.ruc });
     const avisos = Array.from(new Set([...advertencias, ...info.advertencias]));
     return { ...info, advertencias: avisos, reemplaza_a: reemplazado };
   }

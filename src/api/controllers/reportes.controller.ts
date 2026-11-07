@@ -44,6 +44,14 @@ export class ReportesController {
     });
   }
 
+  /** Ventas netas por hora de Lima (fecha opcional, por defecto hoy) frente al mismo día de la semana anterior. */
+  @Get('ventas-por-hora')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin', 'vendedor', 'caja')
+  ventasPorHora(@Query('fecha') fecha?: string) {
+    return this.service.ventasPorHora(fecha);
+  }
+
   @Get('categorias')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin', 'vendedor', 'caja')
