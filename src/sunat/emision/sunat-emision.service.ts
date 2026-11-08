@@ -19,8 +19,10 @@ import { esErrorDeConfiguracion, esErrorNucleoFiscal } from '../nucleo/errores-n
 import { EnvioCpePreparado, PreparadorEnvioCpe } from '../nucleo/preparador-envio-cpe';
 import {
   admiteGetStatusCdr,
+  admiteResumenDiario,
   esDocumentoDeFactura,
   fechaLimiteEnvioIndividual,
+  fechaLimiteResumen,
   usuarioSolCorrespondeAlEmisor,
 } from '../nucleo/reglas-envio';
 import { FabricaClienteSoapSunat, SunatSoapClient, TIMEOUT_POS_MS, TIMEOUT_WORKER_MS } from '../nucleo/soap/sunat-soap-client';
@@ -37,6 +39,7 @@ import {
   CODIGOS_REGISTRADO_CON_OTROS_DATOS,
   EnvioCerrado,
   EnvioRegistrado,
+  ESPERA_LENTA_MINUTOS,
   ESPERA_REINTENTO_MINUTOS,
   MAXIMO_INTENTOS_AUTOMATICOS,
   NOMBRE_AMBIENTE,
@@ -62,6 +65,13 @@ export interface ResultadoPruebaCredenciales {
   tiempo_ms: number;
 }
 
+/** Quién pide un reintento manual y si lo fuerza (un envío en EXCEPCION solo lo reintenta un administrador). */
+export interface OpcionesReintentoManual {
+  /** Reintenta aunque el envío esté en EXCEPCION. El controlador solo lo permite al rol administrador. */
+  forzar?: boolean;
+  actor?: ActorFiscal | null;
+}
+
 /** Número que no existe en ninguna serie real: la consulta prueba las credenciales sin tocar nada (D1.4). */
 export const NUMERO_PRUEBA_CREDENCIALES = 99_999_999;
 
@@ -85,6 +95,12 @@ const MENSAJES_CREDENCIAL_SOL: Readonly<Record<string, string>> = {
 
 function esAceptado(estado: string): boolean {
   return estado === 'ACEPTADO' || estado === 'ACEPTADO_OBS';
+}
+
+/** yyyy-mm-dd → dd/mm (la fecha límite que se le muestra al usuario). */
+function fechaCorta(iso: string): string {
+  const [, mes, dia] = /^\d{4}-(\d{2})-(\d{2})/.exec(iso) ?? [];
+  return mes && dia ? `${dia}/${mes}` : iso;
 }
 
 function mensajeDe(error: unknown): string {
@@ -160,6 +176,7 @@ export class SunatEmisionService {
     preparado: EnvioCpePreparado,
     idComprobante: number | null,
     idUsuario: number | null,
+    porResumir = false,
   ): Promise<number> {
     return this.envios.registrar(consultor, {
       ambiente,
@@ -168,6 +185,7 @@ export class SunatEmisionService {
       idComprobante,
       idUsuario,
       fechaLimiteEnvio: fechaLimiteEnvioIndividual(documento.tipo, documento.serie, documento.fechaEmision),
+      porResumir,
     });
   }
 
@@ -207,13 +225,23 @@ export class SunatEmisionService {
    * Reenvío seguro del MISMO ZIP (D5.1). En producción, las facturas y sus notas consultan antes su
    * CDR: si SUNAT ya lo tiene, se completa sin reenviar. Respeta plazos (D5.2) e interruptor (D5.4).
    */
-  async reintentar(idEnvio: number, origen: 'reintento' | 'tarea' = 'reintento'): Promise<ResultadoEmision> {
+  async reintentar(
+    idEnvio: number,
+    origen: 'reintento' | 'tarea' = 'reintento',
+    opciones: OpcionesReintentoManual = {},
+  ): Promise<ResultadoEmision> {
+    const forzar = origen === 'reintento' && opciones.forzar === true;
     const actual = await this.envios.leer(idEnvio);
     if (!actual) throw new FiscalConfigError('FISCAL_DOC_NO_ENCONTRADO', `No existe el envío ${idEnvio}.`);
-    this.exigirReintentable(actual);
+    if (forzar && !opciones.actor?.id_usuario) {
+      throw new FiscalConfigError('FISCAL_CONFIG_INVALIDA', 'No se pudo identificar al administrador que fuerza el reintento: vuelva a iniciar sesión.');
+    }
+    this.exigirReintentable(actual, forzar);
     await this.exigirSinBloqueo(actual.ambiente);
+    // El reintento manual queda en la bitácora; el forzado, antes de tocar nada (si no se puede auditar, no se hace).
+    if (origen === 'reintento') await this.auditarReintentoManual(actual, forzar, opciones.actor ?? null);
 
-    const envio = await this.envios.reclamarReintento(idEnvio);
+    const envio = await this.envios.reclamarReintento(idEnvio, forzar);
     if (!envio) {
       throw new FiscalConfigError('FISCAL_ENVIO_EN_CURSO', 'Otro proceso está enviando este comprobante ahora mismo; actualice en unos segundos.');
     }
@@ -238,11 +266,40 @@ export class SunatEmisionService {
     return this.enviarZip(envio, documento, envio.zip.toString('base64'), origen, timeout);
   }
 
+  private async auditarReintentoManual(actual: EnvioRegistrado, forzado: boolean, actor: ActorFiscal | null): Promise<void> {
+    const evento = {
+      accion: ACCIONES_AUDITORIA_FISCAL.REINTENTO_MANUAL,
+      id_usuario: actor?.id_usuario ?? null,
+      entidad: 'fiscal_envios',
+      id_entidad: actual.id_envio,
+      detalle: {
+        usuario: actor?.nombre ?? null,
+        id_envio: actual.id_envio,
+        estado_previo: actual.estado,
+        accion_previa: actual.accion,
+        intento: actual.intento,
+        forzado,
+        identificador: actual.nombre_base,
+        ambiente: actual.ambiente,
+      },
+      ip: actor?.ip ?? null,
+    };
+    if (forzado) {
+      await this.auditoria.registrar(evento);
+      return;
+    }
+    try {
+      await this.auditoria.registrar(evento);
+    } catch (error) {
+      this.logger.warn(`No se pudo auditar el reintento manual del envío ${actual.id_envio}: ${mensajeDe(error)}`);
+    }
+  }
+
   /**
    * Solo consulta el CDR (getStatusCdr; producción y facturas o sus notas). Un CDR recuperado tras
    * 1033/2109 no se acepta solo aunque coincida: queda para la confirmación manual del administrador (D4).
    */
-  async recuperarCdr(idEnvio: number): Promise<ResultadoEmision> {
+  async recuperarCdr(idEnvio: number, opciones: { actor?: ActorFiscal | null } = {}): Promise<ResultadoEmision> {
     const actual = await this.envios.leer(idEnvio);
     if (!actual) throw new FiscalConfigError('FISCAL_DOC_NO_ENCONTRADO', `No existe el envío ${idEnvio}.`);
     const documento = actual.datos?.documento;
@@ -271,11 +328,45 @@ export class SunatEmisionService {
     if (!envio) {
       throw new FiscalConfigError('FISCAL_ENVIO_EN_CURSO', 'El comprobante se está enviando o consultando ahora mismo; actualice en unos segundos.');
     }
+    const resultado = await this.consultarYCerrarRecuperacion(envio, documento);
+    // Solo la pedida por una persona (botón «Recuperar CDR»); las consultas internas del sistema no llevan actor.
+    if (opciones.actor) await this.auditarCdrRecuperado(actual, resultado, opciones.actor);
+    return resultado;
+  }
+
+  /** La consulta de «Recuperar CDR» queda en la bitácora (sin romper la consulta si la bitácora falla). */
+  private async auditarCdrRecuperado(previo: EnvioRegistrado, resultado: ResultadoEmision, actor: ActorFiscal): Promise<void> {
+    try {
+      await this.auditoria.registrar({
+        accion: ACCIONES_AUDITORIA_FISCAL.CDR_RECUPERADO,
+        id_usuario: actor.id_usuario ?? null,
+        entidad: 'fiscal_envios',
+        id_entidad: previo.id_envio,
+        detalle: {
+          usuario: actor.nombre ?? null,
+          id_envio: previo.id_envio,
+          identificador: previo.nombre_base,
+          ambiente: previo.ambiente,
+          estado_previo: previo.estado,
+          estado: resultado.estado,
+          accion: resultado.accion ?? null,
+          codigo_sunat: resultado.codigo ?? null,
+          aceptado: resultado.aceptado,
+          constancia_recibida: resultado.estado === 'ACEPTADO' || resultado.estado === 'RECHAZADO',
+        },
+        ip: actor.ip ?? null,
+      });
+    } catch (error) {
+      this.logger.warn(`No se pudo auditar la recuperación del CDR del envío ${previo.id_envio}: ${mensajeDe(error)}`);
+    }
+  }
+
+  private async consultarYCerrarRecuperacion(envio: EnvioRegistrado, documento: DocumentoCpe): Promise<ResultadoEmision> {
     const consulta = await this.consultar(envio, documento, TIMEOUT_POS_MS);
     if (consulta instanceof FiscalConfigError) return this.cerrar(envio, documento, this.sinConsulta(envio, consulta.message), 'recuperacion');
     if (consulta.tipo === 'CDR') return this.procesar(envio, documento, consulta, 'recuperacion', 'consulta');
     if (consulta.tipo === 'ESTADO' && consulta.estadoComprobante === 'NO_EXISTE') {
-      if (this.fueraDePlazo(envio)) return this.cerrar(envio, documento, this.cierrePlazo(envio, documento), 'recuperacion');
+      if (this.fueraDePlazo(envio)) return this.cerrar(envio, documento, this.cierrePlazo(envio, documento, true), 'recuperacion');
       const mensaje = 'SUNAT no tiene registrado este comprobante: puede reenviarlo (se manda el mismo XML firmado).';
       return this.cerrar(
         envio,
@@ -308,11 +399,15 @@ export class SunatEmisionService {
     }
     const actual = await this.envios.leer(idEnvio);
     if (!actual) throw new FiscalConfigError('FISCAL_DOC_NO_ENCONTRADO', `No existe el envío ${idEnvio}.`);
-    const incierto = (actual.estado === 'PENDIENTE_REENVIO' && actual.accion === 'RECUPERAR_CDR') || (actual.estado === 'ENVIANDO' && actual.libre);
+    // EXCEPCION también: el sistema se rindió sin saber qué pasó en SUNAT; el administrador lo verificó y deja la nota.
+    const incierto =
+      (actual.estado === 'PENDIENTE_REENVIO' && actual.accion === 'RECUPERAR_CDR')
+      || (actual.estado === 'ENVIANDO' && actual.libre)
+      || (actual.estado === 'EXCEPCION' && actual.libre);
     if (!incierto) {
       throw new FiscalConfigError(
         'FISCAL_CONFIRMACION_NO_PERMITIDA',
-        'Solo se confirma a mano un envío cuyo resultado quedó incierto (SUNAT indicó que ya lo había recibido o no respondió). '
+        'Solo se confirma a mano un envío cuyo resultado quedó incierto o que requiere revisión (SUNAT indicó que ya lo había recibido o no respondió). '
           + `Este está en ${actual.estado}.`,
       );
     }
@@ -510,9 +605,11 @@ export class SunatEmisionService {
       if (decision.bloqueaEmision) {
         proximoIntentoMin = 0;
       } else if (envio.intento >= MAXIMO_INTENTOS_AUTOMATICOS) {
-        estado = 'EXCEPCION';
-        accion = 'NINGUNA';
-        mensaje = `Se intentó ${envio.intento} veces sin una respuesta válida de SUNAT: revise manualmente el comprobante. Última respuesta: ${decision.mensajeUsuario}`;
+        const agotado = this.cierreAgotado(envio, `Última respuesta: ${decision.mensajeUsuario}`);
+        estado = agotado.estado;
+        accion = agotado.accion;
+        mensaje = agotado.mensaje;
+        proximoIntentoMin = agotado.proximoIntentoMin;
       } else {
         proximoIntentoMin = this.esperaMinutos(envio.intento);
       }
@@ -559,10 +656,36 @@ export class SunatEmisionService {
 
   private pendienteConEspera(envio: EnvioRegistrado, mensaje: string): CierreEnvio {
     if (envio.intento >= MAXIMO_INTENTOS_AUTOMATICOS) {
-      const final = `Se intentó ${envio.intento} veces sin poder confirmar el envío: revise manualmente el comprobante. ${mensaje}`;
-      return { estado: 'EXCEPCION', accion: 'NINGUNA', mensaje: final, sunat: null, json: { clasificacion: { estado: 'EXCEPCION', accion: 'NINGUNA', mensajeUsuario: final } }, proximoIntentoMin: null };
+      const agotado = this.cierreAgotado(envio, mensaje);
+      return this.cierreDe(agotado.estado, agotado.accion, agotado.mensaje, agotado.proximoIntentoMin);
     }
     return this.pendiente(mensaje, null, this.esperaMinutos(envio.intento));
+  }
+
+  /**
+   * Intentos rápidos agotados (S1). Dentro del plazo de envío NO es un callejón: sigue pendiente y el
+   * sistema insiste cada ESPERA_LENTA_MINUTOS hasta el último día. Solo al vencer el plazo pasa a
+   * EXCEPCION, con la acción que corresponde al tipo de comprobante.
+   */
+  private cierreAgotado(
+    envio: EnvioRegistrado,
+    ultimo: string,
+  ): { estado: EstadoSunat; accion: CierreEnvio['accion']; mensaje: string; proximoIntentoMin: number | null } {
+    const limite = envio.fecha_limite_envio;
+    if (limite && this.reloj.fechaLima() <= limite) {
+      return {
+        estado: 'PENDIENTE_REENVIO',
+        accion: 'REINTENTAR',
+        mensaje: `SUNAT no respondió en ${envio.intento} intentos; se seguirá intentando cada hora hasta el ${fechaCorta(limite)} (plazo de envío). ${ultimo}`,
+        proximoIntentoMin: ESPERA_LENTA_MINUTOS,
+      };
+    }
+    const vencido = this.cierrePlazo(envio, envio.datos?.documento ?? null);
+    return { estado: 'EXCEPCION', accion: vencido.accion, mensaje: `${vencido.mensaje} Se intentó ${envio.intento} veces. ${ultimo}`, proximoIntentoMin: null };
+  }
+
+  private cierreDe(estado: EstadoSunat, accion: CierreEnvio['accion'], mensaje: string, proximoIntentoMin: number | null): CierreEnvio {
+    return { estado, accion, mensaje, sunat: null, json: { clasificacion: { estado, accion, mensajeUsuario: mensaje } }, proximoIntentoMin };
   }
 
   private pendiente(mensaje: string, sunat: CierreEnvio['sunat'], proximoIntentoMin: number): CierreEnvio {
@@ -593,6 +716,7 @@ export class SunatEmisionService {
     origen: OrigenEnvio,
     timeoutMs: number,
   ): Promise<ResultadoEmision> {
+    let sunatNoLoTiene = false;
     if (envio.ambiente === 'produccion' && admiteGetStatusCdr(documento.tipo, documento.serie)) {
       const consulta = await this.consultar(envio, documento, timeoutMs);
       if (!(consulta instanceof FiscalConfigError)) {
@@ -600,19 +724,42 @@ export class SunatEmisionService {
           consulta.tipo === 'CDR'
           || (consulta.tipo === 'ESTADO' && ['ACEPTADO', 'RECHAZADO', 'DE_BAJA'].includes(consulta.estadoComprobante ?? ''));
         if (definitiva) return this.procesar(envio, documento, consulta, origen, 'consulta');
+        sunatNoLoTiene = consulta.tipo === 'ESTADO' && consulta.estadoComprobante === 'NO_EXISTE';
       }
     }
-    return this.cerrar(envio, documento, this.cierrePlazo(envio, documento), origen);
+    return this.cerrar(envio, documento, this.cierrePlazo(envio, documento, sunatNoLoTiene), origen);
   }
 
-  private cierrePlazo(envio: EnvioRegistrado, documento: DocumentoCpe): CierreEnvio {
+  /**
+   * Plazo de envío vencido: EXCEPCION con lo que de verdad se puede hacer. Una factura de producción cuya
+   * existencia en SUNAT no se pudo descartar queda para «Recuperar constancia»; en los demás casos hay que
+   * emitir uno nuevo. Una boleta (o nota de boleta) que aún está dentro de los 7 días de su emisión no se pierde:
+   * queda con la acción RESUMIR y se informa en un resumen diario (SUNAT-2); pasados los 7 días solo queda la nota de crédito.
+   */
+  private cierrePlazo(envio: EnvioRegistrado, documento: DocumentoCpe | null, sunatNoLoTiene = false): CierreEnvio {
     const limite = envio.fecha_limite_envio ?? '';
-    const deFactura = esDocumentoDeFactura(documento.tipo, documento.serie);
-    const mensaje = deFactura
-      ? `Fuera de plazo: emita un comprobante nuevo. El plazo para enviar ${documento.serie}-${documento.numero} a SUNAT venció el ${limite}.`
-      : `Fuera del plazo de envío individual: informe la boleta por resumen diario en SUNAT (el envío individual de ${documento.serie}-${documento.numero} venció el ${limite}).`;
-    const accion = deFactura ? 'EMITIR_NUEVO' : 'NINGUNA';
-    return { estado: 'EXCEPCION', accion, mensaje, sunat: null, json: { clasificacion: { estado: 'EXCEPCION', accion, mensajeUsuario: mensaje } }, proximoIntentoMin: null };
+    const fecha = limite ? fechaCorta(limite) : 'la fecha límite';
+    const tipo = documento?.tipo ?? envio.tipo_documento;
+    const serie = documento?.serie ?? '';
+    const numero = documento?.numero ?? '';
+    const id = documento ? `${serie}-${numero}` : envio.nombre_base;
+    const deFactura = esDocumentoDeFactura(tipo, serie);
+    let accion: CierreEnvio['accion'] = 'EMITIR_NUEVO';
+    let mensaje: string;
+    if (deFactura && !sunatNoLoTiene && envio.ambiente === 'produccion' && admiteGetStatusCdr(tipo, serie)) {
+      accion = 'RECUPERAR_CDR';
+      mensaje = `El plazo para enviar ${id} a SUNAT venció el ${fecha} sin respuesta de SUNAT. Use «Recuperar constancia» para saber si SUNAT lo recibió; si no lo tiene, emita un comprobante nuevo.`;
+    } else if (deFactura) {
+      mensaje = `Fuera de plazo: emita un comprobante nuevo. El plazo para enviar ${id} a SUNAT venció el ${fecha}.`;
+    } else if (documento && admiteResumenDiario(tipo, serie, documento.fechaEmision, this.reloj.fechaLima())) {
+      accion = 'RESUMIR';
+      mensaje =
+        `El plazo de envío individual de ${id} venció el ${fecha}. Se informará a SUNAT en el próximo resumen diario `
+        + `(hasta el ${fechaCorta(fechaLimiteResumen(documento.fechaEmision))}); también puede pedirlo con «Informar por resumen».`;
+    } else {
+      mensaje = `El plazo de envío individual de ${id} venció el ${fecha} y ya pasaron los 7 días del resumen diario. Si el cliente reclama el comprobante, anúlelo con nota de crédito y emita uno nuevo.`;
+    }
+    return this.cierreDe('EXCEPCION', accion, mensaje, null);
   }
 
   /** getStatusCdr con las credenciales de producción; un problema de credenciales vuelve como error (no se lanza). */
@@ -723,15 +870,18 @@ export class SunatEmisionService {
     }
   }
 
-  private exigirReintentable(envio: EnvioRegistrado): void {
+  private exigirReintentable(envio: EnvioRegistrado, forzar = false): void {
     if (envio.estado === 'PENDIENTE_REENVIO' && envio.accion !== 'RECUPERAR_CDR') return;
     if (envio.estado === 'ENVIANDO' && envio.libre) return;
+    if (envio.estado === 'EXCEPCION' && forzar) return;
     const motivo =
       envio.estado === 'ENVIANDO'
         ? 'se está enviando ahora mismo'
-        : envio.accion === 'RECUPERAR_CDR'
-          ? 'SUNAT indicó que ya lo había recibido: recupere su constancia o confírmelo manualmente'
-          : `su estado es ${envio.estado}`;
+        : envio.estado === 'EXCEPCION'
+          ? 'requiere revisión: solo un administrador puede reintentarlo con «Reintentar ahora»'
+          : envio.accion === 'RECUPERAR_CDR'
+            ? 'SUNAT indicó que ya lo había recibido: recupere su constancia o confírmelo manualmente'
+            : `su estado es ${envio.estado}`;
     throw new FiscalConfigError(
       'FISCAL_REENVIO_NO_PERMITIDO',
       `El envío no está disponible para un reintento seguro (${motivo}). Solo se reenvían los pendientes de reenvío y los que quedaron sin respuesta.`,

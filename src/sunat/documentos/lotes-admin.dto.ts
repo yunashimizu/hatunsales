@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { IsIn, IsInt, IsOptional, Min } from 'class-validator';
+import { IsIn, IsInt, IsOptional, Matches, Min } from 'class-validator';
 import { AMBIENTES_FISCALES } from '../config/fiscal-config.tipos';
 import type { AmbienteFiscal } from '../config/fiscal-config.tipos';
 import { ESTADOS_SUNAT } from '../emision/emision.tipos';
@@ -37,4 +37,12 @@ export class ListarLotesDto {
   @IsInt({ message: 'por_pagina debe ser un número entero.' })
   @Min(1, { message: 'por_pagina debe ser al menos 1.' })
   por_pagina?: number;
+}
+
+/** POST /fiscal/lotes/resumen: fecha de emisión (aaaa-mm-dd) de las boletas a informar; sin fecha, las de hoy. */
+export class CrearResumenDto {
+  @IsOptional()
+  @Transform(({ value }: Transformacion) => (typeof value === 'string' ? value.trim() : value))
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'La fecha debe tener el formato aaaa-mm-dd.' })
+  fecha?: string;
 }

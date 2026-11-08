@@ -16,6 +16,18 @@ export class PedidoEstadoResponse {
   fecha!: Date;
 }
 
+/** Comprobante del pedido (boleta o factura) tal como lo ve el panel o el comprador. */
+export class PedidoComprobanteResponse {
+  estado!: 'aceptado' | 'en_proceso' | 'requiere_revision' | 'rechazado' | 'anulado' | 'sin_comprobante';
+  id_comprobante?: number;
+  numero_formateado?: string;
+  tipo?: 'boleta' | 'factura';
+  estado_sunat?: string;
+  puede_descargar!: boolean;
+  /** Solo para el personal. */
+  motivo?: string;
+}
+
 export class PedidoResponse {
   id_pedido!: number;
   codigo!: string;
@@ -35,5 +47,7 @@ export class PedidoResponse {
   cantidad_items!: number;
   items!: PedidoItemResponse[];
   historial!: PedidoEstadoResponse[];
+  /** Solo en el detalle de un pedido (no en listados). */
+  comprobante?: PedidoComprobanteResponse;
   creado_en!: Date;
 }

@@ -1,4 +1,7 @@
 import { RegistroModulo } from '../../registro/registro-modulo';
+import { AlertasFiscalesRepository } from '../alertas/alertas-fiscales.repository';
+import { AlertasFiscalesService } from '../alertas/alertas-fiscales.service';
+import { AlertasFiscalesTarea } from '../alertas/alertas-fiscales.tarea';
 import { LoteFiscalRepository } from '../documentos/lote-fiscal.repository';
 import { LotesAdminController } from '../documentos/lotes-admin.controller';
 import { LotesFiscalesService } from '../documentos/lotes-fiscales.service';
@@ -18,5 +21,9 @@ export const REGISTRO_SUNAT_DOCUMENTOS: RegistroModulo = {
     LotesFiscalesService,
     { provide: LotesFiscales, useExisting: LotesFiscalesService },
     LotesFiscalesTarea,
+    // Avisos diarios por correo (certificado por vencer, envíos que requieren revisión…).
+    AlertasFiscalesRepository,
+    AlertasFiscalesService,
+    AlertasFiscalesTarea,
   ],
 };

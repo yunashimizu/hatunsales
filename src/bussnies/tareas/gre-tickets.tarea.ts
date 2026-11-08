@@ -9,8 +9,8 @@ const DISPERSION_INICIAL_MS = 60_000;
 
 /**
  * Consulta sola los tickets de las GRE enviadas a SUNAT (PLAN V3, D11). Cada 30 s mira si a alguna le toca
- * su turno según la espera creciente que fija el negocio (30 s, 1, 2, 5 y luego 15 min; tras el tope de
- * consultas la deja para revisión manual) y consulta hasta 10 por vuelta.
+ * su turno según la espera creciente que fija el negocio (30 s, 1, 2, 5 y luego 15 min; tras 12 consultas
+ * sigue cada 2 horas hasta 7 días y recién entonces la deja para revisión manual) y consulta hasta 10 por vuelta.
  *
  * Solo corre con fiscal_tareas_activas, la GRE activada en producción y EmisionGre.modo() activo. Varias
  * réplicas: cada envío se reclama por separado (FOR UPDATE SKIP LOCKED + plazo de 60 s en bloqueado_hasta),

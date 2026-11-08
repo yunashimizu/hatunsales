@@ -42,6 +42,22 @@ export const ACCIONES_AUDITORIA_FISCAL = {
   POS_BETA_DESACTIVADO: 'POS_BETA_DESACTIVADO',
   // Anular sin nota de crédito (comunicación de baja o resumen diario).
   BAJA_SOLICITADA: 'FISCAL_BAJA_SOLICITADA',
+  // Salidas de los callejones (SUNAT-1): reintento manual, lotes y guías colgados.
+  REINTENTO_MANUAL: 'FISCAL_REINTENTO_MANUAL',
+  LOTE_LIBERADO: 'FISCAL_LOTE_LIBERADO',
+  GRE_LIBERADA: 'FISCAL_GRE_LIBERADA',
+  // Resumen diario de boletas (RC, condición 1): creado a mano o por la tarea.
+  RESUMEN_SOLICITADO: 'FISCAL_RESUMEN_SOLICITADO',
+  // Pedidos web (SUNAT-3): comprobante automático al confirmar el pago, con o sin éxito.
+  PEDIDO_WEB_EMITIDO: 'FISCAL_PEDIDO_WEB_EMITIDO',
+  // Alertas por correo (una por día y tipo) y re-cifrado de todos los secretos (SUNAT-3).
+  ALERTA_ENVIADA: 'FISCAL_ALERTA_ENVIADA',
+  SECRETOS_RECIFRADOS: 'FISCAL_SECRETOS_RECIFRADOS',
+  // Quién pidió a SUNAT la constancia de un envío (SUNAT-4) y quién emitió o anuló una nota o una guía.
+  CDR_RECUPERADO: 'FISCAL_CDR_RECUPERADO',
+  NC_EMITIDA: 'FISCAL_NC_EMITIDA',
+  GRE_EMITIDA: 'FISCAL_GRE_EMITIDA',
+  GRE_ANULADA: 'FISCAL_GRE_ANULADA',
 } as const;
 export type AccionAuditoriaFiscal = (typeof ACCIONES_AUDITORIA_FISCAL)[keyof typeof ACCIONES_AUDITORIA_FISCAL];
 
@@ -138,6 +154,48 @@ export class FiscalAuditoriaRepository {
         evento.ip ? String(evento.ip).slice(0, 45) : null,
       ],
     );
+  }
+
+  /** Último evento de una acción sobre una entidad (p. ej. el último intento de comprobante de un pedido web). */
+  async ultimoDeEntidad(accion: string, entidad: string, idEntidad: string | number): Promise<RegistroAuditoriaFiscal | null> {
+    if (!(await this.esquema.tiene('auditoria'))) return null;
+    const filas = await this.dataSource.query(
+      `SELECT id_auditoria, creado_en, id_usuario, accion, entidad, id_entidad, detalle, ip
+         FROM fiscal_auditoria
+        WHERE accion = $1 AND entidad = $2 AND id_entidad = $3
+        ORDER BY id_auditoria DESC
+        LIMIT 1`,
+      [String(accion).slice(0, 60), String(entidad).slice(0, 40), String(idEntidad).slice(0, 40)],
+    );
+    return filas[0] ? this.aRegistro(filas[0]) : null;
+  }
+
+  /** ¿Ya se registró esta acción hoy (día de Lima) con este detalle->>'clave'? Sirve para no repetir alertas por día y tipo. */
+  async existeHoy(accion: string, claveDetalle: string, valor: string, hoyLima: string): Promise<boolean> {
+    if (!(await this.esquema.tiene('auditoria'))) return false;
+    const filas = await this.dataSource.query(
+      `SELECT 1
+         FROM fiscal_auditoria
+        WHERE accion = $1
+          AND detalle ->> $2 = $3
+          AND (creado_en AT TIME ZONE 'America/Lima')::date = $4::date
+        LIMIT 1`,
+      [String(accion).slice(0, 60), claveDetalle, valor, hoyLima],
+    );
+    return filas.length > 0;
+  }
+
+  private aRegistro(f: any): RegistroAuditoriaFiscal {
+    return {
+      id_auditoria: Number(f.id_auditoria),
+      creado_en: f.creado_en instanceof Date ? f.creado_en.toISOString() : String(f.creado_en),
+      id_usuario: f.id_usuario === null ? null : Number(f.id_usuario),
+      accion: f.accion,
+      entidad: f.entidad ?? null,
+      id_entidad: f.id_entidad ?? null,
+      detalle: f.detalle ?? null,
+      ip: f.ip ?? null,
+    };
   }
 
   /** Lo más reciente primero; `antesDe` pagina por id (keyset, sin OFFSET). */

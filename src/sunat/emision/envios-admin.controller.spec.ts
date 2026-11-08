@@ -133,9 +133,9 @@ describe('EnviosAdminController y BetaAdminController (HTTP)', () => {
 
   it('reintentar, recuperar-cdr, reanudar y probar credenciales (200) con los errores fiscales traducidos', async () => {
     await request(app.getHttpServer()).post('/fiscal/envios/8/reintentar').expect(200);
-    expect(emision.reintentar).toHaveBeenCalledWith(8);
+    expect(emision.reintentar).toHaveBeenCalledWith(8, { forzar: false, actor: expect.objectContaining({ id_usuario: 7, nombre: 'Moisés' }) });
     await request(app.getHttpServer()).post('/fiscal/envios/8/recuperar-cdr').expect(200);
-    expect(emision.recuperarCdr).toHaveBeenCalledWith(8);
+    expect(emision.recuperarCdr).toHaveBeenCalledWith(8, { actor: expect.objectContaining({ id_usuario: expect.anything() }) });
 
     const reanudada = await request(app.getHttpServer()).post('/fiscal/emision/reanudar').expect(200);
     expect(reanudada.body).toMatchObject({ reanudada: true });
@@ -147,5 +147,65 @@ describe('EnviosAdminController y BetaAdminController (HTTP)', () => {
     emision.reintentar.mockRejectedValueOnce(new FiscalConfigError('FISCAL_EMISION_BLOQUEADA', 'La emisión está detenida.'));
     const bloqueada = await request(app.getHttpServer()).post('/fiscal/envios/8/reintentar').expect(503);
     expect(bloqueada.body).toMatchObject({ codigo: 'FISCAL_EMISION_BLOQUEADA', message: 'La emisión está detenida.' });
+  });
+
+  it('«Reintentar ahora»: forzar solo llega como verdadero cuando el cuerpo lo pide, con el usuario del token y auditoría exigida', async () => {
+    await request(app.getHttpServer()).post('/fiscal/envios/9/reintentar').send({ forzar: true }).expect(200);
+    expect(emision.reintentar).toHaveBeenCalledWith(9, { forzar: true, actor: expect.objectContaining({ id_usuario: 7 }) });
+    expect(esquema.exigir).toHaveBeenCalledWith('emision', 'auditoria');
+
+    await request(app.getHttpServer()).post('/fiscal/envios/9/reintentar').send({ forzar: false }).expect(200);
+    expect(emision.reintentar).toHaveBeenLastCalledWith(9, { forzar: false, actor: expect.anything() });
+    // Un valor que no es booleano es un error de validación, no un «sí».
+    await request(app.getHttpServer()).post('/fiscal/envios/9/reintentar').send({ forzar: 'si' }).expect(400);
+    expect(emision.reintentar).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('EnviosAdminController: el reintento forzado exige rol de administrador (RolesGuard real)', () => {
+  let app: INestApplication;
+  let usuario: Record<string, unknown>;
+  const emision = { reintentar: jest.fn(async (id: number) => ({ id_envio: id, estado: 'ACEPTADO' })) };
+
+  beforeAll(async () => {
+    const modulo = await Test.createTestingModule({
+      controllers: [EnviosAdminController],
+      providers: [
+        { provide: EmisionDirectaService, useValue: emision },
+        { provide: InterruptorEmisionFiscal, useValue: {} },
+        { provide: FiscalEsquemaService, useValue: { exigir: jest.fn(async () => undefined) } },
+      ],
+    })
+      .overrideGuard(JwtGuard)
+      .useValue({
+        canActivate: (contexto: ExecutionContext) => {
+          contexto.switchToHttp().getRequest().user = usuario;
+          return true;
+        },
+      })
+      .compile();
+    app = modulo.createNestApplication();
+    app.useGlobalPipes(crearValidationPipe());
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('vendedor, caja y consulta reciben 403 y no se reintenta nada', async () => {
+    for (const rol of ['vendedor', 'caja', 'consulta']) {
+      usuario = { ...ADMIN, rol };
+      await request(app.getHttpServer()).post('/fiscal/envios/9/reintentar').send({ forzar: true }).expect(403);
+    }
+    expect(emision.reintentar).not.toHaveBeenCalled();
+  });
+
+  it('el administrador sí', async () => {
+    usuario = { ...ADMIN, rol: 'Administrador' };
+    await request(app.getHttpServer()).post('/fiscal/envios/9/reintentar').send({ forzar: true }).expect(200);
+    expect(emision.reintentar).toHaveBeenCalledTimes(1);
   });
 });

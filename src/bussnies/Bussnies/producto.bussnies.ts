@@ -10,7 +10,7 @@ import { InventarioRepository } from '../../repository/Repository/inventario.rep
 import { CrearProductoRequest, ActualizarProductoRequest } from '../../models/model/producto.request';
 import { ProductoResponse } from '../../models/model/producto.response';
 import { IProductoBussniees } from '../Ibussnies/IProductoBussniees';
-import { traducirErrorStock } from './inventario.bussnies';
+import { InventarioBussnies, traducirErrorStock } from './inventario.bussnies';
 import { ALIAS_UNIDADES, normalizarUnidad } from '../../sunat/catalogos/sunat.catalogos';
 import { GRUPOS_UNIDADES, UNIDADES_AMIGABLES } from '../../sunat/catalogos/unidades-amigables';
 import type { UnidadAmigable } from '../../sunat/catalogos/unidades-amigables';
@@ -39,6 +39,9 @@ export class ProductoBussnies implements IProductoBussniees {
     private readonly inventarioRepo: InventarioRepository,
     @InjectDataSource('pgConnection')
     private readonly dataSource: DataSource,
+    // Para el ajuste de stock dentro del mismo PUT de edición (misma etiqueta de kardex que
+    // POST /inventario/ajuste). No hay ciclo: InventarioBussnies depende del repositorio.
+    private readonly inventarioBussnies: InventarioBussnies,
   ) {}
 
   async getAll(): Promise<ProductoResponse[]> {
@@ -138,7 +141,8 @@ export class ProductoBussnies implements IProductoBussniees {
         idProducto, almacenId, stock, 'Stock inicial · Alta de producto', manager,
       );
     } else {
-      await this.inventarioRepo.crearFilaVacia(manager, idProducto, almacenId);
+      // El producto nació en esta misma transacción: no puede tener fila todavía.
+      await this.inventarioRepo.insertarFilaVacia(manager, idProducto, almacenId);
     }
   }
 
@@ -166,15 +170,66 @@ export class ProductoBussnies implements IProductoBussniees {
     return error instanceof Error ? error : new Error(porDefecto);
   }
 
+  /**
+   * Edición parcial. Sin leer el producto antes: el UPDATE dice si existía (`affected`), y el
+   * detalle se lee una sola vez al final. Con `ajuste_stock`, el UPDATE y el ajuste del stock van
+   * en UNA transacción: el ajuste solo se aplica si el stock real sigue siendo el que vio la
+   * ficha (si no, 409 `STOCK_DESACTUALIZADO` y no queda nada escrito, ni siquiera el producto).
+   */
   async update(dto: ActualizarProductoRequest, id: number): Promise<ProductoResponse> {
-    const existente = await this.repo.getById(id);
-    if (!existente) throw new NotFoundException(`Producto ${id} no encontrado`);
-
+    // Validaciones sin base de datos primero: un 400 no debe costar viajes.
     const codigoSunat = this.normalizarCodigoSunat(dto.codigo_sunat);
+    const cambios = this.cambiosDeEdicion(dto, codigoSunat);
     await this.verificarUnicidad(dto.codigo_barras, dto.sku, id);
 
-    // Solo se tocan los campos que llegaron: así una edición parcial desde el
-    // panel no borra datos que ese formulario no muestra.
+    const hayCambios = Object.keys(cambios).length > 0;
+    const ajuste = dto.ajuste_stock;
+
+    try {
+      if (ajuste) {
+        await this.dataSource.transaction(async (manager) => {
+          if (hayCambios) {
+            const resultado = await manager.getRepository(Producto).update(id, cambios as any);
+            if (!((resultado?.affected ?? 0) > 0)) throw new NotFoundException(`Producto ${id} no encontrado`);
+          } else {
+            // Solo stock: sin UPDATE que lo diga, se comprueba que el producto exista (si no,
+            // la FK de inventario respondería con un error técnico).
+            const filas = await manager.query('SELECT 1 FROM productos WHERE id_producto = $1', [id]);
+            if (!filas?.length) throw new NotFoundException(`Producto ${id} no encontrado`);
+          }
+
+          const stockNuevo = Math.trunc(Number(ajuste.stock_nuevo));
+          const stockAnterior = Math.trunc(Number(ajuste.stock_anterior));
+          const diferencia = stockNuevo - stockAnterior;
+          if (diferencia !== 0) {
+            await this.inventarioBussnies.ajustarEnTransaccion(manager, {
+              id_producto: id,
+              id_almacen: Number(ajuste.id_almacen),
+              cantidad: diferencia,
+              motivo: 'correccion',
+              comentario: 'Ajuste de stock desde edición de producto',
+              stock_esperado: stockAnterior,
+            });
+          }
+        });
+      } else if (hayCambios) {
+        if (!(await this.repo.actualizarSiExiste(id, cambios as any))) {
+          throw new NotFoundException(`Producto ${id} no encontrado`);
+        }
+      }
+    } catch (error) {
+      throw this.traducirErrorBd(error, 'No se pudo actualizar el producto');
+    }
+
+    // Sin cambios ni ajuste, esta lectura es también la que responde 404 si no existe.
+    return this.getById(id);
+  }
+
+  /**
+   * Solo se tocan los campos que llegaron: así una edición parcial desde el panel no borra
+   * datos que ese formulario no muestra.
+   */
+  private cambiosDeEdicion(dto: ActualizarProductoRequest, codigoSunat: string | null | undefined): Record<string, any> {
     const cambios: Record<string, any> = {
       nombre: dto.nombre?.trim(),
       descripcion: dto.descripcion,
@@ -206,16 +261,7 @@ export class ProductoBussnies implements IProductoBussniees {
     Object.keys(cambios).forEach((clave) => {
       if (cambios[clave] === undefined) delete cambios[clave];
     });
-
-    if (Object.keys(cambios).length) {
-      try {
-        await this.repo.actualizar(id, cambios as any);
-      } catch (error) {
-        throw this.traducirErrorBd(error, 'No se pudo actualizar el producto');
-      }
-    }
-
-    return this.getById(id);
+    return cambios;
   }
 
   /** Catálogo de unidades para el selector: grupos, unidades visibles y sinónimos aceptados. */
@@ -306,11 +352,11 @@ export class ProductoBussnies implements IProductoBussniees {
     return { actualizados, rechazados };
   }
 
+  /** Borrado directo: `affected` dice si existía (antes se leía el producto primero). */
   async delete(id: number): Promise<number> {
-    const existe = await this.repo.getById(id);
-    if (!existe) throw new NotFoundException(`Producto ${id} no encontrado`);
+    let borrados: number;
     try {
-      return await this.repo.delete(id);
+      borrados = await this.repo.delete(id);
     } catch (error: any) {
       // 23503: tiene ventas, inventario, kardex u otros registros que lo referencian.
       if (String(error?.code ?? error?.driverError?.code ?? '') === '23503') {
@@ -320,6 +366,8 @@ export class ProductoBussnies implements IProductoBussniees {
       }
       throw error;
     }
+    if (!borrados) throw new NotFoundException(`Producto ${id} no encontrado`);
+    return borrados;
   }
 
   async buscarPorCodigoBarras(codigo_barras: string): Promise<ProductoResponse> {
@@ -361,39 +409,49 @@ export class ProductoBussnies implements IProductoBussniees {
    * Barras y SKU deben ser únicos entre sí y entre ellos: el lector busca por barras y cae a SKU,
    * así que un código no puede ser barras de un producto y SKU de otro. La carrera entre dos altas
    * simultáneas la cubre el índice único (`traducirErrorBd` traduce el 23505).
+   *
+   * Una sola consulta (`buscarChoquesDeCodigos`, por índice) y la decisión en memoria, con la
+   * misma prioridad y los mismos textos que cuando eran hasta cuatro consultas seguidas:
+   *   1. barras = barras de otro (exacto tras trim);
+   *   2. barras = SKU de otro (sin distinguir mayúsculas, como la caída a SKU del lector);
+   *   3. SKU = SKU de otro (exacto, como el `findOne({ sku })` de antes);
+   *   4. SKU = barras de otro (sin distinguir mayúsculas).
    */
   private async verificarUnicidad(codigoBarras?: string, sku?: string, idActual?: number): Promise<void> {
     const codigo = codigoBarras?.trim();
+    const codigoInterno = sku?.trim();
+    const codigos = [codigo, codigoInterno].filter((c): c is string => !!c);
+    if (!codigos.length) return;
+
+    const otros = (await this.repo.buscarChoquesDeCodigos(codigos))
+      .filter((p) => Number(p.id_producto) !== Number(idActual))
+      .sort((a, b) => Number(a.id_producto) - Number(b.id_producto));
+    if (!otros.length) return;
+
+    const barrasDe = (p: { codigo_barras: string | null }) => (p.codigo_barras ?? '').trim();
+    const skuDe = (p: { sku: string | null }) => (p.sku ?? '').trim();
+
     if (codigo) {
-      // Con la caída a SKU de la consulta, un choque puede ser por barras o por SKU de otro producto.
-      const existe = await this.repo.buscarPorCodigoBarras(codigo);
-      if (existe && existe.id_producto !== idActual) {
-        const porBarras = (existe.codigo_barras ?? '').trim() === codigo;
-        throw new ConflictException(
-          porBarras
-            ? `Ya existe un producto con ese código de barras${this.nombreDe(existe)}`
-            : `Ese código de barras ya es el SKU de otro producto${this.nombreDe(existe)}`,
-        );
+      const porBarras = otros.find((p) => barrasDe(p) === codigo);
+      if (porBarras) {
+        throw new ConflictException(`Ya existe un producto con ese código de barras${this.nombreDe(porBarras)}`);
       }
-      const conSku = await this.repo.buscarPorSku(codigo);
-      if (conSku && conSku.id_producto !== idActual) {
-        throw new ConflictException(`Ese código de barras ya es el SKU de otro producto${this.nombreDe(conSku)}`);
+      const porSku = otros.find((p) => skuDe(p) !== '' && skuDe(p).toLowerCase() === codigo.toLowerCase());
+      if (porSku) {
+        throw new ConflictException(`Ese código de barras ya es el SKU de otro producto${this.nombreDe(porSku)}`);
       }
     }
 
-    const codigoInterno = sku?.trim();
     if (codigoInterno) {
-      const existe = await this.repo.buscarPorSku(codigoInterno);
-      if (existe && existe.id_producto !== idActual) {
-        throw new ConflictException(`Ya existe un producto con ese SKU${this.nombreDe(existe)}`);
+      const porSku = otros.find((p) => skuDe(p) === codigoInterno);
+      if (porSku) {
+        throw new ConflictException(`Ya existe un producto con ese SKU${this.nombreDe(porSku)}`);
       }
-      const conBarras = await this.repo.buscarPorCodigoBarras(codigoInterno);
-      if (
-        conBarras &&
-        conBarras.id_producto !== idActual &&
-        (conBarras.codigo_barras ?? '').trim().toLowerCase() === codigoInterno.toLowerCase()
-      ) {
-        throw new ConflictException(`Ese SKU ya es el código de barras de otro producto${this.nombreDe(conBarras)}`);
+      const porBarras = otros.find(
+        (p) => barrasDe(p) !== '' && barrasDe(p).toLowerCase() === codigoInterno.toLowerCase(),
+      );
+      if (porBarras) {
+        throw new ConflictException(`Ese SKU ya es el código de barras de otro producto${this.nombreDe(porBarras)}`);
       }
     }
   }

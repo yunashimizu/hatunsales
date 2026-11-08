@@ -144,6 +144,7 @@ function crear(opciones: { esquema?: boolean; origen?: OrigenNota | null; notas?
     bloquearVenta: jest.fn(async () => ({ estado: 'activa' })),
     devolverStockParcial: jest.fn(async () => [{ id_producto: 7, id_almacen: 1, cantidad: 1 }]),
     ajustarCxcPorNota: jest.fn(async () => ({ descontado: 0, cerradas: 0 })),
+    efectosDeAnulacion: jest.fn(async () => ({ stock_devuelto: true, cxc_cerradas: 2 })),
   };
   const solicitudes: SolicitudEmisionNotaCredito[] = [];
   const emisor = {
@@ -315,6 +316,9 @@ describe('clasificación para anular (D9)', () => {
     ['EXCEPCION por formato (1xxx)', { estado_sunat: 'EXCEPCION', aceptada_sunat: false, envio: { estado: 'EXCEPCION', codigo: '0160', accion: null, libre: true } }, 'nunca_enviado'],
     ['EXCEPCION sin código', { estado_sunat: 'EXCEPCION', aceptada_sunat: false, envio: { estado: 'EXCEPCION', codigo: null, accion: null, libre: true } }, 'incierto'],
     ['pendiente de reenvío', { estado_sunat: 'PENDIENTE_REENVIO', aceptada_sunat: false }, 'incierto'],
+    // Boleta del modo «resumen»: SUNAT todavía no la conoce, anularla es solo del sistema; si ya va en un resumen, es incierto.
+    ['espera su resumen diario', { estado_sunat: 'POR_RESUMIR', aceptada_sunat: false }, 'nunca_enviado'],
+    ['en un resumen diario en curso', { estado_sunat: 'TICKET_PENDIENTE', aceptada_sunat: false }, 'incierto'],
   ])('%s → %s', (_caso, cambios, esperado) => {
     expect(clasificarParaAnular(cabecera(cambios as Partial<CabeceraComprobante>), 'produccion')).toBe(esperado);
   });
@@ -436,6 +440,44 @@ describe('NotaCreditoBussnies', () => {
 
       expect(repo.reclamarEfectos).toHaveBeenCalledWith(expect.anything(), 70);
       expect(respuesta.efectos_aplicados).toBe(true);
+    });
+  });
+
+  describe('auditoría de la nota emitida (FISCAL_NC_EMITIDA)', () => {
+    it('al emitir la nota queda en la bitácora con el usuario, el comprobante origen, el motivo y el total', async () => {
+      const { servicio, auditoria } = crear();
+
+      await servicio.emitir(40, { motivo: '06', sustento: 'Devolución total' }, 9);
+
+      expect(auditoria.registrar).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accion: 'FISCAL_NC_EMITIDA',
+          id_usuario: 9,
+          entidad: 'comprobantes',
+          id_entidad: 70,
+          detalle: expect.objectContaining({
+            nota: 'FC01-00000002',
+            id_comprobante_origen: 40,
+            motivo: '06',
+            estado_sunat: 'ENVIANDO',
+            aceptada_sunat: false,
+          }),
+        }),
+      );
+    });
+
+    it('si el motor no emite la nota (error), no se audita nada', async () => {
+      const { servicio, emisor, auditoria } = crear();
+      emisor.emitirNotaCredito.mockRejectedValueOnce(new Error('SUNAT caída'));
+      await expect(servicio.emitir(40, { motivo: '06', sustento: 'Devolución total' }, 9)).rejects.toThrow('SUNAT caída');
+      expect(auditoria.registrar).not.toHaveBeenCalled();
+    });
+
+    it('si la bitácora falla, la nota igual se emite y se responde', async () => {
+      const { servicio, auditoria } = crear();
+      auditoria.registrar.mockRejectedValueOnce(new Error('bitácora caída'));
+      const respuesta = await servicio.emitir(40, { motivo: '06', sustento: 'Devolución total' }, 9);
+      expect(respuesta).toMatchObject({ id_comprobante: 70, numero_formateado: 'FC01-00000002' });
     });
   });
 
@@ -746,6 +788,56 @@ describe('NotaCreditoBussnies', () => {
       expect(resultado.avisos[0]).toContain('SUNAT aceptó la nota FC01-00000002, pero el stock, la deuda y la anulación todavía no se actualizaron');
     });
 
+    it('S9.3 c) nota aceptada al instante con los efectos ya aplicados: «anulada» informa el stock devuelto y las cuentas cerradas de verdad', async () => {
+      const { servicio, emisor, repo, ventas } = crear();
+      const rechazada = cabecera({ id_comprobante: 41, numero: 11, estado: 'error', estado_sunat: 'RECHAZADO', aceptada_sunat: false });
+      repo.principalesDeVenta.mockResolvedValue([cabecera(), rechazada]);
+      emisor.emitirNotaCredito.mockResolvedValue({
+        id_comprobante: 70, serie: 'FC01', numero: 2, numero_formateado: 'FC01-00000002', estado: 'emitido', estado_sunat: 'ACEPTADO', aceptada_sunat: true,
+      });
+
+      const resultado = await servicio.anularVenta(9, { motivo: 'El cliente desiste' }, 1);
+
+      expect(resultado).toMatchObject({ estado: 'anulada', anulada: true, stock_devuelto: true, cxc_cerradas: 2 });
+      expect(resultado.comprobantes_anulados).toEqual([
+        { id_comprobante: 40, numero_formateado: 'F001-00000012' },
+        { id_comprobante: 41, numero_formateado: 'F001-00000011' },
+      ]);
+      expect(ventas.efectosDeAnulacion).toHaveBeenCalledWith(9);
+    });
+
+    it('S9.3 c) una anulación que ya se había aplicado con la nota (la pantalla la consulta de nuevo) tampoco miente: stock y cuentas reales', async () => {
+      const { servicio, ventas } = crear({
+        notas: [nota({ id_comprobante: 61, motivo: '01', total: 103, efecto: 'anular_venta', efectos_aplicados: true })],
+      });
+      ventas.efectosDeAnulacion.mockResolvedValue({ stock_devuelto: true, cxc_cerradas: 1 });
+
+      const resultado = await servicio.anularVenta(9, {}, 1);
+
+      expect(resultado).toMatchObject({ estado: 'anulada', stock_devuelto: true, cxc_cerradas: 1, anulada: true });
+      expect(resultado.comprobantes_anulados).toEqual([{ id_comprobante: 40, numero_formateado: 'F001-00000012' }]);
+    });
+
+    it('S9.3 si no se puede leer lo que dejó la anulación, igual responde anulada (con los indicadores en false) y deja el aviso en el log', async () => {
+      const { servicio, emisor, ventas } = crear();
+      emisor.emitirNotaCredito.mockResolvedValue({
+        id_comprobante: 70, serie: 'FC01', numero: 2, numero_formateado: 'FC01-00000002', estado: 'emitido', estado_sunat: 'ACEPTADO', aceptada_sunat: true,
+      });
+      ventas.efectosDeAnulacion.mockRejectedValue(new Error('conexión cerrada'));
+
+      const resultado = await servicio.anularVenta(9, {}, 1);
+
+      expect(resultado).toMatchObject({ estado: 'anulada', stock_devuelto: false, cxc_cerradas: 0 });
+      expect(resultado.comprobantes_anulados).toHaveLength(1);
+    });
+
+    it('S9.3 los estados «en curso» y «rechazada» no informan stock devuelto: todavía no se devolvió nada', async () => {
+      const { servicio, ventas } = crear();
+      const enCurso = await servicio.anularVenta(9, {}, 1);
+      expect(enCurso).toMatchObject({ estado: 'anulacion_en_curso', stock_devuelto: false, cxc_cerradas: 0 });
+      expect(ventas.efectosDeAnulacion).not.toHaveBeenCalled();
+    });
+
     it('a) el primer aviso es el resultado y recuerda devolver en Caja lo cobrado al contado', async () => {
       const { servicio, repo } = crear();
       repo.principalesDeVenta.mockResolvedValue([]);
@@ -852,6 +944,18 @@ describe('anular sin nota de crédito: la baja (RA) o el resumen (RC) en SUNAT',
       });
       expect(resultado.avisos[0]).toContain('SUNAT recibió el pedido de baja de F001-00000012 (RA-20261105-00001, ticket 202611050001)');
       expect(resultado.avisos[0]).toContain('la venta 9 se anulará cuando SUNAT lo confirme');
+    });
+
+    it('S9.3 baja aceptada al instante con efectos aplicados: anulada, con el stock devuelto y las cuentas cerradas leídos de la venta', async () => {
+      const lotes = lotesFalsos({ solicitarAnulacion: jest.fn(async () => ({ ...RESULTADO_ENVIADO, estado: 'ACEPTADO', aceptado: true })) });
+      const { servicio, ventas } = crear({ lotes });
+      ventas.efectosDeAnulacion.mockResolvedValue({ stock_devuelto: true, cxc_cerradas: 3 });
+
+      const resultado = await servicio.anularVenta(9, { motivo: 'Error en el monto', sin_nota: true }, 3);
+
+      expect(resultado).toMatchObject({ estado: 'anulada', anulada: true, stock_devuelto: true, cxc_cerradas: 3 });
+      expect(resultado.comprobantes_anulados).toEqual([{ id_comprobante: 40, numero_formateado: 'F001-00000012' }]);
+      expect(ventas.efectosDeAnulacion).toHaveBeenCalledWith(9);
     });
 
     it('por «Anular venta» (POST /venta/:id/anular) responde igual, con la baja y la venta aún activa', async () => {

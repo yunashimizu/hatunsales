@@ -1,4 +1,5 @@
 import { INestApplication } from '@nestjs/common';
+import { HEADERS_METADATA } from '@nestjs/common/constants';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { CatalogoController } from './catalogo.controller';
@@ -78,4 +79,36 @@ describe('CatalogoController (rutas públicas)', () => {
       expect(respuesta.headers['cache-control']).toBe('public, max-age=60');
     },
   );
+
+  it('filtros también se puede guardar 60 s (no depende del usuario)', async () => {
+    const respuesta = await request(app.getHttpServer()).get('/tienda/filtros').expect(200);
+    expect(respuesta.headers['cache-control']).toBe('public, max-age=60');
+  });
+
+  it('la ficha del producto no se guarda en el navegador (stock fresco)', async () => {
+    const respuesta = await request(app.getHttpServer()).get('/tienda/productos/12').expect(200);
+    expect(respuesta.headers['cache-control']).toBeUndefined();
+  });
+});
+
+describe('CatalogoController · Cache-Control de las listas públicas (metadatos)', () => {
+  const cabeceras = (metodo: keyof CatalogoController) =>
+    (Reflect.getMetadata(HEADERS_METADATA, CatalogoController.prototype[metodo]) ?? []) as Array<{ name: string; value: string }>;
+  const cacheDe = (metodo: keyof CatalogoController) =>
+    cabeceras(metodo).find((c) => c.name.toLowerCase() === 'cache-control')?.value;
+
+  it('la clave de metadatos es la de Nest', () => {
+    expect(HEADERS_METADATA).toBe('__headers__');
+  });
+
+  it.each(['listarProductos', 'destacados', 'ofertas', 'buscar', 'filtros'] as const)(
+    '%s lleva Cache-Control: public, max-age=60',
+    (metodo) => {
+      expect(cacheDe(metodo)).toBe('public, max-age=60');
+    },
+  );
+
+  it.each(['detalle', 'detallePorSlug', 'resenas'] as const)('%s no lleva Cache-Control', (metodo) => {
+    expect(cacheDe(metodo)).toBeUndefined();
+  });
 });

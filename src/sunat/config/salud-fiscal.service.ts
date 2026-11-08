@@ -1,8 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { CertificadoFiscalService } from '../certificado/certificado-fiscal.service';
 import type { CertificadoInfoVista } from '../certificado/certificado-info';
 import { CifradoFiscalService } from '../seguridad/cifrado-fiscal.service';
+import type { EstadoLlaveFiscal } from '../seguridad/recifrado-fiscal.service';
+import { RecifradoFiscalService } from '../seguridad/recifrado-fiscal.service';
 import { CacheTtl } from './cache-ttl';
 import { DIAS_AVISO_VENCIMIENTO } from './checklist-activacion';
 import { FiscalConfigService } from './fiscal-config.service';
@@ -38,6 +40,8 @@ export interface EstadoFiscalVista {
   gre: { activa: boolean; activa_efectiva: boolean; listo: boolean; faltantes: string[] };
   esquema: { listo: boolean; mensaje: string | null };
   cifrado_disponible: boolean;
+  /** Rotación de FISCAL_SECRET_KEY: si la anterior sigue definida y cuántos secretos aún dependen de ella. */
+  llave: EstadoLlaveFiscal;
   /** ¿Se emite ahora en el ambiente vigente? (lo aporta el módulo de emisión; null si no está registrado). */
   emision: { activa: boolean; ambiente: AmbienteFiscal; codigo?: string; motivo?: string } | null;
   /** Interruptor abierto del ambiente vigente: SUNAT rechazó la credencial SOL o el certificado. */
@@ -71,6 +75,7 @@ export class SaludFiscalService {
     private readonly reloj: RelojFiscal,
     private readonly moduleRef: ModuleRef,
     notificador: NotificadorCambiosFiscales,
+    @Optional() private readonly recifrado?: RecifradoFiscalService,
   ) {
     this.cache = new CacheTtl<EstadoFiscalVista>(SaludFiscalService.TTL_MS, () => this.reloj.ms());
     notificador.suscribir(() => this.cache.invalidar());
@@ -82,13 +87,14 @@ export class SaludFiscalService {
 
   private async calcular(): Promise<EstadoFiscalVista> {
     const snapshot = await this.config.snapshot();
-    const [proveedorEfectivo, greEfectiva, preparacion, certificados, esquema, operativo] = await Promise.all([
+    const [proveedorEfectivo, greEfectiva, preparacion, certificados, esquema, operativo, llave] = await Promise.all([
       this.config.proveedorActivo(),
       this.config.greActiva(),
       this.preparacion.evaluar(snapshot),
       this.certificados.infoTodos(),
       this.esquema.estado(),
       this.operativo(),
+      this.recifrado?.estadoLlave() ?? Promise.resolve<EstadoLlaveFiscal>({ anterior_definida: false, secretos_con_llave_anterior: 0 }),
     ]);
 
     const cert = this.certificadoRelevante(snapshot.ambiente, certificados);
@@ -136,6 +142,7 @@ export class SaludFiscalService {
       gre: { activa: snapshot.gre.activa, activa_efectiva: greEfectiva, listo: gre.listo, faltantes: [...gre.faltantes] },
       esquema: { listo: esquema.listo, mensaje: esquema.mensaje },
       cifrado_disponible: this.cifrado.disponible(),
+      llave,
       emision: operativo?.emision ?? null,
       bloqueo: bloqueo ? { ...bloqueo } : null,
       cola: operativo?.cola ?? null,

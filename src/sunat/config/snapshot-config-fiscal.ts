@@ -15,9 +15,11 @@ import {
   ConfirmacionNoOse,
   CORRELATIVO_MAXIMO,
   EmisorFiscal,
+  HORA_RESUMEN_POR_DEFECTO,
   MODOS_BOLETAS,
   MODOS_REGLAS_2027,
   PATRON_CODIGO_ESTABLECIMIENTO,
+  PATRON_HORA_RESUMEN,
   PATRON_SERIE,
   PATRON_SERIE_CPE,
   PATRON_UBIGEO,
@@ -78,6 +80,21 @@ function booleano(valor: string | null, porDefecto: boolean): boolean {
   if (['true', '1', 'si', 'sí', 'on'].includes(normalizado)) return true;
   if (['false', '0', 'no', 'off'].includes(normalizado)) return false;
   return porDefecto;
+}
+
+/** HH:mm válida (Lima) o la hora por omisión. */
+export function leerHoraResumen(valor: string | null): string {
+  const limpio = (valor ?? '').trim();
+  return PATRON_HORA_RESUMEN.test(limpio) ? limpio : HORA_RESUMEN_POR_DEFECTO;
+}
+
+/**
+ * Un solo interruptor «enviar al cobrar / en segundo plano»: manda fiscal_envio_diferido. Compatibilidad con la clave
+ * antigua «Envío en línea»: si no hay fiscal_envio_diferido y fiscal_envio_en_linea está en false, se lee como diferido.
+ */
+export function leerEnvioDiferido(diferido: string | null, enLineaAntiguo: string | null): boolean {
+  if (diferido !== null) return booleano(diferido, false);
+  return !booleano(enLineaAntiguo, true);
 }
 
 /** 'LURIN - LIMA - LIMA' → distrito, provincia, departamento. */
@@ -259,8 +276,8 @@ export function construirSnapshot(valores: Valores, defectos: DefectosEntornoFis
     proveedor: opcion(texto(valores, CLAVES_CONFIG_FISCAL.proveedor), PROVEEDORES_FISCALES, 'nubefact'),
     ambiente: leerAmbiente(texto(valores, CLAVES_CONFIG_FISCAL.ambiente), defectos.ambiente),
     boletasModo: opcion(texto(valores, CLAVES_CONFIG_FISCAL.boletasModo), MODOS_BOLETAS, 'individual'),
-    envioEnLinea: booleano(texto(valores, CLAVES_CONFIG_FISCAL.envioEnLinea), true),
-    envioDiferido: booleano(texto(valores, CLAVES_CONFIG_FISCAL.envioDiferido), false),
+    resumenHora: leerHoraResumen(texto(valores, CLAVES_CONFIG_FISCAL.resumenHora)),
+    envioDiferido: leerEnvioDiferido(texto(valores, CLAVES_CONFIG_FISCAL.envioDiferido), texto(valores, CLAVES_CONFIG_FISCAL.envioEnLinea)),
     tareasActivas: booleano(texto(valores, CLAVES_CONFIG_FISCAL.tareasActivas), true),
     series,
     emisor,

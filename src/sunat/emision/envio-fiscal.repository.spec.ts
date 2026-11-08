@@ -73,7 +73,7 @@ describe('EnvioFiscalRepository.registrar (dentro de la transacción del negocio
     const [insertEnvio, insertArchivos, verificarHora, actualizar] = consultor.llamadas;
     expect(insertEnvio.sql).toMatch(/INSERT INTO fiscal_envios/);
     expect(insertEnvio.sql).toMatch(/'ENVIANDO'/);
-    expect(insertEnvio.sql).toMatch(/'emitir', 1,/);
+    expect(insertEnvio.sql).toMatch(/'emitir', CASE WHEN \$10::boolean THEN 0 ELSE 1 END/);
     expect(insertEnvio.sql).toMatch(/NOW\(\) \+ \$7::int \* INTERVAL '1 second'/);
     expect(insertEnvio.sql).not.toMatch(/'beta'/);
     expect(insertEnvio.parametros.slice(0, 7)).toEqual([
@@ -87,6 +87,8 @@ describe('EnvioFiscalRepository.registrar (dentro de la transacción del negocio
     ]);
     expect(insertEnvio.parametros[7]).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.parse(insertEnvio.parametros[8] as string)).toMatchObject({ digest: 'DIGEST==', documento: { serie: 'F001', numero: 120 } });
+    expect(JSON.parse(insertEnvio.parametros[8] as string)).not.toHaveProperty('clasificacion');
+    expect(insertEnvio.parametros[9]).toBe(false); // no es una boleta por resumir
 
     expect(consultor.llamadas.filter((l) => /INSERT INTO fiscal_artifacts/.test(l.sql))).toHaveLength(1);
     expect(insertArchivos.sql.match(/\(\$1, \$2,/g)).toHaveLength(3);
@@ -100,7 +102,7 @@ describe('EnvioFiscalRepository.registrar (dentro de la transacción del negocio
     expect(actualizar.sql).toMatch(/UPDATE comprobantes/);
     expect(actualizar.sql).toMatch(/WHERE id_comprobante = \$1 AND serie = \$9 AND numero = \$10/);
     expect(actualizar.sql).not.toMatch(/hora_emision/);
-    expect(actualizar.parametros).toEqual([77, 'produccion', 900, expect.stringContaining('DIGEST=='), 'DIGEST==', 'Contado', null, '2026-10-16', 'F001', 120]);
+    expect(actualizar.parametros).toEqual([77, 'produccion', 900, expect.stringContaining('DIGEST=='), 'DIGEST==', 'Contado', null, '2026-10-16', 'F001', 120, 'ENVIANDO']);
   });
 
   it('forma de pago EXACTA (CHECK Contado|Credito), cuotas en JSON y hora_emision solo si fase12 creó la columna', async () => {
@@ -118,10 +120,10 @@ describe('EnvioFiscalRepository.registrar (dentro de la transacción del negocio
     await repositorio.registrar(consultor, registro({ documento, preparado: preparadoFalso(documento) }));
 
     const actualizar = consultor.llamadas.find((l) => /UPDATE comprobantes/.test(l.sql))!;
-    expect(actualizar.sql).toMatch(/hora_emision = \$11::time/);
+    expect(actualizar.sql).toMatch(/hora_emision = \$12::time/);
     expect(actualizar.parametros[5]).toBe('Credito');
     expect(JSON.parse(actualizar.parametros[6] as string)).toEqual([{ numero: 1, monto: 10, fechaPago: '2026-11-12' }]);
-    expect(actualizar.parametros[10]).toBe('10:30:00');
+    expect(actualizar.parametros[11]).toBe('10:30:00');
 
     // La verificación del esquema se recuerda: la segunda emisión no vuelve a preguntar.
     const otro = consultorFalso([
@@ -131,6 +133,35 @@ describe('EnvioFiscalRepository.registrar (dentro de la transacción del negocio
     await repositorio.registrar(otro, registro({ documento, preparado: preparadoFalso(documento) }));
     expect(otro.llamadas.some((l) => /information_schema/.test(l.sql))).toBe(false);
     expect(otro.llamadas.find((l) => /UPDATE comprobantes/.test(l.sql))!.sql).toMatch(/hora_emision/);
+  });
+
+  it('boleta del modo «resumen»: el envío nace POR_RESUMIR con la acción RESUMIR, sin reclamo ni intento, y el comprobante también', async () => {
+    const { repositorio } = crear();
+    const consultor = consultorFalso(RESPUESTAS_REGISTRO);
+    const documento = facturaPrueba(undefined, { tipo: '03', serie: 'B001', numero: 15 });
+
+    const id = await repositorio.registrar(consultor, registro({ documento, preparado: preparadoFalso(documento), porResumir: true }));
+
+    expect(id).toBe(900);
+    const [insertEnvio, , , actualizar] = consultor.llamadas;
+    expect(insertEnvio.sql).toMatch(/CASE WHEN \$10::boolean THEN 'POR_RESUMIR' ELSE 'ENVIANDO' END/);
+    expect(insertEnvio.sql).toMatch(/CASE WHEN \$10::boolean THEN NULL ELSE NOW\(\) \+ \$7::int \* INTERVAL '1 second' END/);
+    expect(insertEnvio.parametros[9]).toBe(true);
+    expect(insertEnvio.parametros[10]).toBe('Boleta registrada; se informa a SUNAT en el resumen diario.');
+    expect(JSON.parse(insertEnvio.parametros[8] as string)).toMatchObject({
+      documento: { serie: 'B001', numero: 15 },
+      clasificacion: { estado: 'POR_RESUMIR', accion: 'RESUMIR' },
+    });
+    expect(actualizar.sql).toMatch(/estado = 'pendiente', estado_sunat = \$11/);
+    expect(actualizar.parametros[10]).toBe('POR_RESUMIR');
+  });
+
+  it('por resumir sin comprobante (prueba del panel) se ignora: esa prueba sí se envía', async () => {
+    const { repositorio } = crear();
+    const consultor = consultorFalso(RESPUESTAS_REGISTRO);
+    await repositorio.registrar(consultor, registro({ idComprobante: null, ambiente: 'beta', porResumir: true }));
+    expect(consultor.llamadas[0].parametros[9]).toBe(false);
+    expect(consultor.llamadas.some((l) => /UPDATE comprobantes/.test(l.sql))).toBe(false);
   });
 
   it('la prueba del panel (sin comprobante) no toca comprobantes', async () => {
@@ -182,7 +213,35 @@ describe('EnvioFiscalRepository: reclamos, cierre y consultas', () => {
     expect(sql).toMatch(/OR e\.estado = 'ENVIANDO'/);
     expect(sql).toMatch(/intento = e\.intento \+ 1/);
     expect(sql).toMatch(/tipo_artifacto = 'zip'/);
-    expect(parametros).toEqual([5, 60]);
+    expect(parametros).toEqual([5, 60, false]);
+  });
+
+  it('reintento forzado (administrador): la misma sentencia admite EXCEPCION solo con el parámetro forzar', async () => {
+    const { repositorio, bd } = crear();
+    await repositorio.reclamarReintento(5, true);
+    const { sql, parametros } = bd.llamadas[0];
+    expect(sql).toMatch(/OR \(e\.estado = 'EXCEPCION' AND \$3::boolean\)/);
+    expect(sql).toMatch(/FOR UPDATE SKIP LOCKED/);
+    expect(sql).toMatch(/\(e\.bloqueado_hasta IS NULL OR e\.bloqueado_hasta < NOW\(\)\)/);
+    expect(parametros).toEqual([5, 60, true]);
+    // Sin forzar, el parámetro va en false: EXCEPCION nunca se reclama por el camino común.
+    await repositorio.reclamarReintento(5);
+    expect(bd.llamadas[1].parametros).toEqual([5, 60, false]);
+  });
+
+  it('la tarea nunca recoge un envío en EXCEPCION (solo el reintento forzado manual lo hace)', async () => {
+    const { repositorio, bd } = crear([[/SELECT t\.id_envio/, []]]);
+    await repositorio.candidatosTarea('produccion', 5);
+    expect(bd.llamadas[0].sql).not.toMatch(/EXCEPCION/);
+  });
+
+  it('confirmación manual: admite EXCEPCION sin reclamo vigente además de lo incierto, y devuelve null si cambió', async () => {
+    const { repositorio, tx } = crear([[/UPDATE fiscal_envios/, [[], 0]]]);
+    const resultado = await repositorio.marcarAceptadoManual(tx, 3, 'Aceptado', { confirmacion_manual: {} });
+    expect(resultado).toBeNull();
+    expect(tx.llamadas[0].sql).toMatch(/e\.estado IN \('ENVIANDO', 'EXCEPCION'\) AND \(e\.bloqueado_hasta IS NULL OR e\.bloqueado_hasta < NOW\(\)\)/);
+    expect(tx.llamadas[0].sql).toMatch(/e\.estado = 'PENDIENTE_REENVIO' AND e\.respuesta_json #>> '\{clasificacion,accion\}' = 'RECUPERAR_CDR'/);
+    expect(tx.llamadas).toHaveLength(1);
   });
 
   it('primer envío: solo si sigue como se registró (intento 1, sin respuesta)', async () => {
@@ -323,6 +382,32 @@ describe('EnvioFiscalRepository: reclamos, cierre y consultas', () => {
     expect(consulta.parametros).toEqual([['03'], 'beta', 'ACEPTADO', null, 100, 100]);
   });
 
+  it('listar entrega lo que el sistema dice del envío y el último día para enviarlo (3 días facturas, 5 boletas, null sin documento)', async () => {
+    const base = { ambiente: 'produccion', nombre_archivo: 'x.zip', estado: 'EXCEPCION', codigo_sunat: null, mensaje_sunat: null, accion_sunat: 'EMITIR_NUEVO', id_comprobante: 4, creado_en: '2026-10-13T15:00:00Z', archivos: [] };
+    const { repositorio, bd } = crear([
+      [/COUNT\(\*\)::int AS total/, [{ total: 3 }]],
+      [
+        /SELECT/,
+        [
+          { ...base, id_envio: 1, tipo_documento: '01', serie: 'F001', fecha_emision: '2026-10-13', ultimo_error: 'Fuera de plazo' },
+          { ...base, id_envio: 2, tipo_documento: '03', serie: 'B001', fecha_emision: '2026-10-13', ultimo_error: null },
+          { ...base, id_envio: 3, tipo_documento: '03', serie: null, fecha_emision: null },
+        ],
+      ],
+    ]);
+
+    const pagina = await repositorio.listar({ ambiente: 'produccion' });
+
+    expect(pagina.datos.map((d) => [d.id_envio, d.ultimo_error, d.fecha_limite_envio])).toEqual([
+      [1, 'Fuera de plazo', '2026-10-16'],
+      [2, null, '2026-10-18'],
+      [3, null, null],
+    ]);
+    const consulta = bd.llamadas.find((l) => /LIMIT/.test(l.sql))!;
+    expect(consulta.sql).toContain('t.ultimo_error');
+    expect(consulta.sql).toContain("{documento,fechaEmision}");
+  });
+
   it('archivo: el último de ese tipo con contenido, o null', async () => {
     const { repositorio } = crear([[/FROM fiscal_artifacts a/, [{ nombre: 'R-X.xml', mime: 'application/xml', contenido: Buffer.from('<a/>') }]]]);
     expect(await repositorio.archivo(3, 'cdr_xml')).toEqual({ nombre: 'R-X.xml', mime: 'application/xml', contenido: Buffer.from('<a/>') });
@@ -335,7 +420,9 @@ describe('EnvioFiscalRepository: reclamos, cierre y consultas', () => {
     expect(await repositorio.contadores('produccion', '2026-10-21')).toEqual({ pendientes: 2, inciertos: 1, vencen_hoy: 3, vencidos: 4 });
     expect(bd.llamadas[0].parametros).toEqual(['produccion', '2026-10-21']);
     expect(bd.llamadas[0].sql).toMatch(/c\.fecha_limite_envio < \$2::date/);
-    expect(bd.llamadas[0].sql).toMatch(/NOT IN \('ACEPTADO', 'ACEPTADO_OBS', 'RECHAZADO', 'ANULADO', 'BAJA_PENDIENTE'\)/);
+    expect(bd.llamadas[0].sql).toMatch(/NOT IN \('ACEPTADO', 'ACEPTADO_OBS', 'RECHAZADO', 'ANULADO', 'BAJA_PENDIENTE', 'POR_RESUMIR', 'TICKET_PENDIENTE'\)/);
+    // Una boleta que espera su resumen no es «vencida» por los 5 días: solo cuando ya pasaron los 7 de la emisión.
+    expect(bd.llamadas[0].sql).toMatch(/c\.estado_sunat <> 'POR_RESUMIR' OR c\.fecha_de_emision < \$2::date - 7/);
   });
 
   it('BETA: el primer número libre se recuerda unos segundos (la vista previa lo pide en cada cambio del carrito)', async () => {

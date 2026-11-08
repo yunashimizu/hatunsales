@@ -39,7 +39,7 @@ import type { ResumenNotasOrigen } from './nota-credito.contrato';
 /** Lo que Documentos dice que se puede hacer con un comprobante: se toma de su detalle, con sus mismas reglas. */
 type AccionesDetalle = Pick<
   ComprobanteDetalleResponse,
-  'puede_reintentar' | 'puede_recuperar_cdr' | 'puede_confirmar_manual' | 'puede_nota_credito' | 'puede_anular' | 'vencido' | 'fecha_limite_envio' | 'aviso'
+  'puede_reintentar' | 'puede_recuperar_cdr' | 'puede_confirmar_manual' | 'puede_nota_credito' | 'puede_anular' | 'vencido' | 'fecha_limite_envio' | 'aviso' | 'puede_informar_por_resumen'
 >;
 
 const ESTADOS_ACEPTADO: ReadonlySet<string> = new Set(['ACEPTADO', 'ACEPTADO_OBS']);
@@ -376,7 +376,9 @@ export class VentaDocumentosBussnies {
       const hasta = limite ? ` (vencía el ${limite})` : '';
       avisos.push(tipo && esDocumentoDeFactura(tipo, principal.serie)
         ? `Venció el plazo para enviar ${numeroDe(principal)} a SUNAT${hasta}: emita un comprobante nuevo.`
-        : `Venció el plazo de envío individual de ${numeroDe(principal)}${hasta}: informe la boleta en SUNAT con el resumen diario.`);
+        : detalle.puede_informar_por_resumen
+          ? `Venció el plazo de envío individual de ${numeroDe(principal)}${hasta}: se informará a SUNAT en el próximo resumen diario (hasta 7 días después de la emisión).`
+          : `Venció el plazo de envío individual de ${numeroDe(principal)}${hasta} y ya pasaron los 7 días del resumen diario: si el cliente reclama el comprobante, anúlelo con nota de crédito y emita uno nuevo.`);
     } else if (principal && principal.estado === 'pendiente') {
       const siguiente = detalle?.puede_confirmar_manual
         ? 'verifique en SUNAT Operaciones en Línea si existe y confírmelo en Documentos'
@@ -530,6 +532,7 @@ export class VentaDocumentosBussnies {
               vencido: d.vencido,
               fecha_limite_envio: d.fecha_limite_envio,
               aviso: d.aviso,
+              puede_informar_por_resumen: d.puede_informar_por_resumen,
             };
           },
           `las acciones de ${numeroDe(c)}`,

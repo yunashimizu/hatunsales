@@ -38,7 +38,7 @@ export interface DireccionGre {
  * '06' devolución, '07' recojo de bienes transformados, '08' importación, '09' exportación, '13' otros,
  * '14' venta sujeta a confirmación del comprador, '17' traslado de bienes para transformación,
  * '18' traslado por emisor itinerante, '19' traslado de mercancía extranjera.
- * El motor solo emite 01, 04 y 13 (MOTIVOS_GRE_SOPORTADOS); los demás se rechazan al validar.
+ * El motor emite 01, 02, 04, 13, 14 y 18 (MOTIVOS_GRE_SOPORTADOS); los demás se rechazan al validar.
  */
 export type MotivoTrasladoGre = string;
 
@@ -100,8 +100,13 @@ export interface EnvioGre {
   /** Texto libre del motivo (obligatorio cuando el motivo es 'otros'; hasta 100 caracteres). */
   descripcionMotivo?: string;
   modalidad: ModalidadTransporteGre;
-  /** yyyy-mm-dd; no puede ser anterior a la fecha de emisión. */
+  /** yyyy-mm-dd; no puede ser anterior a la fecha de emisión ni pasar de 30 días después de ella. */
   fechaInicioTraslado: string;
+  /**
+   * Solo transporte privado: el traslado va en un vehículo de categoría M1 o L (moto o auto particular). Con él
+   * no se consignan vehículo ni conductores. [SUPUESTO: ver INDICADOR_TRASLADO_VEHICULO_M1L.]
+   */
+  trasladoVehiculoM1L?: boolean;
   /**
    * Solo transporte público: fecha de entrega de los bienes al transportista (yyyy-mm-dd, campo 39-A de la
    * RS 000108-2026). Si no llega se usa la fecha de inicio del traslado.
@@ -126,6 +131,8 @@ export interface DocumentoGre {
   horaEmision: string;
   remitente: EmisorCpe;
   destinatario: PersonaGre;
+  /** Obligatorio con el motivo 02 (compra): a quién se le compró. Va en cac:SellerSupplierParty. [SUPUESTO] */
+  proveedor?: PersonaGre;
   envio: EnvioGre;
   /** Obligatorio con modalidad '01' (transporte público). */
   transportista?: TransportistaGre;

@@ -49,6 +49,13 @@ describe('DTOs de /fiscal/*', () => {
     });
   });
 
+  it('la hora del resumen diario debe ser HH:mm de 24 horas; la clave vieja envio_en_linea se sigue aceptando', () => {
+    expect(validar(ActualizarConfigFiscalDto, { boletas_modo: 'resumen', resumen_hora: ' 23:30 ' })).toMatchObject({ errores: [], valor: { resumen_hora: '23:30' } });
+    expect(validar(ActualizarConfigFiscalDto, { resumen_hora: '24:00' }).errores).toEqual([expect.stringMatching(/resumen_hora debe tener el formato HH:mm/)]);
+    expect(validar(ActualizarConfigFiscalDto, { resumen_hora: '9:30' }).errores).toHaveLength(1);
+    expect(validar(ActualizarConfigFiscalDto, { envio_en_linea: false })).toMatchObject({ errores: [], valor: { envio_en_linea: false } });
+  });
+
   it('rechaza series con el prefijo equivocado, con mensajes en español', () => {
     const { errores } = validar(ActualizarConfigFiscalDto, {
       series: { factura: 'B001', boleta: 'F001', nd_boleta: 'BD1', gre_remitente: 'G001' },

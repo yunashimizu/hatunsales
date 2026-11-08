@@ -1,5 +1,5 @@
-import { Injectable, BadRequestException, Logger, Optional } from '@nestjs/common';
-import { ReportesRepository } from '../../repository/Repository/reportes.repository';
+import { Injectable, BadRequestException, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { FilaComprobanteRvie, ReportesRepository } from '../../repository/Repository/reportes.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { IReportesBussniees } from '../Ibussnies/IReportesBussniees';
 import {
@@ -39,11 +39,22 @@ import {
   inicioSemanaLima,
   rangoDiaLima,
   rangoFechasLima,
+  diasEntreYmd,
   sumarDiasYmd,
   validarFechaYmd,
 } from '../../util/fecha-lima';
 import { TIPO_NOTA_CREDITO, TIPO_NOTA_DEBITO } from '../../util/fiscal/tipos-comprobante';
 import { Dinero } from '../../caja/dominio/dinero';
+import {
+  AVISO_ESTRUCTURA_RVIE,
+  construirCsvRvie,
+  construirTxtRvie,
+  FilaRvie,
+  nombreArchivoRvie,
+  nombreCsvRvie,
+  periodoRvieValido,
+} from '../../util/fiscal/rvie';
+import { tipoComprobanteSunat } from '../../util/fiscal/tipos-comprobante';
 
 type ReportesFilters = {
   fecha_inicio?: string;
@@ -118,6 +129,27 @@ export interface DetalleReporteVentas extends VentasReportDetalle {
   id_tipo?: number;
 }
 
+/** Lo que quedó fuera del Registro de Ventas (SIRE) y por qué: para que el contador sepa qué esperar. */
+export interface ResumenRegistroVentas {
+  periodo: string;
+  /** Filas del archivo (aceptados y anulados). */
+  filas: number;
+  anulados: number;
+  /** Facturas y boletas, notas de crédito y de débito del archivo. */
+  por_tipo: { factura: number; boleta: number; nota_credito: number; nota_debito: number };
+  /** Comprobantes en dólares: el sistema no guarda el tipo de cambio y esa columna queda vacía. */
+  en_dolares: number;
+  omitidos: { pruebas: number; con_error: number; rechazados: number; sin_aceptar: number; anulados_sin_sunat: number };
+  aviso: string;
+}
+
+export interface RegistroVentasArchivo {
+  contenido: string;
+  nombre: string;
+  tipo: string;
+  resumen: ResumenRegistroVentas;
+}
+
 /** Respuesta con el neto y lo que lo explica (campos nuevos: un front anterior los ignora). */
 export interface ReporteVentasNeto extends VentasReportResponse {
   detalle: DetalleReporteVentas[];
@@ -164,6 +196,127 @@ interface RangoReporte {
   fin: Date;
 }
 
+// ── Fase F: rentabilidad, estancados, mapa de calor ─────────────────────────
+
+export interface FilaRentabilidad {
+  id_producto: number | null;
+  codigo: string;
+  producto: string;
+  categoria: string;
+  cantidad: number;
+  /** Total cobrado, con IGV. */
+  ingreso: number;
+  /** Venta sin IGV: la base del margen. */
+  ingreso_sin_igv: number;
+  costo: number;
+  /** ingreso_sin_igv − costo (soles). */
+  margen: number;
+  /** margen / ingreso_sin_igv × 100, 2 decimales; null si la venta sin IGV es 0. */
+  margen_pct: number | null;
+  /** Día de Lima del último comprobante de venta del rango (null si solo hubo notas de crédito). */
+  ultima_venta: string | null;
+  /** El producto no tiene precio de compra registrado: su costo y su margen no son confiables. */
+  sin_costo: boolean;
+}
+
+export interface FilaRentabilidadCategoria {
+  categoria: string;
+  productos: number;
+  cantidad: number;
+  ingreso: number;
+  ingreso_sin_igv: number;
+  costo: number;
+  margen: number;
+  margen_pct: number | null;
+}
+
+export interface RentabilidadResponse {
+  fecha_inicio: string;
+  fecha_fin: string;
+  productos: FilaRentabilidad[];
+  categorias: FilaRentabilidadCategoria[];
+  totales: { productos: number; cantidad: number; ingreso: number; ingreso_sin_igv: number; costo: number; margen: number; margen_pct: number | null };
+  /** true si hubo más productos de los que se devuelven (se muestran los de mayor ingreso). */
+  recortado: boolean;
+  /** Cómo se calculó el costo, para mostrarlo junto a la tabla. */
+  nota_costo: string;
+}
+
+export interface FilaEstancado {
+  id_producto: number;
+  codigo: string;
+  producto: string;
+  categoria: string;
+  stock: number;
+  precio_compra: number;
+  /** stock × precio de compra vigente. */
+  valorizado: number;
+  /** Día de Lima de la última venta; null = nunca se vendió. */
+  ultima_venta: string | null;
+  /** Días desde la última venta (null si nunca se vendió). */
+  dias_sin_venta: number | null;
+}
+
+export interface EstancadosResponse {
+  dias: number;
+  productos: FilaEstancado[];
+  total_productos: number;
+  valorizado_total: number;
+  recortado: boolean;
+}
+
+export interface CeldaMapaCalor {
+  /** 0 = domingo … 6 = sábado. */
+  dia: number;
+  /** Hora de Lima 0..23. */
+  hora: number;
+  total: number;
+  ventas: number;
+}
+
+export interface MapaCalorResponse {
+  desde: string;
+  hasta: string;
+  semanas: number;
+  /** Siempre las 168 celdas (7 días × 24 horas), con 0 donde no hubo ventas. */
+  celdas: CeldaMapaCalor[];
+  /** La franja de dos horas seguidas con más ventas netas; null si no hubo ventas. */
+  mejor: { dia: number; hora_inicio: number; hora_fin: number; total: number } | null;
+}
+
+export interface ResumenDia {
+  fecha: string;
+  /** Ventas netas del día en soles. */
+  total: number;
+  /** Cantidad de facturas y boletas. */
+  ventas: number;
+  ticket_promedio: number;
+}
+
+const LIMITE_RENTABILIDAD = 500;
+const LIMITE_ESTANCADOS = 200;
+const DIAS_ESTANCADO_VALIDOS = [30, 60, 90];
+const SEMANAS_MAPA_MIN = 1;
+const SEMANAS_MAPA_MAX = 12;
+export const NOTA_COSTO_RENTABILIDAD =
+  'Margen = venta sin IGV − costo. El costo es la cantidad vendida por el precio de compra actual de cada producto ' +
+  '(el sistema no guarda el costo de cada venta). Si los precios de compra incluyen IGV, el margen real es algo mayor.';
+
+/** Día de la semana (0 = domingo) de un 'YYYY-MM-DD', sin depender de la zona del servidor. */
+function diaSemanaYmd(ymd: string): number {
+  return new Date(Date.UTC(Number(ymd.slice(0, 4)), Number(ymd.slice(5, 7)) - 1, Number(ymd.slice(8, 10)))).getUTCDay();
+}
+
+function porcentaje(margen: Dinero, ingreso: Dinero): number | null {
+  return ingreso.esCero() ? null : Math.round((margen.centimos / ingreso.centimos) * 10000) / 100;
+}
+
+function ultimaVentaLima(valor: Date | string | null | undefined): string | null {
+  if (!valor) return null;
+  const d = new Date(valor);
+  return Number.isNaN(d.getTime()) ? null : aFechaLima(d);
+}
+
 const PATRON_DMY = /^(\d{2})[-/](\d{2})[-/](\d{4})$/;
 
 /**
@@ -183,6 +336,14 @@ export function diaLimaComprobante(c: { fecha_de_emision?: string | null; creado
 /** 'YYYY-MM-DD' → 'dd/mm/aaaa' sin pasar por Date (no depende de la zona del servidor). */
 function ymdLegible(ymd: string): string {
   return esFechaYmd(ymd) ? `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}/${ymd.slice(0, 4)}` : ymd || '—';
+}
+
+/** 'YYYY-MM-DD' desde una fecha guardada como AAAA-MM-DD o DD-MM-AAAA (vacío si no se entiende). */
+function ymdDe(valor: unknown): string {
+  const texto = String(valor ?? '').trim().slice(0, 10);
+  if (esFechaYmd(texto)) return texto;
+  const dmy = PATRON_DMY.exec(texto);
+  return dmy && esFechaYmd(`${dmy[3]}-${dmy[2]}-${dmy[1]}`) ? `${dmy[3]}-${dmy[2]}-${dmy[1]}` : '';
 }
 
 const MESES_CORTOS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
@@ -409,6 +570,128 @@ export class ReportesBussnies implements IReportesBussniees {
     }
   }
 
+  // ── Registro de ventas para el SIRE (RVIE) ─────────────────────────────────
+
+  /** TXT del Registro de Ventas e Ingresos Electrónico del mes `periodo` (AAAAMM). Ver util/fiscal/rvie.ts. */
+  async registroVentasRvie(periodo: string): Promise<RegistroVentasArchivo> {
+    const { filas, resumen, datos } = await this.armarRegistroVentas(periodo);
+    return {
+      contenido: construirTxtRvie(filas, datos),
+      nombre: nombreArchivoRvie(datos.ruc, datos.periodo, filas.length > 0),
+      tipo: 'text/plain; charset=utf-8',
+      resumen,
+    };
+  }
+
+  /** Las mismas filas en CSV con cabeceras, para que el contador las revise en Excel. */
+  async registroVentasRvieCsv(periodo: string): Promise<RegistroVentasArchivo> {
+    const { filas, resumen, datos } = await this.armarRegistroVentas(periodo);
+    return {
+      contenido: construirCsvRvie(filas, datos),
+      nombre: nombreCsvRvie(datos.ruc, datos.periodo),
+      tipo: 'text/csv; charset=utf-8',
+      resumen,
+    };
+  }
+
+  private async armarRegistroVentas(periodo: string): Promise<{
+    filas: FilaRvie[];
+    resumen: ResumenRegistroVentas;
+    datos: { ruc: string; razonSocial: string; periodo: string };
+  }> {
+    const texto = String(periodo ?? '').trim();
+    if (!periodoRvieValido(texto)) {
+      throw new BadRequestException(cuerpoError(CodigoError.REPORTE_PERIODO_INVALIDO, 'Periodo inválido: use el mes en formato AAAAMM (por ejemplo 202610).'));
+    }
+    if (texto > hoyLima().slice(0, 7).replace('-', '')) {
+      throw new BadRequestException(cuerpoError(CodigoError.REPORTE_PERIODO_INVALIDO, 'Ese mes todavía no ha empezado: elija el mes actual o uno anterior.'));
+    }
+
+    let lista: FilaComprobanteRvie[];
+    try {
+      lista = await this.repo.obtenerComprobantesRvie(texto);
+    } catch (error) {
+      this.logger.error(`No se pudo leer el registro de ventas ${texto}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new ServiceUnavailableException('No se pudo leer el registro de ventas. Aplique las migraciones de notas de crédito (sql/fase9_sunat_directo.sql) y vuelva a intentar.');
+    }
+
+    const resumen: ResumenRegistroVentas = {
+      periodo: texto,
+      filas: 0,
+      anulados: 0,
+      por_tipo: { factura: 0, boleta: 0, nota_credito: 0, nota_debito: 0 },
+      en_dolares: 0,
+      omitidos: { pruebas: 0, con_error: 0, rechazados: 0, sin_aceptar: 0, anulados_sin_sunat: 0 },
+      aviso: AVISO_ESTRUCTURA_RVIE,
+    };
+    const filas: FilaRvie[] = [];
+    for (const c of lista) {
+      const fecha = diaLimaComprobante(c);
+      if (fecha.slice(0, 4) + fecha.slice(5, 7) !== texto) continue;
+      const decision = this.decidirParaRvie(c);
+      if (decision.omitir) {
+        resumen.omitidos[decision.omitir] += 1;
+        continue;
+      }
+      const tipo = tipoComprobanteSunat(c.id_tipo);
+      if (!tipo) continue;
+      const fila = this.filaRvie(c, tipo, fecha, decision.estado);
+      filas.push(fila);
+      resumen.filas += 1;
+      if (fila.estado === 'anulado') resumen.anulados += 1;
+      if (fila.moneda === 'USD') resumen.en_dolares += 1;
+      resumen.por_tipo[tipo === '01' ? 'factura' : tipo === '03' ? 'boleta' : tipo === '07' ? 'nota_credito' : 'nota_debito'] += 1;
+    }
+    filas.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.tipo.localeCompare(b.tipo) || a.serie.localeCompare(b.serie) || a.numero - b.numero);
+
+    return { filas, resumen, datos: { ruc: emisorConfig.ruc, razonSocial: emisorConfig.razon_social, periodo: texto } };
+  }
+
+  /**
+   * Qué entra al registro: lo que SUNAT ya tiene aceptado y lo que dio de baja (en cero). Quedan fuera las pruebas BETA,
+   * los errores, los rechazados, lo que aún no aceptó SUNAT y lo anulado solo en el sistema (SUNAT nunca lo recibió).
+   * Una factura "anulada" con nota de crédito sigue aceptada en SUNAT: entra completa y su nota entra en negativo.
+   */
+  private decidirParaRvie(c: FilaComprobanteRvie):
+    | { omitir: keyof ResumenRegistroVentas['omitidos'] }
+    | { omitir?: undefined; estado: 'aceptado' | 'anulado' } {
+    const estado = String(c.estado ?? '').trim().toLowerCase();
+    const estadoSunat = String(c.estado_sunat ?? '').trim().toUpperCase();
+    if (String(c.ambiente_fiscal ?? '').trim().toLowerCase() === 'beta') return { omitir: 'pruebas' };
+    if (estado === 'error') return { omitir: 'con_error' };
+    if (estadoSunat === 'RECHAZADO') return { omitir: 'rechazados' };
+    if (estadoSunat === 'ANULADO') return { estado: 'anulado' };
+    const historico = !c.ambiente_fiscal && !estadoSunat && c.aceptada_sunat !== false;
+    const aceptado = c.aceptada_sunat === true || estadoSunat === 'ACEPTADO' || estadoSunat === 'ACEPTADO_OBS' || historico;
+    if (!aceptado) return { omitir: c.anulado === true || estado === 'anulado' ? 'anulados_sin_sunat' : 'sin_aceptar' };
+    return { estado: 'aceptado' };
+  }
+
+  private filaRvie(c: FilaComprobanteRvie, tipo: string, fecha: string, estado: 'aceptado' | 'anulado'): FilaRvie {
+    const n = (v: unknown) => Number(v ?? 0) || 0;
+    return {
+      fecha,
+      vencimiento: ymdDe(c.fecha_de_vencimiento),
+      tipo,
+      serie: String(c.serie ?? ''),
+      numero: n(c.numero),
+      clienteTipoDoc: String(c.cliente_tipo_doc ?? ''),
+      clienteNumeroDoc: String(c.cliente_numero_doc ?? ''),
+      clienteNombre: String(c.cliente_denominacion ?? ''),
+      gravada: n(c.total_gravada),
+      igv: n(c.total_igv),
+      exonerada: n(c.total_exonerada),
+      inafecta: n(c.total_inafecta),
+      total: n(c.total),
+      moneda: n(c.id_moneda) === 2 ? 'USD' : 'PEN',
+      modificadoFecha: ymdDe(c.fecha_doc_modificado),
+      modificadoTipo: String(c.doc_modificado_tipo ?? ''),
+      modificadoSerie: String(c.doc_modificado_serie ?? ''),
+      modificadoNumero: c.doc_modificado_numero === null || c.doc_modificado_numero === undefined ? null : n(c.doc_modificado_numero),
+      estado,
+    };
+  }
+
   /**
    * Ventas netas por hora de Lima de un día (`fecha` 'YYYY-MM-DD'; por omisión, hoy en Lima) y
    * del mismo día de la semana anterior (fecha − 7 días). Siempre 24 horas (0 si no hubo
@@ -449,6 +732,205 @@ export class ReportesBussnies implements IReportesBussniees {
     }
 
     return totales.map((total, hora) => ({ hora, total: total.aNumero(), ventas: cantidades[hora] }));
+  }
+
+  /** Ventas netas, cantidad de facturas/boletas y ticket promedio de un día de Lima (resumen diario). */
+  async resumenDia(ymd: string): Promise<ResumenDia> {
+    const horas = await this.horasDelDia(ymd);
+    const total = horas.reduce((acc, h) => acc.sumar(Dinero.desdeNumeroRedondeado(h.total)), Dinero.cero());
+    const ventas = horas.reduce((acc, h) => acc + h.ventas, 0);
+    return {
+      fecha: ymd,
+      total: total.aNumero(),
+      ventas,
+      ticket_promedio: ventas > 0 ? Math.round(total.centimos / ventas) / 100 : 0,
+    };
+  }
+
+  /**
+   * Rentabilidad por producto en el rango del reporte (mismo criterio de comprobantes que reporteVentas: las notas de
+   * crédito restan; no cuentan anulados, errores, rechazados ni pruebas BETA). Por producto: cantidad, ingreso, costo
+   * (cantidad × precio de compra vigente, ver NOTA_COSTO_RENTABILIDAD), margen y última venta; y el mismo reparto por
+   * categoría. Sin fechas, el mes en curso. Solo lectura.
+   */
+  async rentabilidadProductos(filters: { fecha_inicio?: string; fecha_fin?: string } = {}): Promise<RentabilidadResponse> {
+    const rango = this.resolverRango('mensual', filters);
+    const lista = await this.repo.obtenerVentasPorPeriodo(rango.desde, rango.hasta, {});
+    const ids = lista.filter((c) => clasificarComprobanteReporte(c).cuenta).map((c) => c.id_comprobante);
+    const filas = await this.repo.obtenerRentabilidadProductos(ids, LIMITE_RENTABILIDAD + 1);
+
+    const productos: FilaRentabilidad[] = filas
+      .map((f) => {
+        const ingreso = Dinero.desdeBd(f.ingreso);
+        const sinIgv = Dinero.desdeBd(f.ingreso_sin_igv ?? f.ingreso);
+        const costo = Dinero.desdeBd(f.costo);
+        const margen = sinIgv.restar(costo);
+        return {
+          id_producto: f.id_producto === null || f.id_producto === undefined ? null : Number(f.id_producto),
+          codigo: String(f.codigo ?? '').trim(),
+          producto: String(f.producto ?? '').trim() || 'Producto sin descripción',
+          categoria: String(f.categoria ?? '').trim() || 'Sin categoría',
+          cantidad: Number(f.cantidad ?? 0),
+          ingreso: ingreso.aNumero(),
+          ingreso_sin_igv: sinIgv.aNumero(),
+          costo: costo.aNumero(),
+          margen: margen.aNumero(),
+          margen_pct: porcentaje(margen, sinIgv),
+          ultima_venta: ultimaVentaLima(f.ultima_venta),
+          sin_costo: f.sin_costo === true,
+        };
+      })
+      .filter((p) => p.cantidad !== 0 || p.ingreso !== 0);
+    const recortado = productos.length > LIMITE_RENTABILIDAD;
+    const visibles = productos.slice(0, LIMITE_RENTABILIDAD);
+
+    const porCategoria = new Map<string, { productos: number; cantidad: number; ingreso: Dinero; sinIgv: Dinero; costo: Dinero }>();
+    let ingresoTotal = Dinero.cero();
+    let sinIgvTotal = Dinero.cero();
+    let costoTotal = Dinero.cero();
+    let cantidadTotal = 0;
+    for (const p of visibles) {
+      const ingreso = Dinero.desdeNumeroRedondeado(p.ingreso);
+      const sinIgv = Dinero.desdeNumeroRedondeado(p.ingreso_sin_igv);
+      const costo = Dinero.desdeNumeroRedondeado(p.costo);
+      const acc = porCategoria.get(p.categoria) ?? { productos: 0, cantidad: 0, ingreso: Dinero.cero(), sinIgv: Dinero.cero(), costo: Dinero.cero() };
+      acc.productos += 1;
+      acc.cantidad += p.cantidad;
+      acc.ingreso = acc.ingreso.sumar(ingreso);
+      acc.sinIgv = acc.sinIgv.sumar(sinIgv);
+      acc.costo = acc.costo.sumar(costo);
+      porCategoria.set(p.categoria, acc);
+      ingresoTotal = ingresoTotal.sumar(ingreso);
+      sinIgvTotal = sinIgvTotal.sumar(sinIgv);
+      costoTotal = costoTotal.sumar(costo);
+      cantidadTotal += p.cantidad;
+    }
+    const categorias: FilaRentabilidadCategoria[] = Array.from(porCategoria.entries())
+      .map(([categoria, a]) => {
+        const margen = a.sinIgv.restar(a.costo);
+        return {
+          categoria,
+          productos: a.productos,
+          cantidad: a.cantidad,
+          ingreso: a.ingreso.aNumero(),
+          ingreso_sin_igv: a.sinIgv.aNumero(),
+          costo: a.costo.aNumero(),
+          margen: margen.aNumero(),
+          margen_pct: porcentaje(margen, a.sinIgv),
+        };
+      })
+      .sort((a, b) => b.ingreso_sin_igv - a.ingreso_sin_igv || a.categoria.localeCompare(b.categoria, 'es'));
+    const margenTotal = sinIgvTotal.restar(costoTotal);
+
+    return {
+      fecha_inicio: aFechaLima(rango.desde),
+      fecha_fin: aFechaLima(rango.fin),
+      productos: visibles,
+      categorias,
+      totales: {
+        productos: visibles.length,
+        cantidad: cantidadTotal,
+        ingreso: ingresoTotal.aNumero(),
+        ingreso_sin_igv: sinIgvTotal.aNumero(),
+        costo: costoTotal.aNumero(),
+        margen: margenTotal.aNumero(),
+        margen_pct: porcentaje(margenTotal, sinIgvTotal),
+      },
+      recortado,
+      nota_costo: NOTA_COSTO_RENTABILIDAD,
+    };
+  }
+
+  /**
+   * Productos activos con existencias que no se venden hace `dias` días (30, 60 o 90; otro valor se lleva al más cercano
+   * permitido) o que nunca se vendieron y ya tienen esa antigüedad. Los más caros de tener parados primero. Solo lectura.
+   */
+  async productosEstancados(dias?: number | string): Promise<EstancadosResponse> {
+    const pedido = Number(dias);
+    const objetivo = Number.isFinite(pedido) && pedido > 0 ? pedido : 30;
+    const valido = DIAS_ESTANCADO_VALIDOS.reduce(
+      (mejor, d) => (Math.abs(d - objetivo) < Math.abs(mejor - objetivo) ? d : mejor),
+      DIAS_ESTANCADO_VALIDOS[0],
+    );
+    const ahora = new Date();
+    const corte = new Date(ahora.getTime() - valido * 86_400_000);
+    const filas = await this.repo.obtenerProductosEstancados(corte, LIMITE_ESTANCADOS);
+    const hoy = hoyLima(ahora);
+
+    const productos: FilaEstancado[] = filas.map((f) => {
+      const stock = Number(f.stock ?? 0);
+      const precio = Dinero.desdeBd(f.precio_compra);
+      const ultima = ultimaVentaLima(f.ultima_venta);
+      return {
+        id_producto: Number(f.id_producto),
+        codigo: String(f.codigo ?? '').trim(),
+        producto: String(f.producto ?? '').trim() || 'Producto sin nombre',
+        categoria: String(f.categoria ?? '').trim() || 'Sin categoría',
+        stock,
+        precio_compra: precio.aNumero(),
+        valorizado: Dinero.desdeNumeroRedondeado(stock * precio.aNumero()).aNumero(),
+        ultima_venta: ultima,
+        dias_sin_venta: ultima ? diasEntreYmd(ultima, hoy) : null,
+      };
+    });
+    const total = filas.length ? Number(filas[0].total_filas ?? filas.length) : 0;
+    const valorizado = productos.reduce((acc, p) => acc.sumar(Dinero.desdeNumeroRedondeado(p.valorizado)), Dinero.cero());
+    return {
+      dias: valido,
+      productos,
+      total_productos: total,
+      valorizado_total: valorizado.aNumero(),
+      recortado: total > productos.length,
+    };
+  }
+
+  /**
+   * Mapa de calor hora × día de la semana: ventas netas (misma regla que ventasPorHora) de las últimas `semanas`
+   * semanas completas de 7 días terminando hoy (hora y día de Lima). `mejor` es la franja de dos horas seguidas, dentro
+   * de un mismo día, con más ventas. Solo lectura.
+   */
+  async ventasMapaCalor(semanas?: number | string): Promise<MapaCalorResponse> {
+    const pedido = Math.trunc(Number(semanas));
+    const n = Number.isFinite(pedido) && pedido >= SEMANAS_MAPA_MIN ? Math.min(pedido, SEMANAS_MAPA_MAX) : 4;
+    const hasta = hoyLima();
+    const desde = sumarDiasYmd(hasta, -(n * 7 - 1));
+    const rango = rangoFechasLima(desde, hasta);
+    const lista = await this.repo.obtenerVentasPorPeriodo(rango.desde, rango.hasta, {});
+
+    const totales = Array.from({ length: 7 * 24 }, () => Dinero.cero());
+    const cantidades = new Array<number>(7 * 24).fill(0);
+    for (const item of lista) {
+      const clase = clasificarComprobanteReporte(item);
+      if (!clase.cuenta) continue;
+      const instante = item.creado_en ? new Date(item.creado_en) : null;
+      if (!instante || Number.isNaN(instante.getTime())) continue;
+      const dia = aFechaLima(instante);
+      if (dia < desde || dia > hasta) continue;
+      const celda = diaSemanaYmd(dia) * 24 + Number(horaLima(instante).slice(0, 2));
+      const importe = Dinero.desdeBd(item.total);
+      totales[celda] = totales[celda].sumar(clase.signo < 0 ? importe.negar() : importe);
+      if (clase.tipo === 'venta') cantidades[celda] += 1;
+    }
+
+    let mejor: MapaCalorResponse['mejor'] = null;
+    let mejorCentimos = 0;
+    for (let dia = 0; dia < 7; dia++) {
+      for (let hora = 0; hora < 23; hora++) {
+        const suma = totales[dia * 24 + hora].centimos + totales[dia * 24 + hora + 1].centimos;
+        if (suma > mejorCentimos) {
+          mejorCentimos = suma;
+          mejor = { dia, hora_inicio: hora, hora_fin: hora + 2, total: suma / 100 };
+        }
+      }
+    }
+
+    return {
+      desde,
+      hasta,
+      semanas: n,
+      celdas: totales.map((t, i) => ({ dia: Math.floor(i / 24), hora: i % 24, total: t.aNumero(), ventas: cantidades[i] })),
+      mejor,
+    };
   }
 
   async reportePorCategoria(filters: any = {}) {

@@ -37,6 +37,7 @@ import {
   ProbarConexionDto,
   SubirCertificadoDto,
 } from '../config/fiscal-config.dto';
+import { AlertasCorreoDto } from '../alertas/alertas-fiscales.dto';
 import { actorDe } from './actor-fiscal';
 import { ErroresFiscalesInterceptor } from './errores-fiscales.interceptor';
 import { FiscalAdminBussnies } from './fiscal-admin.bussnies';
@@ -170,6 +171,27 @@ export class FiscalAdminController {
     @Req() req: Request,
   ) {
     return this.fiscal.probarConexion(dto, actorDe(usuario, req));
+  }
+
+  /** Vuelve a cifrar TODOS los secretos con la llave vigente (tras rotar FISCAL_SECRET_KEY). Auditado. */
+  @Post('secretos/recifrar')
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  recifrarSecretos(@UsuarioActual() usuario: UsuarioToken | undefined, @Req() req: Request) {
+    return this.fiscal.recifrarSecretos(actorDe(usuario, req));
+  }
+
+  /** Correo de los avisos diarios (certificado por vencer, envíos que requieren revisión…). */
+  @Get('alertas')
+  @Header('Cache-Control', 'no-store')
+  estadoAlertas() {
+    return this.fiscal.estadoAlertas();
+  }
+
+  @Put('alertas')
+  @Header('Cache-Control', 'no-store')
+  guardarAlertas(@Body() dto: AlertasCorreoDto, @UsuarioActual() usuario: UsuarioToken | undefined, @Req() req: Request) {
+    return this.fiscal.guardarCorreoAlertas(dto.correo, actorDe(usuario, req));
   }
 
   /** Semáforo para el panel y el POS (sin secretos). */

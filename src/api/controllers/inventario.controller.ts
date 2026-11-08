@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Body, Param, ParseIntPipe, Query, UseGuards } from '@nestjs/common';
 import { InventarioBussnies } from '../../bussnies/Bussnies/inventario.bussnies';
 import {
   ActualizarInventarioRequest,
@@ -55,6 +55,13 @@ export class InventarioController {
   @Roles('admin', 'vendedor', 'caja', 'consulta')
   almacenes() {
     return this.service.almacenes();
+  }
+
+  /** Stock del producto en cada almacén, en una consulta (ficha de edición de producto). */
+  @Get('stock-producto/:id_producto')
+  @Roles('admin', 'vendedor', 'caja', 'consulta')
+  stockPorProducto(@Param('id_producto', ParseIntPipe) idProducto: number) {
+    return this.service.stockPorProducto(idProducto);
   }
 
   @Get('alertas')

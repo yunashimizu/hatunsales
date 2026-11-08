@@ -92,6 +92,27 @@ describe('checklist de activación por tipo de documento', () => {
     expect(resultado.advertencias.join(' ')).not.toMatch(/Nubefact/i);
   });
 
+  describe('aviso de la llave anterior (S7)', () => {
+    it('mientras FISCAL_SECRET_KEY_ANTERIOR esté definida avisa cuántos secretos faltan y no bloquea', () => {
+      const r = evaluarPreparacion(hechosPrueba({ llave: { anteriorDefinida: true, secretosConLlaveAnterior: 2 } }));
+      expect(r.listo).toBe(true);
+      const aviso = r.advertencias.find((a) => /re-cifrados con la llave vigente/.test(a));
+      expect(aviso).toMatch(/faltan 2/);
+      expect(aviso).toMatch(/Re-cifrar ahora/);
+    });
+
+    it('con todo re-cifrado dice que ya se puede quitar la llave anterior', () => {
+      const r = evaluarPreparacion(hechosPrueba({ llave: { anteriorDefinida: true, secretosConLlaveAnterior: 0 } }));
+      expect(r.advertencias.join(' ')).toMatch(/Puede quitar FISCAL_SECRET_KEY_ANTERIOR/);
+    });
+
+    it('sin llave anterior no hay aviso', () => {
+      for (const llave of [undefined, null, { anteriorDefinida: false, secretosConLlaveAnterior: 0 }]) {
+        expect(evaluarPreparacion(hechosPrueba({ llave })).advertencias.join(' ')).not.toMatch(/llave vigente|FISCAL_SECRET_KEY_ANTERIOR/);
+      }
+    });
+  });
+
   describe('advertencia de productos sin código SUNAT', () => {
     const conDefecto = { ...VALORES_COMPLETOS, fiscal_codigo_producto_defecto: '72153600' };
 
@@ -99,9 +120,10 @@ describe('checklist de activación por tipo de documento', () => {
       const resultado = evaluarPreparacion(hechosPrueba({ productosSinCodigoSunat: 12 }));
       expect(resultado.listo).toBe(true);
       const aviso = resultado.advertencias.find((a) => /código de producto SUNAT/.test(a));
-      expect(aviso).toMatch(/^12 producto\(s\) activo\(s\) no tienen código de producto SUNAT y no hay código por defecto/);
-      expect(aviso).toMatch(/01\/01\/2027 sus comprobantes no se emitirán/);
-      expect(aviso).toMatch(/Operación y series/);
+      expect(aviso).toMatch(/^12 producto\(s\) activo\(s\) no tienen código de producto SUNAT: sus comprobantes saldrán con el código genérico de su categoría/);
+      expect(aviso).toMatch(/ninguna venta se bloquea/);
+      expect(aviso).toMatch(/ERR-3496\/3506/);
+      expect(aviso).not.toMatch(/no se emitirán|RS 000048/);
     });
 
     it('con código por defecto y productos sin código, advierte con el mensaje suave', () => {
@@ -111,7 +133,7 @@ describe('checklist de activación por tipo de documento', () => {
       const aviso = resultado.advertencias.find((a) => /código SUNAT por defecto/.test(a));
       expect(aviso).toMatch(/^3 producto\(s\) activo\(s\) usan el código SUNAT por defecto \(72153600\)/);
       expect(aviso).toMatch(/conviene cargar el código real/);
-      expect(resultado.advertencias.join(' ')).not.toMatch(/no se emitirán/);
+      expect(resultado.advertencias.join(' ')).not.toMatch(/código genérico/);
     });
 
     it('sin productos sin código (0), sin dato (null) o sin el campo, no advierte', () => {

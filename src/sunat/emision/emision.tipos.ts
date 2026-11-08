@@ -52,8 +52,17 @@ export const SEGUNDOS_RECLAMO = 60;
 /** Espera hasta el siguiente reintento automático según los intentos ya hechos (D7): 2, 5, 15, 30 y 60 minutos. */
 export const ESPERA_REINTENTO_MINUTOS: readonly number[] = [2, 5, 15, 30, 60];
 
-/** Tras estos intentos sin una respuesta válida el envío queda en EXCEPCION para revisarlo a mano. */
+/**
+ * Tras estos intentos sin una respuesta válida el envío pasa al reintento lento (ESPERA_LENTA_MINUTOS)
+ * mientras el comprobante esté dentro de su plazo de envío; solo al vencer el plazo queda en EXCEPCION.
+ */
 export const MAXIMO_INTENTOS_AUTOMATICOS = 6;
+
+/** Espera entre reintentos automáticos una vez agotados los rápidos y mientras dure el plazo de envío (S1). */
+export const ESPERA_LENTA_MINUTOS = 60;
+
+/** Lo que dicen el envío y el comprobante de una boleta que espera su resumen diario (modo «resumen»). */
+export const MENSAJE_POR_RESUMIR = 'Boleta registrada; se informa a SUNAT en el resumen diario.';
 
 /** Respuestas que dicen que SUNAT ya tenía el número con OTROS datos: su CDR no se acepta solo (D4). */
 export const CODIGOS_REGISTRADO_CON_OTROS_DATOS: ReadonlySet<string> = new Set(['1033', '2109']);

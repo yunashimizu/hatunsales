@@ -1,4 +1,4 @@
-import type { AmbienteFiscal } from '../config/fiscal-config.tipos';
+import type { ActorFiscal, AmbienteFiscal } from '../config/fiscal-config.tipos';
 import type { ArchivoEnvio, TipoArchivoEnvio } from '../emision/emision.contrato';
 
 /**
@@ -15,7 +15,7 @@ import type { ArchivoEnvio, TipoArchivoEnvio } from '../emision/emision.contrato
  * devuelve el comprobante a su estado anterior.
  */
 
-/** Tipo de lote: RA = baja de facturas; RC = resumen diario de boletas (aquí solo la condición 3). */
+/** Tipo de lote: RA = baja de facturas; RC = resumen diario de boletas (condición 3 «anular» y condición 1 «adicionar»). */
 export type OperacionLote = 'baja' | 'resumen';
 
 /** Tope de filas por página en el listado de lotes (la implementación lo aplica aunque pidan más). */
@@ -94,6 +94,28 @@ export interface LineaAceptadaSinAnular {
   id_comprobante: number;
 }
 
+/** Quién pide el resumen de adición: el administrador (botón), la tarea programada o la acción de un comprobante. */
+export type OrigenResumen = 'manual' | 'tarea' | 'comprobante';
+
+export interface PeticionResumenAdicion {
+  /** yyyy-mm-dd: día de emisión de las boletas (un resumen lleva boletas de UNA sola fecha). */
+  fecha_emision: string;
+  /** Solo estos comprobantes (los que sigan elegibles); sin ids, todos los elegibles de la fecha. */
+  ids_comprobantes?: number[];
+  actor: ActorFiscal | null;
+  origen: OrigenResumen;
+}
+
+export interface ResultadoResumenAdicion extends ResultadoLote {
+  fecha_emision: string;
+  /** Boletas (y notas de boleta) incluidas en el resumen. */
+  comprobantes: number;
+  /** Elegibles que no cupieron (un resumen admite 500 líneas): se informan en el siguiente. */
+  pendientes: number;
+  /** Elegibles que no se incluyeron porque no conservan su documento o es de otro emisor. */
+  omitidos: number;
+}
+
 export abstract class LotesFiscales {
   /**
    * Da de baja (factura, RA) o informa como anulada (boleta, RC condición 3) un comprobante aceptado,
@@ -103,7 +125,23 @@ export abstract class LotesFiscales {
    */
   abstract solicitarAnulacion(p: { id_comprobante: number; motivo: string; idUsuario: number | null }): Promise<ResultadoLote>;
 
-  /** Último lote del comprobante que sigue vigente (en curso o aceptado); null si no tiene o fue rechazado. */
+  /**
+   * Resumen diario de adición (RC, condición 1): informa a SUNAT las boletas y notas de boleta de UNA fecha de
+   * emisión que esperan resumen (POR_RESUMIR) o que no pudieron ir por envío individual y ya pasaron los 5 días,
+   * dentro de los 7 días de la emisión. Nunca incluye lo que SUNAT ya aceptó. Mientras el resumen está en curso los
+   * comprobantes quedan TICKET_PENDIENTE; aceptado → ACEPTADO; rechazado → vuelven a su estado anterior.
+   * Devuelve null si no hay nada que informar. FiscalConfigError: FISCAL_RESUMEN_FUERA_DE_PLAZO, FISCAL_EMISION_BLOQUEADA,
+   * FISCAL_ENVIO_EN_CURSO (otro proceso tomó alguna boleta a la vez).
+   */
+  abstract crearResumenAdicion(p: PeticionResumenAdicion): Promise<ResultadoResumenAdicion | null>;
+
+  /**
+   * «Informar por resumen» de UNA boleta (o nota de boleta): valida que pueda ir (tipo, estado, plazo de 7 días) y
+   * crea el resumen de su fecha con ella sola. FISCAL_RESUMEN_NO_PERMITIDO / FISCAL_RESUMEN_FUERA_DE_PLAZO si no.
+   */
+  abstract resumirComprobante(p: { id_comprobante: number; actor: ActorFiscal | null }): Promise<ResultadoResumenAdicion>;
+
+  /** Último lote de baja o anulación del comprobante que sigue vigente (en curso o aceptado); null si no tiene o fue rechazado. */
   abstract estadoDeComprobante(idComprobante: number): Promise<LoteDeComprobante | null>;
 
   abstract listar(filtro: FiltroLotes): Promise<{ datos: LoteVista[]; total: number; pagina: number; por_pagina: number }>;
@@ -112,6 +150,12 @@ export abstract class LotesFiscales {
 
   /** Envía el lote si está PENDIENTE_REENVIO, o consulta su ticket si está TICKET_PENDIENTE. */
   abstract reintentar(idEnvio: number): Promise<ResultadoLote>;
+
+  /**
+   * «Liberar» (administrador): suelta un lote cuyo ticket SUNAT no resolvió; los comprobantes vuelven a su
+   * estado anterior. Auditado (FISCAL_LOTE_LIBERADO). FISCAL_LIBERAR_NO_PERMITIDO si no está en ese caso.
+   */
+  abstract liberar(idEnvio: number, actor: ActorFiscal): Promise<ResultadoLote>;
 
   abstract archivo(idEnvio: number, tipo: TipoArchivoEnvio): Promise<ArchivoEnvio | null>;
 

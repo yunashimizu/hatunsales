@@ -6,7 +6,10 @@ import { IdEnteroPipe } from '../../../util/http/pipes/id-entero.pipe';
 
 /**
  * Categorías, marcas y banners no llevan stock ni precios: el navegador puede
- * guardarlos un minuto y ahorrarse el viaje al volver a la portada.
+ * guardarlos un minuto y ahorrarse el viaje al volver a la portada. Las listas de
+ * productos (listado, destacados, ofertas, búsqueda) y los filtros también, porque no
+ * dependen del usuario; la ficha (`productos/:id`, `slug/:slug`) y las reseñas no,
+ * porque deciden la compra y deben mostrar el stock fresco.
  */
 const CACHE_LISTAS_PUBLICAS = 'public, max-age=60';
 
@@ -35,21 +38,25 @@ export class CatalogoController {
   ) {}
 
   @Get('productos')
+  @Header('Cache-Control', CACHE_LISTAS_PUBLICAS)
   listarProductos(@Query() query: CatalogoQueryRequest) {
     return this.service.listar(query);
   }
 
   @Get('productos/destacados')
+  @Header('Cache-Control', CACHE_LISTAS_PUBLICAS)
   destacados(@Query('limite') limite?: string) {
     return this.service.destacados(limitePedido(limite));
   }
 
   @Get('productos/ofertas')
+  @Header('Cache-Control', CACHE_LISTAS_PUBLICAS)
   ofertas(@Query('limite') limite?: string) {
     return this.service.ofertas(limitePedido(limite));
   }
 
   @Get('productos/buscar')
+  @Header('Cache-Control', CACHE_LISTAS_PUBLICAS)
   buscar(@Query('q') q: unknown, @Query('limite') limite?: string) {
     return this.service.buscarRapido(q, limitePedido(limite));
   }
@@ -82,6 +89,7 @@ export class CatalogoController {
   }
 
   @Get('filtros')
+  @Header('Cache-Control', CACHE_LISTAS_PUBLICAS)
   filtros(@Query('id_categoria') idCategoria?: string) {
     return this.service.filtros(idOpcional(idCategoria, 'id_categoria'));
   }

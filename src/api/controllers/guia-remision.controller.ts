@@ -9,15 +9,17 @@ import {
   Post,
   Put,
   Query,
+  Req,
   Res,
   StreamableFile,
   UseGuards,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { GuiaRemisionBussnies } from '../../bussnies/Bussnies/guia-remision.bussnies';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { Roles } from '../../guards/roles.decorator';
 import { RolesGuard } from '../../guards/roles.guard';
+import { actorDe } from '../../sunat/admin/actor-fiscal';
 import { UsuarioActual } from '../../guards/usuario-actual.decorator';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import {
@@ -142,6 +144,17 @@ export class GuiaRemisionController {
   @HttpCode(200)
   consultar(@Param('id', ParseIntPipe) id: number) {
     return this.service.consultar(id);
+  }
+
+  /**
+   * «Liberar» (solo administrador): la guía lleva 7 días sin respuesta de SUNAT. Vuelve a «pendiente» para
+   * reenviar el mismo archivo con «Emitir» tras revisarla en SUNAT Operaciones en Línea. Queda auditado.
+   */
+  @Post(':id/liberar')
+  @Roles('admin')
+  @HttpCode(200)
+  liberar(@Param('id', ParseIntPipe) id: number, @UsuarioActual() usuario: UsuarioToken | undefined, @Req() req: Request) {
+    return this.service.liberar(id, actorDe(usuario, req));
   }
 
   /** Solo borrador o rechazada (una aceptada se da de baja en SUNAT Operaciones en Línea). */

@@ -118,4 +118,34 @@ describe('GuiaRemisionRepository', () => {
     expect(tx.query).toHaveBeenCalledTimes(1);
     expect((tx.query.mock.calls[0] as unknown as [string])[0]).toContain("f.estado = 'ENVIANDO'");
   });
+
+  it('liberar (S4): solo el último envío con el ticket sin resolver; envío y guía vuelven a pendiente y la auditoría va en la misma transacción', async () => {
+    const { repo, tx } = montar();
+    tx.query.mockResolvedValueOnce([{ id_envio: 99, sunat_ticket: 'T-1' }]).mockResolvedValueOnce([{ id_guia: 7 }]);
+    const auditar = jest.fn(async () => undefined);
+
+    const liberada = await repo.liberar(7, 'Guía liberada', { liberado: { id_usuario: 3 } }, auditar);
+
+    expect(liberada).toBe(true);
+    const [envio, guia] = tx.query.mock.calls as unknown as Array<[string, unknown[]]>;
+    expect(envio[0]).toContain("SET estado = 'PENDIENTE_REENVIO'");
+    expect(envio[0]).toContain("f.estado = 'TICKET_PENDIENTE' AND COALESCE(f.respuesta_json ->> 'liberable', '') = 'true'");
+    expect(envio[0]).toContain('ORDER BY x.id_envio DESC LIMIT 1');
+    expect(envio[0]).toContain('(f.bloqueado_hasta IS NULL OR f.bloqueado_hasta < NOW())');
+    expect(envio[1]).toEqual([7, JSON.stringify({ liberado: { id_usuario: 3 } }), 'Guía liberada']);
+    expect(guia[0]).toContain("SET estado = 'pendiente'");
+    expect(guia[0]).toContain("estado = 'enviado'");
+    expect(auditar).toHaveBeenCalledWith(tx, 99, 'T-1');
+  });
+
+  it('liberar devuelve false sin tocar la guía ni auditar si el envío ya no es liberable o lo están consultando', async () => {
+    const { repo, tx } = montar();
+    tx.query.mockResolvedValueOnce([[], 0]);
+    const auditar = jest.fn(async () => undefined);
+
+    expect(await repo.liberar(7, 'm', {}, auditar)).toBe(false);
+
+    expect(tx.query).toHaveBeenCalledTimes(1);
+    expect(auditar).not.toHaveBeenCalled();
+  });
 });

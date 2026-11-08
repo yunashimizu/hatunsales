@@ -286,6 +286,17 @@ export class AnularComprobanteRequest {
   sin_nota?: boolean;
 }
 
+/**
+ * POST /comprobante/:id/reintentar. `forzar` («Reintentar ahora») reintenta también un envío que quedó en
+ * «Requiere revisión» (EXCEPCION): solo administrador y queda en la bitácora con el usuario.
+ */
+export class ReintentarComprobanteRequest {
+
+  @IsOptional()
+  @IsBoolean({ message: 'forzar debe ser verdadero o falso' })
+  forzar?: boolean;
+}
+
 /** El administrador verificó en SUNAT Operaciones en Línea que el comprobante fue aceptado. */
 export class ConfirmarAceptadoRequest {
 

@@ -86,3 +86,52 @@ describe('VentaTiendaRepository.generarDesdePedido', () => {
     expect(buscar(/UPDATE pedidos/)?.sql).not.toMatch(/stock_reservado/);
   });
 });
+
+describe('VentaTiendaRepository · datos del comprobante del pedido (S5)', () => {
+  function conDataSource(filas: Record<string, unknown>[]) {
+    const query = jest.fn(async () => filas);
+    return { repo: new VentaTiendaRepository({ query, transaction: jest.fn() } as any), query };
+  }
+
+  it('lee del pedido el tipo, el documento, el nombre, el correo y la dirección de envío', async () => {
+    const { repo, query } = conDataSource([{
+      id_pedido: 57, codigo: 'PED-1', id_venta: 99, id_cliente: 3, tipo_comprobante: 'factura',
+      documento_receptor: ' 20123456789 ', nombre_receptor: 'Constructora Andina SAC', correo: 'compras@andina.pe',
+      direccion: 'Av. Perú 123, Cusco',
+    }]);
+
+    await expect(repo.datosParaComprobante(57)).resolves.toEqual({
+      id_pedido: 57, codigo: 'PED-1', id_venta: 99, id_cliente: 3, tipo_comprobante: 'factura',
+      documento_receptor: '20123456789', nombre_receptor: 'Constructora Andina SAC', correo: 'compras@andina.pe',
+      direccion: 'Av. Perú 123, Cusco',
+    });
+    expect((query.mock.calls[0] as any[])[1]).toEqual([57]);
+  });
+
+  it('sin tipo o con un tipo raro el comprobante es boleta; los vacíos pasan a null', async () => {
+    const { repo } = conDataSource([{
+      id_pedido: 58, codigo: 'PED-2', id_venta: null, id_cliente: 4, tipo_comprobante: null,
+      documento_receptor: '  ', nombre_receptor: '', correo: null, direccion: null,
+    }]);
+
+    await expect(repo.datosParaComprobante(58)).resolves.toMatchObject({
+      tipo_comprobante: 'boleta', id_venta: null, documento_receptor: null, nombre_receptor: null, correo: null, direccion: null,
+    });
+  });
+
+  it('un pedido inexistente devuelve null', async () => {
+    const { repo } = conDataSource([]);
+    await expect(repo.datosParaComprobante(404)).resolves.toBeNull();
+  });
+
+  it('enlaza el comprobante al pedido sin pisar un enlace anterior', async () => {
+    const { repo, query } = conDataSource([]);
+
+    await repo.vincularComprobante(57, 12);
+
+    const [sql, parametros] = query.mock.calls[0] as any[];
+    expect(sql).toMatch(/UPDATE pedidos SET id_comprobante/);
+    expect(sql).toMatch(/id_comprobante IS NULL/);
+    expect(parametros).toEqual([12, 57]);
+  });
+});

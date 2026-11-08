@@ -94,3 +94,37 @@ describe('VentaRepository: datos para el comprobante', () => {
     expect(venta?.credito).toBeNull();
   });
 });
+
+describe('VentaRepository.efectosDeAnulacion (S9.3)', () => {
+  it('con salidas de stock registradas y cuentas por cobrar anuladas informa stock devuelto y cuántas se cerraron', async () => {
+    const { repo, dataSource } = crear({ capacidades: ['credito', 'ventaStockSalida'] });
+    dataSource.query.mockResolvedValueOnce([{ n: 2 }]).mockResolvedValueOnce([{ n: '1' }]);
+
+    expect(await repo.efectosDeAnulacion(9)).toEqual({ stock_devuelto: true, cxc_cerradas: 1 });
+
+    const sqls = dataSource.query.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(sqls[0]).toContain('FROM venta_stock_salida WHERE id_venta = $1');
+    expect(sqls[1]).toContain("FROM cuentas_por_cobrar WHERE id_venta = $1 AND estado = 'anulado'");
+    expect(dataSource.query.mock.calls.every((c: unknown[]) => (c[1] as number[])[0] === 9)).toBe(true);
+  });
+
+  it('una venta anterior a las salidas de stock cuenta sus líneas con producto; sin crédito no consulta cuentas', async () => {
+    const { repo, dataSource } = crear({ capacidades: [] });
+    dataSource.query.mockResolvedValueOnce([{ n: 3 }]);
+
+    expect(await repo.efectosDeAnulacion(9)).toEqual({ stock_devuelto: true, cxc_cerradas: 0 });
+
+    expect(dataSource.query).toHaveBeenCalledTimes(1);
+    expect(String(dataSource.query.mock.calls[0][0])).toContain('FROM detalle_venta WHERE id_venta = $1 AND id_producto IS NOT NULL');
+  });
+
+  it('una venta sin productos ni salidas no devolvió stock; dentro de la transacción de quien llama usa su consultor', async () => {
+    const { repo, dataSource } = crear({ capacidades: ['ventaStockSalida'] });
+    const consultor = { query: jest.fn().mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([{ n: 0 }]) };
+
+    expect(await repo.efectosDeAnulacion(9, consultor as never)).toEqual({ stock_devuelto: false, cxc_cerradas: 0 });
+
+    expect(consultor.query).toHaveBeenCalledTimes(2);
+    expect(dataSource.query).not.toHaveBeenCalled();
+  });
+});

@@ -65,11 +65,26 @@ describe('efectoDelCierre: qué pasa con los comprobantes del lote', () => {
     ['PENDIENTE_REENVIO', 'REINTENTAR', 'ninguno'],
     ['ENVIANDO', 'NINGUNA', 'ninguno'],
     ['EXCEPCION', 'CONSULTAR_TICKET', 'ninguno'],
+    ['EXCEPCION', 'LIBERAR', 'ninguno'],
+    ['EXCEPCION', 'LIBERADO', 'restaurar'],
     ['EXCEPCION', 'NINGUNA', 'restaurar'],
     ['RECHAZADO', 'CORREGIR_Y_REENVIAR', 'restaurar'],
     ['ERROR_CONFIG', 'REVISAR_CONFIG', 'restaurar'],
   ] as const)('%s con la acción %s → %s', (estado, accion, efecto) => {
     expect(efectoDelCierre({ estado, accion })).toBe(efecto);
+  });
+});
+
+describe('efectoDelCierre en un resumen de adición (condición 1)', () => {
+  it.each([
+    ['ACEPTADO', 'NINGUNA', 'informar'],
+    ['ACEPTADO_OBS', 'NINGUNA', 'informar'],
+    ['TICKET_PENDIENTE', 'CONSULTAR_TICKET', 'ninguno'],
+    ['EXCEPCION', 'LIBERAR', 'ninguno'],
+    ['RECHAZADO', 'CORREGIR_Y_REENVIAR', 'restaurar'],
+    ['EXCEPCION', 'NINGUNA', 'restaurar'],
+  ] as const)('%s con la acción %s → %s (aceptar no anula: SUNAT ya tiene la boleta)', (estado, accion, efecto) => {
+    expect(efectoDelCierre({ estado, accion }, true)).toBe(efecto);
   });
 });
 
@@ -190,7 +205,7 @@ describe('LoteFiscalRepository: reclamos', () => {
     expect(reintento).toContain(`e.estado IN ('PENDIENTE_REENVIO', 'ENVIANDO')`);
     expect(reintento).toContain('e.bloqueado_hasta < NOW()');
     expect(consulta).toContain('e.sunat_ticket IS NOT NULL');
-    expect(consulta).toContain(`e.estado = 'EXCEPCION' AND e.respuesta_json #>> '{clasificacion,accion}' = 'CONSULTAR_TICKET'`);
+    expect(consulta).toContain(`e.estado = 'EXCEPCION' AND e.respuesta_json #>> '{clasificacion,accion}' IN ('CONSULTAR_TICKET', 'LIBERAR')`);
     expect(consulta).not.toMatch(/intento = /);
     for (const llamada of bd.llamadas) expect(llamada.parametros).toEqual([900, 60]);
   });
@@ -269,9 +284,10 @@ describe('LoteFiscalRepository.completar', () => {
     expect(tx.llamadas[0].parametros[11]).toEqual(['ENVIANDO', 'PENDIENTE_REENVIO', 'TICKET_PENDIENTE', 'EXCEPCION']);
     expect(sqls[0]).toContain(`e.operacion IN ('resumen', 'baja')`);
     expect(tx.llamadas[1].parametros).toEqual(expect.arrayContaining(['cdr_xml', 'cdr_zip', 'R-20610206337-RA-20261105-00001.xml', 'R-20610206337-RA-20261105-00001.zip']));
-    expect(sqls[2]).toContain(`SET estado = 'ACEPTADO' WHERE id_envio = $1`);
-    expect(sqls[3]).toMatch(/SET estado_sunat = 'ANULADO'[\s\S]*c\.estado_sunat = 'BAJA_PENDIENTE'/);
-    expect(tx.llamadas[3].parametros).toEqual([900, 'RA-20261105-00001']);
+    expect(sqls[2]).toContain('BOOL_AND(l.condicion = 1)'); // ¿resumen de adición? no: es una baja
+    expect(sqls[3]).toContain(`SET estado = 'ACEPTADO' WHERE id_envio = $1`);
+    expect(sqls[4]).toMatch(/SET estado_sunat = 'ANULADO'[\s\S]*c\.estado_sunat = 'BAJA_PENDIENTE'/);
+    expect(tx.llamadas[4].parametros).toEqual([900, 'RA-20261105-00001']);
   });
 
   it('rechazado: devuelve a cada comprobante el estado que guardó su línea y recién después marca la línea RECHAZADO', async () => {
@@ -305,6 +321,45 @@ describe('LoteFiscalRepository.completar', () => {
 
     expect(await repositorio.completar(900, 'produccion', 'x', cierre({ cdr: { xml: '<R/>' } }))).toBeNull();
     expect(tx.llamadas).toHaveLength(1);
+  });
+});
+
+describe('LoteFiscalRepository.liberar (S4)', () => {
+  const auditar = jest.fn(async () => undefined);
+  const RESPUESTAS: Array<[RegExp, unknown]> = [
+    [/UPDATE fiscal_envios/, [{ tipo_documento: 'RA', operacion: 'baja', identificador: 'RA-20261105-00001' }]],
+    [/UPDATE comprobantes/, [{ id_comprobante: 40 }, { id_comprobante: 41 }]],
+  ];
+  beforeEach(() => auditar.mockClear());
+
+  it('en UNA transacción: solo un lote EXCEPCION con el ticket sin resolver y sin reclamo; restaura los comprobantes, marca las líneas y audita', async () => {
+    const { repositorio, tx, transacciones } = crear(RESPUESTAS);
+
+    const liberado = await repositorio.liberar(900, 'Lote liberado', { liberado: { id_usuario: 7 } }, auditar);
+
+    expect(transacciones.ejecutar).toHaveBeenCalledTimes(1);
+    const [lote, tipoDeLote, comprobantes, lineas] = tx.llamadas;
+    expect(tipoDeLote.sql).toContain('BOOL_AND(l.condicion = 1)');
+    expect(lote.sql).toMatch(/e\.estado = 'EXCEPCION'/);
+    expect(lote.sql).toMatch(/e\.respuesta_json #>> '\{clasificacion,accion\}' IN \('CONSULTAR_TICKET', 'LIBERAR'\)/);
+    expect(lote.sql).toMatch(/\(e\.bloqueado_hasta IS NULL OR e\.bloqueado_hasta < NOW\(\)\)/);
+    expect(lote.parametros).toEqual([900, JSON.stringify({ liberado: { id_usuario: 7 } }), 'Lote liberado']);
+    // Primero se devuelve el estado guardado de cada línea (solo a los que siguen en BAJA_PENDIENTE) y recién después se marca la línea.
+    expect(comprobantes.sql).toMatch(/SET estado_sunat = l\.estado/);
+    expect(comprobantes.sql).toMatch(/c\.estado_sunat = 'BAJA_PENDIENTE' AND l\.estado = ANY\(\$2::text\[\]\)/);
+    expect(comprobantes.parametros).toEqual([900, ['ACEPTADO', 'ACEPTADO_OBS']]);
+    expect(lineas.sql).toMatch(/UPDATE fiscal_resumen_lineas SET estado = 'RECHAZADO'/);
+    expect(liberado).toEqual({ identificador: 'RA-20261105-00001', tipo_documento: 'RA', operacion: 'baja', ids_comprobantes: [40, 41] });
+    expect(auditar).toHaveBeenCalledWith(tx, liberado);
+  });
+
+  it('si el lote ya no estaba liberable devuelve null sin tocar comprobantes, líneas ni la auditoría', async () => {
+    const { repositorio, tx } = crear([[/UPDATE fiscal_envios/, [[], 0]]]);
+
+    expect(await repositorio.liberar(900, 'm', {}, auditar)).toBeNull();
+
+    expect(tx.llamadas).toHaveLength(1);
+    expect(auditar).not.toHaveBeenCalled();
   });
 });
 
@@ -361,5 +416,175 @@ describe('LoteFiscalRepository: lecturas', () => {
     expect(sql).toContain('t.proximo_intento_en <= NOW()');
     expect(sql).toContain('t.bloqueado_hasta < NOW()');
     expect(parametros).toEqual(['beta', 10]);
+  });
+});
+
+describe('LoteFiscalRepository: resumen diario de adición (S2)', () => {
+  const LOTE_RC: LotePreparado = {
+    ...LOTE,
+    identificador: 'RC-20261105-00001',
+    nombreBase: '20610206337-RC-20261105-00001',
+    zip: { ...LOTE.zip, nombreZip: '20610206337-RC-20261105-00001.zip', nombreXml: '20610206337-RC-20261105-00001.xml' },
+  };
+  const adicion = (): RegistroLoteNuevo =>
+    registro({
+      operacion: 'resumen',
+      lote: LOTE_RC,
+      lineas: [
+        { id_comprobante: 61, serie: 'B001', numero: 10, tipo_documento: '03', condicion: 1 },
+        { id_comprobante: 62, serie: 'B001', numero: 11, tipo_documento: '03', condicion: 1 },
+      ],
+    });
+
+  it('registrar: aparta las boletas elegibles en TICKET_PENDIENTE, frena su envío individual y guarda el estado previo de cada línea', async () => {
+    const { repositorio } = crear();
+    const consultor = consultorFalso([
+      [/INSERT INTO fiscal_envios/, [{ id_envio: 910 }]],
+      [/UPDATE comprobantes/, [
+        { id_comprobante: 61, previo: 'POR_RESUMIR', id_envio_individual: 5001 },
+        { id_comprobante: 62, previo: 'PENDIENTE_REENVIO', id_envio_individual: 5002 },
+      ]],
+    ]);
+
+    expect(await repositorio.registrar(consultor, adicion())).toBe(910);
+
+    const [, , comprobantes, envios, lineas] = consultor.llamadas;
+    expect(comprobantes.sql).toMatch(/FOR UPDATE[\s\S]*SET estado_sunat = 'TICKET_PENDIENTE', estado = 'pendiente'/);
+    expect(comprobantes.sql).toContain('COALESCE(c.aceptada_sunat, FALSE) = FALSE');
+    expect(comprobantes.parametros).toEqual([[61, 62], ['NO_ENVIADO', 'POR_RESUMIR', 'PENDIENTE_REENVIO', 'EXCEPCION']]);
+    expect(envios.sql).toMatch(/UPDATE fiscal_envios e\s+SET estado = 'TICKET_PENDIENTE'/);
+    expect(envios.sql).toContain(`e.operacion = 'emitir' AND e.estado IN ('POR_RESUMIR', 'PENDIENTE_REENVIO', 'EXCEPCION')`);
+    expect(envios.parametros).toEqual([[5001, 5002], expect.stringContaining('RC-20261105-00001'), 910, 'RC-20261105-00001']);
+    expect(lineas.parametros).toEqual([910, 61, 1, 1, 'POR_RESUMIR', 62, 2, 1, 'PENDIENTE_REENVIO']);
+  });
+
+  it('registrar: si una boleta ya no es elegible (otra tarea la tomó, ya la aceptó SUNAT) aborta con FISCAL_ENVIO_EN_CURSO antes de las líneas', async () => {
+    const { repositorio } = crear();
+    const consultor = consultorFalso([
+      [/INSERT INTO fiscal_envios/, [{ id_envio: 910 }]],
+      [/UPDATE comprobantes/, [{ id_comprobante: 61, previo: 'POR_RESUMIR', id_envio_individual: 5001 }]],
+    ]);
+    await expect(repositorio.registrar(consultor, adicion())).rejects.toMatchObject({ codigo: 'FISCAL_ENVIO_EN_CURSO' });
+    expect(consultor.llamadas.some((l) => /INSERT INTO fiscal_resumen_lineas/.test(l.sql))).toBe(false);
+  });
+
+  it('candidatosResumen: boletas y notas B de SUNAT directo, sin aceptar, de esa fecha y con el plazo de 5 y 7 días', async () => {
+    const { repositorio, bd } = crear([[/FROM comprobantes c/, [{ id_comprobante: 61, id_tipo: 2, serie: 'B001', numero: 10, estado_sunat: 'POR_RESUMIR', id_envio_ultimo: 5001, fecha_de_emision: '2026-11-03' }]]]);
+
+    const lista = await repositorio.candidatosResumen({ ambiente: 'produccion', hoy: '2026-11-05', fecha: '2026-11-03', ids: [61], soloSinRechazo: true, limite: 501 });
+
+    expect(lista).toEqual([{ id_comprobante: 61, id_tipo: 2, serie: 'B001', numero: 10, estado_sunat: 'POR_RESUMIR', id_envio_ultimo: 5001, fecha_de_emision: '2026-11-03' }]);
+    const { sql, parametros } = bd.llamadas[0];
+    expect(sql).toContain('c.id_tipo IN (2, 7, 8) AND c.serie ~ \'^B\'');
+    expect(sql).toContain('COALESCE(c.aceptada_sunat, FALSE) = FALSE');
+    expect(sql).toContain('c.fecha_de_emision BETWEEN ($2::date - 7) AND $2::date');
+    expect(sql).toContain(`c.estado_sunat = 'POR_RESUMIR'`);
+    expect(sql).toContain(`c.estado_sunat IN ('NO_ENVIADO', 'PENDIENTE_REENVIO', 'EXCEPCION') AND c.fecha_de_emision < ($2::date - 5)`);
+    expect(sql).toContain(`e.estado = 'ENVIANDO' AND e.bloqueado_hasta > NOW()`);
+    expect(sql).toContain('l.condicion = 1 AND l.estado = \'RECHAZADO\'');
+    expect(parametros).toEqual(['produccion', '2026-11-05', '2026-11-03', [61], true, 501]);
+
+    await repositorio.candidatosResumen({ ambiente: 'beta', hoy: '2026-11-05', fecha: '2026-11-03', limite: 10 });
+    expect(bd.llamadas[1].parametros).toEqual(['beta', '2026-11-05', '2026-11-03', null, false, 10]);
+  });
+
+  it('fechasConResumenPendiente: agrupa por fecha de emisión; «por resumir» y «atrasadas» son grupos distintos', async () => {
+    const { repositorio, bd } = crear([[/GROUP BY c\.fecha_de_emision/, [{ fecha: '2026-11-02', cantidad: 3 }, { fecha: '2026-11-03', cantidad: '1' }]]]);
+
+    expect(await repositorio.fechasConResumenPendiente({ ambiente: 'produccion', hoy: '2026-11-05', grupo: 'por_resumir', limite: 8 })).toEqual([
+      { fecha: '2026-11-02', cantidad: 3 },
+      { fecha: '2026-11-03', cantidad: 1 },
+    ]);
+    await repositorio.fechasConResumenPendiente({ ambiente: 'produccion', hoy: '2026-11-05', grupo: 'atrasadas', limite: 4 });
+
+    expect(bd.llamadas[0].sql).toContain(`AND c.estado_sunat = 'POR_RESUMIR' AND`);
+    expect(bd.llamadas[1].sql).toContain(`AND c.estado_sunat <> 'POR_RESUMIR' AND`);
+    // La tarea no insiste con lo que SUNAT ya rechazó.
+    for (const llamada of bd.llamadas) expect(llamada.sql).toContain(`l.condicion = 1 AND l.estado = 'RECHAZADO'`);
+    expect(bd.llamadas[0].parametros).toEqual(['produccion', '2026-11-05', 8]);
+  });
+
+  describe('completar un resumen de adición', () => {
+    const RESPUESTAS_RC: Array<[RegExp, unknown]> = [
+      [/RETURNING e\.tipo_documento, e\.operacion, e\.identificador/, [{ tipo_documento: 'RC', operacion: 'resumen', identificador: 'RC-20261105-00001' }]],
+      [/BOOL_AND/, [{ adicion: true }]],
+      [/RETURNING c\.id_comprobante, c\.id_envio_ultimo AS id_envio_individual/, [{ id_comprobante: 61, id_envio_individual: 5001, estado_sunat: 'POR_RESUMIR' }]],
+      [/SELECT COUNT\(\*\)::int AS n FROM fiscal_artifacts/, [{ n: 0 }]],
+      [/SELECT l\.id_comprobante FROM fiscal_resumen_lineas/, [{ id_comprobante: 61 }, { id_comprobante: 62 }]],
+    ];
+    const cierre = (parcial: Partial<CierreEnvio>): CierreEnvio => ({
+      estado: 'ACEPTADO',
+      accion: 'NINGUNA',
+      mensaje: 'El resumen RC-20261105-00001 ha sido aceptado',
+      sunat: { codigo: '0', descripcion: 'aceptado', observaciones: [], tiempoMs: 90 },
+      json: { clasificacion: { estado: 'ACEPTADO' } },
+      proximoIntentoMin: null,
+      ...parcial,
+    });
+
+    it('aceptado: las boletas quedan ACEPTADO (no ANULADO), su envío individual también y reciben la constancia del resumen', async () => {
+      const { repositorio, tx } = crear(RESPUESTAS_RC);
+
+      await repositorio.completar(910, 'produccion', '20610206337-RC-20261105-00001', cierre({ cdr: { xml: '<R/>', zip: Buffer.from('PK-cdr') } }));
+
+      const sqls = tx.llamadas.map((l) => l.sql);
+      expect(sqls.some((s) => /'ANULADO'/.test(s))).toBe(false);
+      const comprobantes = tx.llamadas.find((l) => /SET estado = 'emitido', estado_sunat = \$2::varchar, aceptada_sunat = TRUE/.test(l.sql));
+      expect(comprobantes?.sql).toContain(`WHERE c.estado_sunat = 'TICKET_PENDIENTE'`);
+      expect(comprobantes?.sql).not.toMatch(/id_envio_ultimo =/); // el comprobante conserva su envío: XML, documento y baja siguen funcionando
+      expect(comprobantes?.parametros).toEqual([910, 'ACEPTADO', expect.stringContaining('Informada en el resumen diario RC-20261105-00001'), '0']);
+      const envio = tx.llamadas.find((l) => /UPDATE fiscal_envios e\s+SET estado = \$2::varchar/.test(l.sql));
+      expect(envio?.sql).toContain(`e.operacion = 'emitir' AND e.estado = 'TICKET_PENDIENTE'`);
+      expect(envio?.parametros[0]).toEqual([5001]);
+      // La constancia del resumen se copia al envío de cada boleta (además de la del propio lote).
+      const copias = tx.llamadas.filter((l) => /INSERT INTO fiscal_artifacts/.test(l.sql));
+      expect(copias).toHaveLength(2);
+      expect(copias[1].parametros.slice(0, 2)).toEqual([5001, 61]);
+      expect(copias[1].parametros).toEqual(expect.arrayContaining(['cdr_xml', 'cdr_zip']));
+    });
+
+    it('rechazado: las boletas vuelven a su estado (y su envío individual con el motivo) y la línea queda RECHAZADO', async () => {
+      const { repositorio, tx } = crear(RESPUESTAS_RC);
+
+      await repositorio.completar(
+        910,
+        'produccion',
+        'x',
+        cierre({ estado: 'RECHAZADO', accion: 'CORREGIR_Y_REENVIAR', mensaje: 'Documento repetido', sunat: { codigo: '2987', descripcion: 'repetido', observaciones: [], tiempoMs: 80 } }),
+      );
+
+      const sqls = tx.llamadas.map((l) => l.sql);
+      const restaurar = sqls.findIndex((s) => /SET estado_sunat = l\.estado, estado = CASE WHEN l\.estado = 'EXCEPCION'/.test(s));
+      const envio = sqls.findIndex((s) => /SET estado = c\.estado_sunat/.test(s));
+      const marcar = sqls.findIndex((s) => /SET estado = 'RECHAZADO'/.test(s));
+      expect(restaurar).toBeGreaterThan(0);
+      expect(envio).toBeGreaterThan(restaurar);
+      expect(marcar).toBeGreaterThan(envio);
+      expect(sqls[restaurar]).toContain(`c.estado_sunat = 'TICKET_PENDIENTE' AND l.estado = ANY($2::text[])`);
+      expect(tx.llamadas[restaurar].parametros).toEqual([910, ['NO_ENVIADO', 'POR_RESUMIR', 'PENDIENTE_REENVIO', 'EXCEPCION'], expect.stringContaining('Documento repetido')]);
+      expect(sqls[envio]).toContain(`WHEN c.estado_sunat IN ('POR_RESUMIR', 'EXCEPCION') THEN 'RESUMIR'`);
+      expect(sqls.some((s) => /'ANULADO'/.test(s))).toBe(false);
+    });
+
+    it('liberar un resumen de adición restaura sus boletas desde TICKET_PENDIENTE (no desde BAJA_PENDIENTE)', async () => {
+      const auditar = jest.fn(async () => undefined);
+      const { repositorio, tx } = crear([
+        [/UPDATE fiscal_envios e\s+SET estado = 'EXCEPCION'/, [{ tipo_documento: 'RC', operacion: 'resumen', identificador: 'RC-20261105-00001' }]],
+        [/BOOL_AND/, [{ adicion: true }]],
+        [/RETURNING c\.id_comprobante, c\.id_envio_ultimo AS id_envio_individual/, [{ id_comprobante: 61, id_envio_individual: 5001, estado_sunat: 'POR_RESUMIR' }]],
+      ]);
+
+      const liberado = await repositorio.liberar(910, 'Lote liberado', {}, auditar);
+
+      expect(liberado).toEqual({ identificador: 'RC-20261105-00001', tipo_documento: 'RC', operacion: 'resumen', ids_comprobantes: [61] });
+      expect(tx.llamadas.some((l) => /BAJA_PENDIENTE/.test(l.sql))).toBe(false);
+      expect(tx.llamadas.some((l) => /c\.estado_sunat = 'TICKET_PENDIENTE'/.test(l.sql))).toBe(true);
+    });
+  });
+
+  it('loteDeComprobante solo considera bajas y anulaciones (condición 3): un resumen de adición aceptado no bloquea su baja', async () => {
+    const { repositorio, bd } = crear();
+    await repositorio.loteDeComprobante(61);
+    expect(bd.llamadas[0].sql).toContain('l.condicion = 3');
   });
 });

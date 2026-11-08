@@ -20,6 +20,8 @@ function crear() {
     obtenerArchivo: jest.fn(),
     obtenerPdf: jest.fn(),
     confirmarAceptado: jest.fn().mockResolvedValue({ estado: 'emitido' }),
+    reintentar: jest.fn().mockResolvedValue({ estado: 'emitido' }),
+    informarPorResumen: jest.fn().mockResolvedValue({ id_envio: 70, estado: 'TICKET_PENDIENTE' }),
     catalogoMotivos: jest.fn().mockReturnValue({ nota_credito: [], nota_debito: [] }),
     listar: jest.fn().mockResolvedValue({ datos: [], total: 0, pagina: 1, por_pagina: 20 }),
     generar: jest.fn().mockResolvedValue({}),
@@ -125,6 +127,56 @@ describe('ComprobanteController', () => {
       await controlador.confirmarAceptado(5, { nota: 'Verificado en SOL' }, { id_usuario: 4 } as never);
 
       expect(servicio.confirmarAceptado).toHaveBeenCalledWith(5, 4, 'Verificado en SOL');
+    });
+  });
+
+  describe('POST /comprobante/:id/reintentar', () => {
+    const peticion = { ip: '10.0.0.5', socket: {} } as never;
+    const admin = { id_usuario: 4, nombre: 'Moisés', rol: 'admin' } as never;
+
+    it('el reintento común lo hacen los roles de venta; pasa al negocio quién lo pide y que no es forzado', async () => {
+      const { controlador, servicio } = crear();
+
+      await controlador.reintentar(5, {}, { id_usuario: 9, nombre: 'Caja', rol: 'caja' } as never, peticion);
+
+      expect(servicio.reintentar).toHaveBeenCalledWith(5, { forzar: false, actor: expect.objectContaining({ id_usuario: 9, nombre: 'Caja', ip: '10.0.0.5' }) });
+    });
+
+    it('«Reintentar ahora» (forzar) es solo del administrador: otro rol recibe 403 y no se reintenta nada', async () => {
+      const { controlador, servicio } = crear();
+
+      for (const rol of ['vendedor', 'caja', 'consulta']) {
+        await expect(async () => controlador.reintentar(5, { forzar: true }, { id_usuario: 9, rol } as never, peticion)).rejects.toBeInstanceOf(ForbiddenException);
+      }
+      expect(servicio.reintentar).not.toHaveBeenCalled();
+
+      await controlador.reintentar(5, { forzar: true }, admin, peticion);
+      expect(servicio.reintentar).toHaveBeenCalledWith(5, { forzar: true, actor: expect.objectContaining({ id_usuario: 4 }) });
+      // Los alias del rol de administración también valen.
+      await controlador.reintentar(5, { forzar: true }, { id_usuario: 1, nombre: 'Gerencia', rol: 'Administrador' } as never, peticion);
+      expect(servicio.reintentar).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('POST /comprobante/:id/resumir («Informar por resumen»)', () => {
+    const peticion = { ip: '10.0.0.5', socket: {} } as never;
+
+    it('lo usan el administrador y el vendedor; el cajero (que solo cobra) recibe 403', () => {
+      const guardia = new RolesGuard(new Reflector());
+      expect(Reflect.getMetadata(ROLES_KEY, ComprobanteController.prototype.resumir)).toEqual(['admin', 'vendedor']);
+      expect(guardia.canActivate(contexto('resumir', 'admin'))).toBe(true);
+      expect(guardia.canActivate(contexto('resumir', 'vendedor'))).toBe(true);
+      expect(() => guardia.canActivate(contexto('resumir', 'caja'))).toThrow(ForbiddenException);
+      expect(() => guardia.canActivate(contexto('resumir', 'consulta'))).toThrow(ForbiddenException);
+    });
+
+    it('pasa al negocio quién lo pide (usuario e IP para la bitácora) y devuelve el resultado del resumen', async () => {
+      const { controlador, servicio } = crear();
+
+      const resultado = await controlador.resumir(5, { id_usuario: 4, nombre: 'Moisés', rol: 'admin' } as never, peticion);
+
+      expect(servicio.informarPorResumen).toHaveBeenCalledWith(5, expect.objectContaining({ id_usuario: 4, nombre: 'Moisés', ip: '10.0.0.5' }));
+      expect(resultado).toMatchObject({ id_envio: 70, estado: 'TICKET_PENDIENTE' });
     });
   });
 

@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import type { AmbienteFiscal } from '../config/fiscal-config.tipos';
+import type { ActorFiscal, AmbienteFiscal } from '../config/fiscal-config.tipos';
 import type { MaterialFirma } from '../certificado/material-firma';
 import type { DocumentoCpe, EmisorCpe, EstadoSunat, ObservacionSunat } from '../nucleo/documento-fiscal.types';
 import type { EnvioCpePreparado } from '../nucleo/preparador-envio-cpe';
@@ -35,7 +35,17 @@ export const MAXIMO_ENVIOS_POR_PAGINA = 100;
  * panel), FISCAL_MIGRACION_PENDIENTE, FISCAL_LECTURA_ERROR (no se pudo leer la configuración).
  */
 export type ModoEmision =
-  | { activo: true; ambiente: AmbienteFiscal; /** El comprobante se responde apenas queda firmado y guardado; SUNAT se envía en segundo plano. */ diferido?: boolean }
+  | {
+      activo: true;
+      ambiente: AmbienteFiscal;
+      /** El comprobante se responde apenas queda firmado y guardado; SUNAT se envía en segundo plano. */
+      diferido?: boolean;
+      /**
+       * Modo «resumen diario» de boletas: la boleta se firma y se guarda SIN enviarla a SUNAT (queda POR_RESUMIR) y la
+       * tarea la informa en el resumen diario. Las facturas y las notas siguen su camino normal.
+       */
+      resumen?: boolean;
+    }
   | { activo: false; ambiente: AmbienteFiscal; codigo: string; motivo: string };
 
 export interface SeriesEmision {
@@ -119,6 +129,10 @@ export interface EnvioVista {
   proximo_intento_en?: string | null;
   bloqueado_hasta?: string | null;
   actualizado_en?: string | null;
+  /** Lo que el sistema dice del envío en palabras (por qué sigue pendiente o qué hacer); null si todo va bien. */
+  ultimo_error?: string | null;
+  /** yyyy-mm-dd: último día para enviarlo por sendBill (null si el envío no conserva su documento). */
+  fecha_limite_envio?: string | null;
 }
 
 export interface FiltroEnvios {
@@ -207,12 +221,15 @@ export abstract class EmisionDirecta {
    * ENVIANDO (con plazo de bloqueo), el XML, el XML firmado y el ZIP, y los datos fiscales del
    * comprobante (estado_sunat, id_envio_ultimo, cadena_qr, codigo_hash, hora_emision, forma_pago,
    * cuotas, fecha_limite_envio). No usa la red. Devuelve el id del envío.
+   * Con `porResumir` (modo «resumen» de boletas) el envío y el comprobante nacen POR_RESUMIR, con la acción
+   * RESUMIR, y NO se mandan a SUNAT: los informa después el resumen diario.
    */
   abstract registrarEnvio(
     consultor: ConsultorTx,
     preparado: DocumentoPreparado,
     idComprobante: number,
     idUsuario: number | null,
+    opciones?: { porResumir?: boolean },
   ): Promise<number>;
 
   /**
@@ -231,11 +248,15 @@ export abstract class EmisionDirecta {
   /**
    * Reenvío seguro del MISMO ZIP (PENDIENTE_REENVIO, o ENVIANDO con el bloqueo vencido). Si el documento
    * admite getStatusCdr (producción, 01/07/08 serie F) recupera antes el CDR y solo reenvía si SUNAT no lo tiene.
+   * Con `forzar` (solo administrador) admite también un envío en EXCEPCION; el reintento manual queda auditado.
    */
-  abstract reintentar(idEnvio: number): Promise<ResultadoEmision>;
+  abstract reintentar(idEnvio: number, opciones?: { forzar?: boolean; actor?: ActorFiscal | null }): Promise<ResultadoEmision>;
 
-  /** Consulta el CDR a SUNAT (getStatusCdr: solo producción y documentos que lo admiten) sin reenviar nada. */
-  abstract recuperarCdr(idEnvio: number): Promise<ResultadoEmision>;
+  /**
+   * Consulta el CDR a SUNAT (getStatusCdr: solo producción y documentos que lo admiten) sin reenviar nada.
+   * Si la consulta llegó a SUNAT queda en la bitácora (`FISCAL_CDR_RECUPERADO`) con el actor que la pidió.
+   */
+  abstract recuperarCdr(idEnvio: number, opciones?: { actor?: ActorFiscal | null }): Promise<ResultadoEmision>;
 
   /**
    * Para boletas (o BETA) cuyo resultado quedó incierto y que el administrador verificó en SUNAT Operaciones

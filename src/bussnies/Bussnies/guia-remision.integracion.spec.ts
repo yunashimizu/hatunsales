@@ -165,6 +165,7 @@ describirConBd('Guía de remisión contra PostgreSQL real (HS_PG_PRUEBAS_URL)', 
       fiscal as never,
       reloj,
       new UbigeoService(),
+      { registrar: async () => undefined } as never,
     );
   });
 

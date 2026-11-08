@@ -58,6 +58,24 @@ export class CreditoBussnies {
     }
   }
 
+  /** Deuda por antigüedad (al día, 1–30, 31–60, más de 60 días) calculada en SQL con la fecha de Lima. */
+  async antiguedad() {
+    try {
+      return await this.repo.antiguedad();
+    } catch (error) {
+      relanzarHttp(error);
+    }
+  }
+
+  /** Solo el total de la deuda vencida (cuentas y monto), sin traer filas. */
+  async resumenVencidas() {
+    try {
+      return await this.repo.totalVencido();
+    } catch (error) {
+      relanzarHttp(error);
+    }
+  }
+
   async obtener(id: number) {
     let cxc: unknown;
     try {

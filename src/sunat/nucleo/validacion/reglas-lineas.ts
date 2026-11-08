@@ -80,7 +80,10 @@ export class ReglaLineas implements ReglaValidacionCpe {
         acumulador.advertencia(`${etiqueta}: el código de producto SUNAT ${codigoSunat} es un segmento genérico de UNSPSC; use el código de la clase del producto.`);
       }
     } else if (contexto.aplicarReglas2027) {
-      acumulador.error(`${etiqueta}: desde el 01/01/2027 el código de producto SUNAT de 8 dígitos (catálogo 25) es obligatorio (RS 000048-2026).`);
+      // Fuente: reglas de validación de SUNAT vigentes desde el 1/1/2027 (ERR-3496 / ERR-3506), listado en
+      // cpe.sunat.gob.pe/guias-y-manuales («Reglas de validación»). No es una obligación de la RS 000048-2026.
+      // El sistema no llega aquí por falta de código: la emisión usa el código por defecto o el genérico de la categoría.
+      acumulador.error(`${etiqueta}: desde el 01/01/2027 las reglas de validación de SUNAT (ERR-3496/3506) exigen el código de producto SUNAT de 8 dígitos (catálogo 25).`);
     }
   }
 

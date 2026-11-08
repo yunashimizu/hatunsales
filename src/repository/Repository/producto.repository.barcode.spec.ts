@@ -9,6 +9,7 @@ function crear(resultado: unknown = null) {
 }
 
 describe('ProductoRepository.buscarPorCodigoBarras', () => {
+  // Sin COALESCE en el WHERE para que valgan los índices (btrim(codigo_barras) y lower(sku)).
   it('compara con btrim, cae a SKU sin distinguir mayúsculas y no filtra por estado', async () => {
     const producto = { id_producto: 4 };
     const { repo, productoRepo, qb } = crear(producto);
@@ -16,12 +17,13 @@ describe('ProductoRepository.buscarPorCodigoBarras', () => {
     await expect(repo.buscarPorCodigoBarras('  CEM-01\r\n')).resolves.toBe(producto);
 
     expect(productoRepo.createQueryBuilder).toHaveBeenCalledWith('p');
-    expect(qb.where).toHaveBeenCalledWith("btrim(COALESCE(p.codigo_barras, '')) = :codigo", { codigo: 'CEM-01' });
-    expect(qb.orWhere).toHaveBeenCalledWith("LOWER(COALESCE(p.sku, '')) = LOWER(:codigo)", { codigo: 'CEM-01' });
+    expect(qb.where).toHaveBeenCalledWith('btrim(p.codigo_barras) = :codigo', { codigo: 'CEM-01' });
+    expect(qb.orWhere).toHaveBeenCalledWith('LOWER(p.sku) = LOWER(:codigo)', { codigo: 'CEM-01' });
     const todo = JSON.stringify([...qb.where.mock.calls, ...qb.orWhere.mock.calls]);
     expect(todo).not.toContain('estado');
   });
 
+  // En el orden sí va el COALESCE: `NULL = :codigo` daría NULL y DESC lo pondría primero.
   it('desempata por barras primero y luego por id ascendente', async () => {
     const { repo, qb } = crear();
 
@@ -77,5 +79,44 @@ describe('ProductoRepository.asignarCodigoSunat', () => {
     await expect(repo.asignarCodigoSunat([5], '72153600')).resolves.toEqual([5]);
     await expect(repo.asignarCodigoSunat([], '72153600')).resolves.toEqual([]);
     expect(productoRepo.query).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ProductoRepository.buscarChoquesDeCodigos', () => {
+  it('una sola consulta por índice: barras tal cual y SKU en minúsculas', async () => {
+    const fila = { id_producto: 3, nombre: 'CEMENTO', codigo_barras: '7501', sku: 'CEM-01' };
+    const productoRepo = { query: jest.fn().mockResolvedValue([fila]) };
+    const repo = new ProductoRepository(productoRepo as never);
+
+    await expect(repo.buscarChoquesDeCodigos(['7501', 'CEM-01'])).resolves.toEqual([fila]);
+    expect(productoRepo.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = productoRepo.query.mock.calls[0];
+    // El predicado del índice parcial uq_productos_codigo_barras y la expresión de idx_productos_sku_lower.
+    expect(sql).toContain("btrim(p.codigo_barras) <> ''");
+    expect(sql).toContain('btrim(p.codigo_barras) = ANY($1::text[])');
+    expect(sql).toContain('lower(p.sku) = ANY($2::text[])');
+    expect(sql).not.toContain('COALESCE');
+    expect(params).toEqual([['7501', 'CEM-01'], ['7501', 'cem-01']]);
+  });
+
+  it('sin códigos (vacíos o solo espacios) no consulta', async () => {
+    const productoRepo = { query: jest.fn() };
+    const repo = new ProductoRepository(productoRepo as never);
+
+    await expect(repo.buscarChoquesDeCodigos([])).resolves.toEqual([]);
+    await expect(repo.buscarChoquesDeCodigos(['', '   '])).resolves.toEqual([]);
+    expect(productoRepo.query).not.toHaveBeenCalled();
+  });
+});
+
+describe('ProductoRepository.actualizarSiExiste', () => {
+  it('true si el UPDATE afectó una fila y false si no existía, sin leer después', async () => {
+    const productoRepo = { update: jest.fn().mockResolvedValueOnce({ affected: 1 }).mockResolvedValueOnce({ affected: 0 }), findOne: jest.fn() };
+    const repo = new ProductoRepository(productoRepo as never);
+
+    await expect(repo.actualizarSiExiste(7, { nombre: 'X' })).resolves.toBe(true);
+    await expect(repo.actualizarSiExiste(99, { nombre: 'X' })).resolves.toBe(false);
+    expect(productoRepo.update).toHaveBeenCalledWith(7, { nombre: 'X' });
+    expect(productoRepo.findOne).not.toHaveBeenCalled();
   });
 });

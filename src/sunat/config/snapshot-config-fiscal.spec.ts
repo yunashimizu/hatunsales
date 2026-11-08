@@ -32,6 +32,26 @@ describe('construirSnapshot', () => {
     expect(construirSnapshot({ fiscal_envio_diferido: 'quizá' }, DEFECTOS_PRUEBA).envioDiferido).toBe(false);
   });
 
+  it('un solo interruptor: sin fiscal_envio_diferido, la clave vieja «envío en línea» apagada se lee como envío diferido', () => {
+    expect(construirSnapshot({ fiscal_envio_en_linea: 'false' }, DEFECTOS_PRUEBA).envioDiferido).toBe(true);
+    expect(construirSnapshot({ fiscal_envio_en_linea: 'true' }, DEFECTOS_PRUEBA).envioDiferido).toBe(false);
+    // La clave nueva manda aunque la vieja diga otra cosa; y el snapshot ya no expone «envío en línea».
+    const manda = construirSnapshot({ fiscal_envio_diferido: 'false', fiscal_envio_en_linea: 'false' }, DEFECTOS_PRUEBA);
+    expect(manda.envioDiferido).toBe(false);
+    expect(manda).not.toHaveProperty('envioEnLinea');
+  });
+
+  it('modo de boletas y hora del resumen: individual y 23:30 por defecto; una hora mal escrita cae en la de siempre', () => {
+    const defecto = construirSnapshot({}, DEFECTOS_PRUEBA);
+    expect(defecto).toMatchObject({ boletasModo: 'individual', resumenHora: '23:30' });
+    expect(construirSnapshot({ fiscal_boletas_modo: 'resumen', fiscal_resumen_hora: '21:05' }, DEFECTOS_PRUEBA)).toMatchObject({
+      boletasModo: 'resumen',
+      resumenHora: '21:05',
+    });
+    expect(construirSnapshot({ fiscal_resumen_hora: '25:00' }, DEFECTOS_PRUEBA).resumenHora).toBe('23:30');
+    expect(construirSnapshot({ fiscal_resumen_hora: 'tarde' }, DEFECTOS_PRUEBA).resumenHora).toBe('23:30');
+  });
+
   it('valores mal escritos caen en valores seguros (nunca activan SUNAT directo por accidente)', () => {
     const s = construirSnapshot(
       {

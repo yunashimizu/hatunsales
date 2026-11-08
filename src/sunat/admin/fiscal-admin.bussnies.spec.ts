@@ -79,3 +79,44 @@ describe('FiscalAdminBussnies.subirCertificado', () => {
     expect(subir).not.toHaveBeenCalled();
   });
 });
+
+describe('FiscalAdminBussnies · re-cifrado y avisos (S7)', () => {
+  function crear(conServicios = true) {
+    const recifrado = { recifrarTodo: jest.fn().mockResolvedValue({ revisados: 3, recifrados: 3 }) };
+    const alertas = {
+      estado: jest.fn().mockResolvedValue({ correo: 'antes@x.pe', correo_efectivo: 'antes@x.pe', origen: 'configurado' }),
+      guardarCorreo: jest.fn().mockResolvedValue({ correo: 'nuevo@x.pe', correo_efectivo: 'nuevo@x.pe', origen: 'configurado' }),
+    };
+    const auditoria = { registrar: jest.fn().mockResolvedValue(undefined) };
+    const emisorBeta: EmisorPruebaBeta = { obtenerEmisor: jest.fn() };
+    const admin = new FiscalAdminBussnies(
+      {} as never, {} as never, {} as never, {} as never, {} as never, auditoria as never, emisorBeta,
+      conServicios ? (recifrado as never) : undefined,
+      conServicios ? (alertas as never) : undefined,
+    );
+    return { admin, recifrado, alertas, auditoria };
+  }
+
+  it('recifrarSecretos delega con el actor (la auditoría la hace el servicio de re-cifrado)', async () => {
+    const { admin, recifrado } = crear();
+    await expect(admin.recifrarSecretos(ACTOR)).resolves.toEqual({ revisados: 3, recifrados: 3 });
+    expect(recifrado.recifrarTodo).toHaveBeenCalledWith(ACTOR);
+  });
+
+  it('guardar el correo de avisos audita quién lo cambió, con el valor anterior y el nuevo', async () => {
+    const { admin, alertas, auditoria } = crear();
+    const r = await admin.guardarCorreoAlertas('nuevo@x.pe', ACTOR);
+    expect(r.correo).toBe('nuevo@x.pe');
+    expect(alertas.guardarCorreo).toHaveBeenCalledWith('nuevo@x.pe');
+    expect(auditoria.registrar).toHaveBeenCalledWith(expect.objectContaining({
+      accion: 'CONFIG_OPERACION', id_usuario: 1, ip: '127.0.0.1',
+      detalle: { cambio: 'correo_alertas', antes: 'antes@x.pe', despues: 'nuevo@x.pe' },
+    }));
+  });
+
+  it('sin los servicios registrados responde un error claro en lugar de fallar con un TypeError', () => {
+    const { admin } = crear(false);
+    expect(() => admin.recifrarSecretos(ACTOR)).toThrow(/no está disponible/);
+    expect(() => admin.estadoAlertas()).toThrow(/no están disponibles/);
+  });
+});

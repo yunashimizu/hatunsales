@@ -113,6 +113,8 @@ export interface HechosPreparacion {
   credencialesGre: DiagnosticoSecreto;
   /** Productos activos sin código SUNAT; null si no se pudo consultar. Opcional: solo alimenta una advertencia. */
   productosSinCodigoSunat?: number | null;
+  /** Rotación de FISCAL_SECRET_KEY (S7). Opcional: solo alimenta un aviso que no bloquea la activación. */
+  llave?: { anteriorDefinida: boolean; secretosConLlaveAnterior: number } | null;
 }
 
 const BITS_MINIMOS = 1024;
@@ -448,12 +450,19 @@ function advertencias(h: HechosPreparacion): string[] {
       'La emisión de producción está elegida pero el ambiente es BETA: solo se emiten pruebas de SUNAT BETA y únicamente si la emisión de prueba del POS está activa.',
     );
   }
+  if (h.llave?.anteriorDefinida) {
+    lista.push(
+      h.llave.secretosConLlaveAnterior > 0
+        ? `Secretos re-cifrados con la llave vigente: faltan ${h.llave.secretosConLlaveAnterior}. FISCAL_SECRET_KEY_ANTERIOR sigue definida; pulse «Re-cifrar ahora» en Facturación SUNAT › Llave y alertas antes de quitarla.`
+        : 'Todos los secretos ya están cifrados con la llave vigente. Puede quitar FISCAL_SECRET_KEY_ANTERIOR de Railway; guarde antes una copia de la llave vigente fuera de Railway.',
+    );
+  }
   const sinCodigo = h.productosSinCodigoSunat;
   if (typeof sinCodigo === 'number' && sinCodigo > 0) {
     const codigoDefecto = h.snapshot.codigoProductoDefecto;
     lista.push(
       codigoDefecto === null
-        ? `${sinCodigo} producto(s) activo(s) no tienen código de producto SUNAT y no hay código por defecto: desde el 01/01/2027 sus comprobantes no se emitirán. Cárguelo en Productos o fije un código por defecto en Operación y series.`
+        ? `${sinCodigo} producto(s) activo(s) no tienen código de producto SUNAT: sus comprobantes saldrán con el código genérico de su categoría (ninguna venta se bloquea). Desde el 01/01/2027 las reglas de validación de SUNAT (ERR-3496/3506) piden el código de producto; cargue el real en Productos.`
         : `${sinCodigo} producto(s) activo(s) usan el código SUNAT por defecto (${codigoDefecto}); conviene cargar el código real de cada uno.`,
     );
   }

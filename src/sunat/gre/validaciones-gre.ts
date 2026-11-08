@@ -1,7 +1,7 @@
 import { CATALOGO_06_TIPOS_VALIDOS, esUnidadCatalogo03 } from '../catalogos/sunat.catalogos';
 import { DecimalExacto } from '../nucleo/decimal';
 import { errorDocumentoIdentidad, esRucValido } from '../nucleo/documentos-identidad';
-import { esFechaIso, esHoraValida, resolverHoy } from '../nucleo/fechas-fiscales';
+import { esFechaIso, esHoraValida, resolverHoy, sumarDias } from '../nucleo/fechas-fiscales';
 import { NUMERO_MAXIMO_CPE, PATRON_SERIE_GUIA } from '../nucleo/identificadores-cpe';
 import {
   CATALOGO_20_MOTIVOS_TRASLADO,
@@ -9,7 +9,11 @@ import {
   DOCUMENTOS_RELACIONADOS_CON_SERIE,
   MAXIMO_CONDUCTORES_GRE,
   MAXIMO_ITEMS_GRE,
+  MOTIVO_GRE_COMPRA,
   MOTIVO_GRE_OTROS,
+  MAXIMO_DIAS_INICIO_TRASLADO,
+  AVISO_DIAS_INICIO_TRASLADO,
+  MOTIVOS_GRE_DESTINATARIO_PROPIO,
   MOTIVO_GRE_TRASLADO_ESTABLECIMIENTOS,
   MOTIVO_GRE_VENTA,
   MOTIVOS_GRE_SOPORTADOS,
@@ -242,15 +246,32 @@ function validarDestinatario(r: RegistroValidacionGre, doc: DocumentoGre, motivo
   // [A12] campo 9.
   r.textoObligatorio('destinatario.nombre', 'Destinatario', destinatario.nombre, LONGITUD.nombre, 'indique el nombre o la razón social de quien recibe.');
 
-  // [A12] campos 8 y 9: con el motivo 04 el destinatario es el propio remitente.
-  if (motivo === MOTIVO_GRE_TRASLADO_ESTABLECIMIENTOS && doc.remitente) {
+  // [A12] campos 8 y 9: con el motivo 04 el destinatario es el propio remitente (y, [SUPUESTO], también con la compra, 02).
+  if (MOTIVOS_GRE_DESTINATARIO_PROPIO.includes(motivo) && doc.remitente) {
     const ruc = texto(doc.remitente.ruc);
     if (tipo !== '6' || numero !== ruc) {
+      const que = motivo === MOTIVO_GRE_COMPRA ? 'en una compra (motivo 02)' : 'en un traslado entre establecimientos de la misma empresa (motivo 04)';
       r.error(
         'destinatario.numDoc',
-        `Destinatario: en un traslado entre establecimientos de la misma empresa (motivo 04) el destinatario es el propio remitente; use RUC ${ruc} (${texto(doc.remitente.razonSocial)}).`,
+        `Destinatario: ${que} el destinatario es el propio remitente; use RUC ${ruc} (${texto(doc.remitente.razonSocial)}).`,
       );
     }
+  }
+
+  // Compra (02): a quién se le compró. [SUPUESTO: cac:SellerSupplierParty; ver MOTIVOS_GRE_SOPORTADOS.]
+  if (motivo === MOTIVO_GRE_COMPRA) {
+    const proveedor = doc.proveedor;
+    if (!proveedor || typeof proveedor !== 'object') {
+      r.error('proveedor.numDoc', 'Proveedor: en una compra (motivo 02) indique el documento y el nombre o razón social de a quien se le compró.');
+    } else {
+      const tipoProveedor = texto(proveedor.tipoDoc);
+      const numeroProveedor = texto(proveedor.numDoc);
+      const problema = tipoProveedor === '0' ? 'indique el documento de identidad del proveedor' : errorDocumentoIdentidad(tipoProveedor, numeroProveedor);
+      if (problema) r.error(campoDocumento('proveedor', tipoProveedor), `Proveedor: ${problema}.`);
+      r.textoObligatorio('proveedor.nombre', 'Proveedor', proveedor.nombre, LONGITUD.nombre, 'indique el nombre o la razón social del proveedor.');
+    }
+  } else if (doc.proveedor) {
+    r.advertencia('proveedor', 'Proveedor: solo se envía con el motivo 02 (compra); se ignorará.');
   }
 }
 
@@ -268,7 +289,7 @@ function validarEnvio(r: RegistroValidacionGre, doc: DocumentoGre, motivo: strin
   } else if (!MOTIVOS_GRE_SOPORTADOS.includes(motivo)) {
     r.error(
       'envio.motivo',
-      `Motivo de traslado: «${nombreMotivo}» (${motivo}) no está habilitado todavía en el sistema. Use 01 (venta), 04 (traslado entre establecimientos de la misma empresa) o 13 (otros), o emita esa guía en SUNAT Operaciones en Línea.`,
+      `Motivo de traslado: «${nombreMotivo}» (${motivo}) no está habilitado todavía en el sistema. Use 01 (venta), 02 (compra), 04 (traslado entre establecimientos de la misma empresa), 13 (otros), 14 (venta sujeta a confirmación del comprador) o 18 (traslado por emisor itinerante), o emita esa guía en SUNAT Operaciones en Línea.`,
     );
   }
 
@@ -300,10 +321,27 @@ function validarEnvio(r: RegistroValidacionGre, doc: DocumentoGre, motivo: strin
   // [A12] campo 39 (RS 000108-2026): fecha de inicio del traslado igual o posterior a la de emisión.
   if (!esFechaIso(envio.fechaInicioTraslado)) {
     r.error('envio.fechaInicioTraslado', `Fecha de inicio del traslado: "${texto(envio.fechaInicioTraslado)}" no es una fecha válida (formato aaaa-mm-dd).`);
-  } else if (esFechaIso(doc.fechaEmision) && envio.fechaInicioTraslado < doc.fechaEmision) {
-    r.error('envio.fechaInicioTraslado', `Fecha de inicio del traslado: ${envio.fechaInicioTraslado} no puede ser anterior a la fecha de emisión (${doc.fechaEmision}).`);
+  } else if (esFechaIso(doc.fechaEmision)) {
+    const limite = sumarDias(doc.fechaEmision, MAXIMO_DIAS_INICIO_TRASLADO);
+    if (envio.fechaInicioTraslado < doc.fechaEmision) {
+      r.error('envio.fechaInicioTraslado', `Fecha de inicio del traslado: ${envio.fechaInicioTraslado} no puede ser anterior a la fecha de emisión (${doc.fechaEmision}).`);
+    } else if (envio.fechaInicioTraslado > limite) {
+      // [SUPUESTO: el tope de 30 días es criterio del proyecto; SUNAT no lo publica en las reglas que se pudieron leer.]
+      r.error(
+        'envio.fechaInicioTraslado',
+        `Fecha de inicio del traslado: ${envio.fechaInicioTraslado} está a más de ${MAXIMO_DIAS_INICIO_TRASLADO} días de la emisión (${doc.fechaEmision}). Emita la guía cerca del día en que sale la mercadería (como máximo hasta el ${limite}).`,
+      );
+    } else if (envio.fechaInicioTraslado >= sumarDias(doc.fechaEmision, AVISO_DIAS_INICIO_TRASLADO)) {
+      r.advertencia(
+        'envio.fechaInicioTraslado',
+        `Fecha de inicio del traslado: ${envio.fechaInicioTraslado} es ${AVISO_DIAS_INICIO_TRASLADO} días o más después de la emisión; si la mercadería no sale pronto, conviene emitir la guía el día que sale.`,
+      );
+    }
   }
 
+  if (envio.trasladoVehiculoM1L === true && modalidad !== '02') {
+    r.error('envio.trasladoVehiculoM1L', 'Traslado en vehículo M1 o L: solo aplica al transporte privado (modalidad 02); con transporte público el vehículo es del transportista.');
+  }
   if (modalidad === '01') validarTransportePublico(r, doc);
   if (modalidad === '02') validarTransportePrivado(r, doc);
 
@@ -423,6 +461,16 @@ function validarTransportePublico(r: RegistroValidacionGre, doc: DocumentoGre): 
 }
 
 function validarTransportePrivado(r: RegistroValidacionGre, doc: DocumentoGre): void {
+  // Traslado en moto o auto particular (categoría M1 o L): SUNAT no pide vehículo ni conductor. [SUPUESTO: ver INDICADOR_TRASLADO_VEHICULO_M1L.]
+  if (doc.envio.trasladoVehiculoM1L === true) {
+    if (doc.vehiculo || (Array.isArray(doc.conductores) && doc.conductores.length > 0)) {
+      r.advertencia('vehiculo', 'Vehículo y conductores: con el traslado en vehículo de categoría M1 o L (moto o auto particular) no se envían; se ignorarán.');
+    }
+    if (doc.transportista) {
+      r.advertencia('transportista', 'Transportista: en transporte privado no se envían datos de un transportista; se ignorarán.');
+    }
+    return;
+  }
   // [R188] num. 8 y [A12] campo 44: placa del vehículo (alfanumérica de 6 a 8 posiciones).
   const vehiculo = doc.vehiculo;
   if (!vehiculo || typeof vehiculo !== 'object' || !texto(vehiculo.placa)) {

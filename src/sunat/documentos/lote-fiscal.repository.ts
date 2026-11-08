@@ -64,8 +64,19 @@ export interface LoteRegistrado {
   /** Sin reclamo vigente (bloqueado_hasta vacío o vencido). */
   libre: boolean;
   fecha_referencia: string | null;
+  /** Cuándo se registró el lote: desde ahí se cuentan los 7 días de consultas del ticket (S4). */
+  creado_en: string | null;
   zip: Buffer | null;
   lineas: LineaLoteVista[];
+}
+
+/** Lo que devuelve «Liberar» (null si el lote ya no estaba en EXCEPCION con el ticket sin resolver). */
+export interface LoteLiberado {
+  identificador: string;
+  tipo_documento: string;
+  operacion: OperacionLote;
+  /** Comprobantes que volvieron a su estado anterior. */
+  ids_comprobantes: number[];
 }
 
 /** Lo que devuelve el guardado del cierre (null si otro proceso ya había cerrado el lote). */
@@ -93,16 +104,58 @@ export interface CabeceraBaja {
   id_envio_ultimo: number | null;
 }
 
+/** Un comprobante que puede entrar a un resumen diario de adición (condición 1). */
+export interface CandidatoResumen {
+  id_comprobante: number;
+  id_tipo: number;
+  serie: string;
+  numero: number;
+  estado_sunat: string;
+  id_envio_ultimo: number;
+  /** yyyy-mm-dd. */
+  fecha_de_emision: string;
+}
+
+/** Cuántos comprobantes esperan resumen en una fecha de emisión. */
+export interface FechaConResumenPendiente {
+  fecha: string;
+  cantidad: number;
+}
+
 /** Estados de un lote que todavía pueden cambiar con una respuesta o consulta de SUNAT. */
 export const ESTADOS_LOTE_ABIERTOS: readonly string[] = ['ENVIANDO', 'PENDIENTE_REENVIO', 'TICKET_PENDIENTE', 'EXCEPCION'];
 
 const OPERACIONES_LOTE = `('resumen', 'baja')`;
 const ESTADOS_COMPROBANTE_ACEPTADO: readonly string[] = ['ACEPTADO', 'ACEPTADO_OBS'];
+/** Estados de un comprobante que pueden pasar a un resumen diario de adición (según el estado, además, rige el plazo). */
+export const ESTADOS_ADICION: readonly string[] = ['NO_ENVIADO', 'POR_RESUMIR', 'PENDIENTE_REENVIO', 'EXCEPCION'];
+
+/**
+ * Quién puede entrar a un resumen diario de adición ($1 ambiente, $2 hoy en Lima): boletas y notas de serie B de
+ * SUNAT directo, sin aceptar ni anular, dentro de los 7 días de la emisión. Las que esperan el resumen (POR_RESUMIR)
+ * entran siempre; las que fallaron en el envío individual solo cuando ese plazo (5 días) ya venció, porque antes se
+ * reintentan por su camino. Nunca una que SUNAT ya aceptó (lo rechazaría como duplicada) ni una que se está enviando.
+ */
+const ELEGIBLE_ADICION = `
+  c.proveedor_fiscal = 'sunat_directo' AND c.ambiente_fiscal = $1
+  AND c.id_tipo IN (2, 7, 8) AND c.serie ~ '^B'
+  AND c.id_envio_ultimo IS NOT NULL
+  AND COALESCE(c.anulado, FALSE) = FALSE AND COALESCE(c.aceptada_sunat, FALSE) = FALSE
+  AND c.fecha_de_emision BETWEEN ($2::date - 7) AND $2::date
+  AND (c.estado_sunat = 'POR_RESUMIR'
+       OR (c.estado_sunat IN ('NO_ENVIADO', 'PENDIENTE_REENVIO', 'EXCEPCION') AND c.fecha_de_emision < ($2::date - 5)))
+  AND NOT EXISTS (SELECT 1 FROM fiscal_envios e
+                   WHERE e.id_envio = c.id_envio_ultimo AND e.estado = 'ENVIANDO' AND e.bloqueado_hasta > NOW())`;
+
+/** Una vez que SUNAT rechazó el resumen de un comprobante, la tarea no lo vuelve a intentar sola (lo decide una persona). */
+const SIN_RESUMEN_RECHAZADO = `
+  NOT EXISTS (SELECT 1 FROM fiscal_resumen_lineas l
+               WHERE l.id_comprobante = c.id_comprobante AND l.condicion = 1 AND l.estado = 'RECHAZADO')`;
 
 /** Columnas de un lote para operarlo (t = fiscal_envios o el resultado de un UPDATE). */
 const COLUMNAS_LOTE = `
   t.id_envio, t.ambiente, t.operacion, t.tipo_documento, t.estado, t.intento, t.nombre_archivo, t.identificador,
-  t.sunat_ticket, t.codigo_sunat, t.fecha_referencia::text AS fecha_referencia,
+  t.sunat_ticket, t.codigo_sunat, t.fecha_referencia::text AS fecha_referencia, t.creado_en,
   t.respuesta_json #>> '{clasificacion,accion}' AS accion,
   (t.bloqueado_hasta IS NULL OR t.bloqueado_hasta < NOW()) AS libre`;
 
@@ -191,6 +244,7 @@ function aLote(fila: Record<string, any>, lineas: LineaLoteVista[]): LoteRegistr
     accion: fila.accion ?? null,
     libre: fila.libre === true,
     fecha_referencia: fila.fecha_referencia ?? null,
+    creado_en: iso(fila.creado_en),
     zip: Buffer.isBuffer(fila.zip) ? fila.zip : null,
     lineas,
   };
@@ -206,15 +260,20 @@ function restriccionUnica(error: unknown): string | null {
 /**
  * Qué pasa con los comprobantes de un lote cuando se guarda su cierre:
  *  - 'anular': SUNAT aceptó el lote → ANULADO.
+ *  - 'informar': SUNAT aceptó un resumen de adición (condición 1) → los comprobantes quedan ACEPTADO.
  *  - 'ninguno': sigue en curso (ticket, reenvío) o su resultado es incierto (se agotaron las consultas del
  *    ticket: SUNAT pudo haberlo procesado) → el comprobante se queda en BAJA_PENDIENTE para que nadie lo
  *    anule otra vez mientras no se sepa.
  *  - 'restaurar': SUNAT no lo tomó (rechazo, excepción, configuración) → vuelve a su estado anterior.
  */
-export function efectoDelCierre(cierre: Pick<CierreEnvio, 'estado' | 'accion'>): 'anular' | 'ninguno' | 'restaurar' {
-  if (cierre.estado === 'ACEPTADO' || cierre.estado === 'ACEPTADO_OBS') return 'anular';
+export function efectoDelCierre(
+  cierre: Pick<CierreEnvio, 'estado' | 'accion'>,
+  adicion = false,
+): 'anular' | 'informar' | 'ninguno' | 'restaurar' {
+  // En un resumen de adición (condición 1) aceptar significa «SUNAT ya tiene la boleta»: el comprobante queda ACEPTADO.
+  if (cierre.estado === 'ACEPTADO' || cierre.estado === 'ACEPTADO_OBS') return adicion ? 'informar' : 'anular';
   if (cierre.estado === 'ENVIANDO' || cierre.estado === 'PENDIENTE_REENVIO' || cierre.estado === 'TICKET_PENDIENTE') return 'ninguno';
-  if (cierre.accion === 'CONSULTAR_TICKET') return 'ninguno';
+  if (cierre.accion === 'CONSULTAR_TICKET' || cierre.accion === 'LIBERAR') return 'ninguno';
   return 'restaurar';
 }
 
@@ -334,26 +393,31 @@ export class LoteFiscalRepository {
     ];
     await this.envios.insertarArchivos(consultor, idEnvio, null, r.ambiente, artefactos);
 
-    // Una sola sentencia: bloquea las filas, las pasa a BAJA_PENDIENTE y devuelve el estado que tenían.
+    const adicion = r.lineas.length > 0 && r.lineas.every((l) => l.condicion === 1);
     const ids = r.lineas.map((l) => l.id_comprobante);
-    const previos = filasDe<{ id_comprobante: number; previo: string }>(
-      await consultor.query(
-        `WITH previo AS (
-           SELECT c.id_comprobante, c.estado_sunat
-             FROM comprobantes c
-            WHERE c.id_comprobante = ANY($1::int[]) AND c.estado_sunat = ANY($2::text[]) AND COALESCE(c.anulado, FALSE) = FALSE
-            FOR UPDATE
-         )
-         UPDATE comprobantes c SET estado_sunat = 'BAJA_PENDIENTE'
-           FROM previo p WHERE c.id_comprobante = p.id_comprobante
-         RETURNING c.id_comprobante, p.estado_sunat AS previo`,
-        [ids, ESTADOS_COMPROBANTE_ACEPTADO],
-      ),
-    );
+    const previos = adicion
+      ? await this.apartarParaAdicion(consultor, idEnvio, lote.identificador, ids)
+      : filasDe<{ id_comprobante: number; previo: string }>(
+          // Una sola sentencia: bloquea las filas, las pasa a BAJA_PENDIENTE y devuelve el estado que tenían.
+          await consultor.query(
+            `WITH previo AS (
+               SELECT c.id_comprobante, c.estado_sunat
+                 FROM comprobantes c
+                WHERE c.id_comprobante = ANY($1::int[]) AND c.estado_sunat = ANY($2::text[]) AND COALESCE(c.anulado, FALSE) = FALSE
+                FOR UPDATE
+             )
+             UPDATE comprobantes c SET estado_sunat = 'BAJA_PENDIENTE'
+               FROM previo p WHERE c.id_comprobante = p.id_comprobante
+             RETURNING c.id_comprobante, p.estado_sunat AS previo`,
+            [ids, ESTADOS_COMPROBANTE_ACEPTADO],
+          ),
+        );
     if (previos.length !== ids.length) {
       throw new FiscalConfigError(
         'FISCAL_ENVIO_EN_CURSO',
-        'El comprobante ya tiene una baja en curso, ya está anulado o dejó de estar aceptado: actualice la pantalla y revíselo.',
+        adicion
+          ? 'Alguna boleta ya está en otro resumen, ya la aceptó SUNAT o se anuló: actualice la pantalla y vuelva a intentarlo.'
+          : 'El comprobante ya tiene una baja en curso, ya está anulado o dejó de estar aceptado: actualice la pantalla y revíselo.',
       );
     }
     const estadoPrevio = new Map(previos.map((p) => [Number(p.id_comprobante), String(p.previo)]));
@@ -361,7 +425,7 @@ export class LoteFiscalRepository {
     const parametros: unknown[] = [idEnvio];
     const valores = r.lineas.map((linea, indice) => {
       const base = parametros.length;
-      parametros.push(linea.id_comprobante, indice + 1, linea.condicion, estadoPrevio.get(linea.id_comprobante) ?? 'ACEPTADO');
+      parametros.push(linea.id_comprobante, indice + 1, linea.condicion, estadoPrevio.get(linea.id_comprobante) ?? (adicion ? 'POR_RESUMIR' : 'ACEPTADO'));
       return `($1, $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
     });
     await consultor.query(
@@ -369,6 +433,105 @@ export class LoteFiscalRepository {
       parametros,
     );
     return idEnvio;
+  }
+
+  /**
+   * Resumen de adición: bloquea los comprobantes que sigan elegibles, los pasa a TICKET_PENDIENTE (en un resumen en
+   * curso) y devuelve el estado que tenían. Su envío individual deja de reintentarse solo mientras dure el resumen.
+   */
+  private async apartarParaAdicion(
+    consultor: ConsultorTx,
+    idEnvio: number,
+    identificador: string,
+    ids: number[],
+  ): Promise<Array<{ id_comprobante: number; previo: string }>> {
+    const filas = filasDe<{ id_comprobante: number; previo: string; id_envio_individual: number | null }>(
+      await consultor.query(
+        `WITH previo AS (
+           SELECT c.id_comprobante, c.estado_sunat, c.id_envio_ultimo
+             FROM comprobantes c
+            WHERE c.id_comprobante = ANY($1::int[]) AND c.estado_sunat = ANY($2::text[])
+              AND COALESCE(c.anulado, FALSE) = FALSE AND COALESCE(c.aceptada_sunat, FALSE) = FALSE
+            FOR UPDATE
+         )
+         UPDATE comprobantes c SET estado_sunat = 'TICKET_PENDIENTE', estado = 'pendiente'
+           FROM previo p WHERE c.id_comprobante = p.id_comprobante
+         RETURNING c.id_comprobante, p.estado_sunat AS previo, p.id_envio_ultimo AS id_envio_individual`,
+        [ids, ESTADOS_ADICION],
+      ),
+    );
+    const mensaje = `Incluida en el resumen diario ${identificador}: SUNAT lo está procesando.`;
+    const individuales = filas.map((f) => Number(f.id_envio_individual)).filter((id) => Number.isSafeInteger(id) && id > 0);
+    if (individuales.length) {
+      await consultor.query(
+        `UPDATE fiscal_envios e
+            SET estado = 'TICKET_PENDIENTE', proximo_intento_en = NULL, bloqueado_hasta = NULL, ultimo_error = $2::text,
+                respuesta_json = COALESCE(e.respuesta_json, '{}'::jsonb)
+                  || jsonb_build_object(
+                       'clasificacion', jsonb_build_object('estado', 'TICKET_PENDIENTE', 'accion', 'NINGUNA', 'mensajeUsuario', $2::text),
+                       'resumen', jsonb_build_object('id_envio', $3::int, 'identificador', $4::text)),
+                actualizado_en = NOW()
+          WHERE e.id_envio = ANY($1::int[]) AND e.operacion = 'emitir' AND e.estado IN ('POR_RESUMIR', 'PENDIENTE_REENVIO', 'EXCEPCION')`,
+        [individuales, mensaje, idEnvio, identificador],
+      );
+    }
+    return filas.map((f) => ({ id_comprobante: Number(f.id_comprobante), previo: String(f.previo) }));
+  }
+
+  /**
+   * Comprobantes elegibles para un resumen de adición de la fecha de emisión `fecha` (ver ELEGIBLE_ADICION), en orden de
+   * serie y número. `ids` limita la búsqueda; `soloSinRechazo` deja fuera los que SUNAT ya rechazó en un resumen anterior.
+   */
+  async candidatosResumen(p: {
+    ambiente: AmbienteFiscal;
+    hoy: string;
+    fecha: string;
+    ids?: number[];
+    soloSinRechazo?: boolean;
+    limite: number;
+  }): Promise<CandidatoResumen[]> {
+    const filas = filasDe<Record<string, any>>(
+      await this.bd.query(
+        `SELECT c.id_comprobante, c.id_tipo, c.serie, c.numero, c.estado_sunat, c.id_envio_ultimo, c.fecha_de_emision::text AS fecha_de_emision
+           FROM comprobantes c
+          WHERE ${ELEGIBLE_ADICION}
+            AND c.fecha_de_emision = $3::date
+            AND ($4::int[] IS NULL OR c.id_comprobante = ANY($4::int[]))
+            AND ($5::boolean = FALSE OR ${SIN_RESUMEN_RECHAZADO})
+          ORDER BY c.serie, c.numero
+          LIMIT $6`,
+        [p.ambiente, p.hoy, p.fecha, p.ids?.length ? p.ids : null, p.soloSinRechazo === true, Math.max(1, Math.trunc(p.limite))],
+      ),
+    );
+    return filas.map((f) => ({
+      id_comprobante: Number(f.id_comprobante),
+      id_tipo: Number(f.id_tipo),
+      serie: String(f.serie ?? ''),
+      numero: Number(f.numero),
+      estado_sunat: String(f.estado_sunat ?? ''),
+      id_envio_ultimo: Number(f.id_envio_ultimo),
+      fecha_de_emision: String(f.fecha_de_emision ?? ''),
+    }));
+  }
+
+  /**
+   * Fechas de emisión con comprobantes esperando resumen (sin los que SUNAT ya rechazó): 'por_resumir' = las boletas
+   * del modo resumen; 'atrasadas' = las que fallaron en el envío individual y ya pasaron los 5 días. Las más antiguas primero.
+   */
+  async fechasConResumenPendiente(p: { ambiente: AmbienteFiscal; hoy: string; grupo: 'por_resumir' | 'atrasadas'; limite: number }): Promise<FechaConResumenPendiente[]> {
+    const grupo = p.grupo === 'por_resumir' ? `c.estado_sunat = 'POR_RESUMIR'` : `c.estado_sunat <> 'POR_RESUMIR'`;
+    const filas = filasDe<{ fecha: string; cantidad: number }>(
+      await this.bd.query(
+        `SELECT c.fecha_de_emision::text AS fecha, COUNT(*)::int AS cantidad
+           FROM comprobantes c
+          WHERE ${ELEGIBLE_ADICION} AND ${grupo} AND ${SIN_RESUMEN_RECHAZADO}
+          GROUP BY c.fecha_de_emision
+          ORDER BY c.fecha_de_emision
+          LIMIT $3`,
+        [p.ambiente, p.hoy, Math.max(1, Math.trunc(p.limite))],
+      ),
+    );
+    return filas.map((f) => ({ fecha: String(f.fecha), cantidad: Number(f.cantidad) }));
   }
 
   /**
@@ -397,14 +560,14 @@ export class LoteFiscalRepository {
     );
   }
 
-  /** Consulta del ticket: TICKET_PENDIENTE, o EXCEPCION por consultas agotadas (consulta manual). No cambia el estado ni el intento. */
+  /** Consulta del ticket: TICKET_PENDIENTE, o EXCEPCION por consultas agotadas o plazo de 7 días cumplido (consulta manual). No cambia el estado ni el intento. */
   async reclamarConsulta(idEnvio: number): Promise<LoteRegistrado | null> {
     return this.reclamarCon(
       `UPDATE fiscal_envios e
           SET bloqueado_hasta = NOW() + $2::int * INTERVAL '1 second', actualizado_en = NOW()
         WHERE e.id_envio = $1 AND e.operacion IN ${OPERACIONES_LOTE} AND e.sunat_ticket IS NOT NULL
           AND (e.estado = 'TICKET_PENDIENTE'
-               OR (e.estado = 'EXCEPCION' AND e.respuesta_json #>> '{clasificacion,accion}' = 'CONSULTAR_TICKET'))
+               OR (e.estado = 'EXCEPCION' AND e.respuesta_json #>> '{clasificacion,accion}' IN ('CONSULTAR_TICKET', 'LIBERAR')))
           AND (e.bloqueado_hasta IS NULL OR e.bloqueado_hasta < NOW())`,
       idEnvio,
     );
@@ -451,7 +614,6 @@ export class LoteFiscalRepository {
   async completar(idEnvio: number, ambiente: AmbienteFiscal, nombreBase: string, cierre: CierreEnvio): Promise<LoteCerrado | null> {
     const aceptado = cierre.estado === 'ACEPTADO' || cierre.estado === 'ACEPTADO_OBS';
     const sunat = cierre.sunat;
-    const efecto = efectoDelCierre(cierre);
     return this.transacciones.ejecutar(async (tx) => {
       const filas = filasDe<{ tipo_documento: string; operacion: string; identificador: string }>(
         await tx.query(
@@ -496,6 +658,8 @@ export class LoteFiscalRepository {
       }
       await this.envios.insertarArchivos(tx, idEnvio, null, ambiente, cdr);
 
+      const adicion = await this.esAdicion(tx, idEnvio);
+      const efecto = efectoDelCierre(cierre, adicion);
       if (efecto === 'anular') {
         await tx.query(`UPDATE fiscal_resumen_lineas SET estado = 'ACEPTADO' WHERE id_envio = $1`, [idEnvio]);
         await tx.query(
@@ -505,15 +669,21 @@ export class LoteFiscalRepository {
               AND c.id_comprobante IN (SELECT l.id_comprobante FROM fiscal_resumen_lineas l WHERE l.id_envio = $1)`,
           [idEnvio, fila.identificador],
         );
+      } else if (efecto === 'informar') {
+        await this.aceptarAdicion(tx, idEnvio, ambiente, String(fila.identificador), cierre, cdr);
       } else if (efecto === 'restaurar') {
-        // Primero se devuelve el estado que guardó cada línea y recién después se marca la línea como rechazada.
-        await tx.query(
-          `UPDATE comprobantes c SET estado_sunat = l.estado
-             FROM fiscal_resumen_lineas l
-            WHERE l.id_envio = $1 AND l.id_comprobante = c.id_comprobante
-              AND c.estado_sunat = 'BAJA_PENDIENTE' AND l.estado = ANY($2::text[])`,
-          [idEnvio, ESTADOS_COMPROBANTE_ACEPTADO],
-        );
+        if (adicion) {
+          await this.restaurarAdicion(tx, idEnvio, String(fila.identificador), cierre.mensaje);
+        } else {
+          // Primero se devuelve el estado que guardó cada línea y recién después se marca la línea como rechazada.
+          await tx.query(
+            `UPDATE comprobantes c SET estado_sunat = l.estado
+               FROM fiscal_resumen_lineas l
+              WHERE l.id_envio = $1 AND l.id_comprobante = c.id_comprobante
+                AND c.estado_sunat = 'BAJA_PENDIENTE' AND l.estado = ANY($2::text[])`,
+            [idEnvio, ESTADOS_COMPROBANTE_ACEPTADO],
+          );
+        }
         await tx.query(`UPDATE fiscal_resumen_lineas SET estado = 'RECHAZADO' WHERE id_envio = $1`, [idEnvio]);
       }
 
@@ -527,6 +697,59 @@ export class LoteFiscalRepository {
         operacion: operacionDe(fila.operacion),
         identificador: String(fila.identificador),
       };
+    });
+  }
+
+  /**
+   * «Liberar» (S4): SUNAT no resolvió el ticket de un lote y el administrador decide soltarlo. El lote queda
+   * EXCEPCION/LIBERADO, cada comprobante vuelve al estado que guardó su línea (para poder pedir la baja de
+   * nuevo con otro identificador) y la línea se marca RECHAZADA. Todo en UNA transacción junto con la
+   * auditoría (`auditar` recibe el ejecutor de esa transacción). null si el lote ya no estaba en
+   * EXCEPCION con el ticket sin resolver o alguien lo está consultando ahora mismo.
+   */
+  async liberar(
+    idEnvio: number,
+    mensaje: string,
+    json: Record<string, unknown>,
+    auditar: (tx: ConsultorTx, liberado: LoteLiberado) => Promise<void>,
+  ): Promise<LoteLiberado | null> {
+    return this.transacciones.ejecutar(async (tx) => {
+      const filas = filasDe<{ tipo_documento: string; operacion: string; identificador: string }>(
+        await tx.query(
+          `UPDATE fiscal_envios e
+              SET estado = 'EXCEPCION', respuesta_json = COALESCE(e.respuesta_json, '{}'::jsonb) || $2::jsonb,
+                  ultimo_error = $3::text, proximo_intento_en = NULL, bloqueado_hasta = NULL, actualizado_en = NOW()
+            WHERE e.id_envio = $1 AND e.operacion IN ${OPERACIONES_LOTE} AND e.estado = 'EXCEPCION'
+              AND e.respuesta_json #>> '{clasificacion,accion}' IN ('CONSULTAR_TICKET', 'LIBERAR')
+              AND (e.bloqueado_hasta IS NULL OR e.bloqueado_hasta < NOW())
+            RETURNING e.tipo_documento, e.operacion, e.identificador`,
+          [idEnvio, JSON.stringify(json), mensaje],
+        ),
+      );
+      const fila = filas[0];
+      if (!fila) return null;
+      // Primero se devuelve el estado que guardó cada línea y recién después se marca la línea como rechazada.
+      const restaurados = (await this.esAdicion(tx, idEnvio))
+        ? await this.restaurarAdicion(tx, idEnvio, String(fila.identificador), mensaje)
+        : filasDe<{ id_comprobante: number }>(
+            await tx.query(
+              `UPDATE comprobantes c SET estado_sunat = l.estado
+                 FROM fiscal_resumen_lineas l
+                WHERE l.id_envio = $1 AND l.id_comprobante = c.id_comprobante
+                  AND c.estado_sunat = 'BAJA_PENDIENTE' AND l.estado = ANY($2::text[])
+                RETURNING c.id_comprobante`,
+              [idEnvio, ESTADOS_COMPROBANTE_ACEPTADO],
+            ),
+          );
+      await tx.query(`UPDATE fiscal_resumen_lineas SET estado = 'RECHAZADO' WHERE id_envio = $1`, [idEnvio]);
+      const liberado: LoteLiberado = {
+        identificador: String(fila.identificador),
+        tipo_documento: String(fila.tipo_documento),
+        operacion: operacionDe(fila.operacion),
+        ids_comprobantes: restaurados.map((r) => Number(r.id_comprobante)),
+      };
+      await auditar(tx, liberado);
+      return liberado;
     });
   }
 
@@ -587,7 +810,7 @@ export class LoteFiscalRepository {
     return aVista(filas[0], (await this.lineasDe([idEnvio])).get(idEnvio) ?? []);
   }
 
-  /** Último lote del comprobante cuya línea no fue rechazada (en curso o aceptado). */
+  /** Último lote de BAJA o anulación del comprobante cuya línea no fue rechazada (en curso o aceptado); los resúmenes de adición no cuentan. */
   async loteDeComprobante(idComprobante: number): Promise<LoteDeComprobante | null> {
     const filas = filasDe<Record<string, any>>(
       await this.bd.query(
@@ -595,7 +818,7 @@ export class LoteFiscalRepository {
                 COALESCE(e.ultimo_error, e.mensaje_sunat) AS mensaje
            FROM fiscal_resumen_lineas l
            JOIN fiscal_envios e ON e.id_envio = l.id_envio AND e.operacion IN ${OPERACIONES_LOTE}
-          WHERE l.id_comprobante = $1 AND COALESCE(l.estado, '') <> 'RECHAZADO'
+          WHERE l.id_comprobante = $1 AND l.condicion = 3 AND COALESCE(l.estado, '') <> 'RECHAZADO'
           ORDER BY e.id_envio DESC LIMIT 1`,
         [idComprobante],
       ),
@@ -636,6 +859,106 @@ export class LoteFiscalRepository {
   }
 
   // ── Interno ──────────────────────────────────────────────────────────────
+
+  /** ¿El lote es un resumen diario de adición (todas sus líneas con la condición 1)? */
+  private async esAdicion(consultor: ConsultorTx, idEnvio: number): Promise<boolean> {
+    const filas = filasDe<{ adicion: boolean | null }>(
+      await consultor.query(`SELECT BOOL_AND(l.condicion = 1) AS adicion FROM fiscal_resumen_lineas l WHERE l.id_envio = $1`, [idEnvio]),
+    );
+    return filas[0]?.adicion === true;
+  }
+
+  /**
+   * SUNAT aceptó el resumen de adición: sus boletas quedan ACEPTADO (con el mensaje del resumen) y el envío individual de
+   * cada una también. La constancia del resumen se copia al envío de cada boleta para que se pueda descargar desde ella.
+   * El comprobante conserva su envío (id_envio_ultimo) para no perder su XML, su documento ni la posibilidad de anularlo.
+   */
+  private async aceptarAdicion(
+    tx: ConsultorTx,
+    idEnvio: number,
+    ambiente: AmbienteFiscal,
+    identificador: string,
+    cierre: CierreEnvio,
+    cdr: ArchivoNuevo[],
+  ): Promise<void> {
+    await tx.query(`UPDATE fiscal_resumen_lineas SET estado = 'ACEPTADO' WHERE id_envio = $1`, [idEnvio]);
+    const mensaje = `Informada en el resumen diario ${identificador}: ${cierre.mensaje}`;
+    const filas = filasDe<{ id_comprobante: number; id_envio_individual: number | null }>(
+      await tx.query(
+        `UPDATE comprobantes c
+            SET estado = 'emitido', estado_sunat = $2::varchar, aceptada_sunat = TRUE,
+                sunat_description = LEFT($3::text, 250), sunat_responsecode = COALESCE($4::text, c.sunat_responsecode),
+                emitido_en = COALESCE(c.emitido_en, NOW()), error_mensaje = NULL, sunat_soap_error = NULL
+          WHERE c.estado_sunat = 'TICKET_PENDIENTE'
+            AND c.id_comprobante IN (SELECT l.id_comprobante FROM fiscal_resumen_lineas l WHERE l.id_envio = $1)
+          RETURNING c.id_comprobante, c.id_envio_ultimo AS id_envio_individual`,
+        [idEnvio, cierre.estado, mensaje, cierre.sunat?.codigo ?? null],
+      ),
+    );
+    const individuales = filas.map((f) => ({ idComprobante: Number(f.id_comprobante), idEnvio: Number(f.id_envio_individual) }))
+      .filter((f) => Number.isSafeInteger(f.idEnvio) && f.idEnvio > 0);
+    if (!individuales.length) return;
+    await tx.query(
+      `UPDATE fiscal_envios e
+          SET estado = $2::varchar, fecha_respuesta = NOW(), ultimo_error = NULL, mensaje_sunat = LEFT($3::text, 1000),
+              codigo_sunat = COALESCE($4::varchar, e.codigo_sunat), proximo_intento_en = NULL, bloqueado_hasta = NULL,
+              respuesta_json = COALESCE(e.respuesta_json, '{}'::jsonb)
+                || jsonb_build_object(
+                     'clasificacion', jsonb_build_object('estado', $2::text, 'accion', 'NINGUNA', 'mensajeUsuario', $3::text),
+                     'resumen', jsonb_build_object('id_envio', $5::int, 'identificador', $6::text)),
+              actualizado_en = NOW()
+        WHERE e.id_envio = ANY($1::int[]) AND e.operacion = 'emitir' AND e.estado = 'TICKET_PENDIENTE'`,
+      [individuales.map((f) => f.idEnvio), cierre.estado, mensaje, cierre.sunat?.codigo ?? null, idEnvio, identificador],
+    );
+    if (cdr.length) {
+      for (const f of individuales) {
+        const propios = filasDe<{ n: number }>(
+          await tx.query(`SELECT COUNT(*)::int AS n FROM fiscal_artifacts a WHERE a.id_envio = $1 AND a.tipo_artifacto IN ('cdr_xml', 'cdr_zip')`, [f.idEnvio]),
+        );
+        if (Number(propios[0]?.n ?? 0) === 0) await this.envios.insertarArchivos(tx, f.idEnvio, f.idComprobante, ambiente, cdr);
+      }
+    }
+  }
+
+  /**
+   * El resumen de adición no tuvo efecto (rechazado, descartado o liberado): las boletas vuelven al estado que tenían y su
+   * envío individual también, con el motivo. Devuelve los comprobantes restaurados.
+   */
+  private async restaurarAdicion(tx: ConsultorTx, idEnvio: number, identificador: string, mensaje: string): Promise<Array<{ id_comprobante: number }>> {
+    const motivo = `El resumen diario ${identificador} no se aceptó: ${mensaje}`;
+    const restaurados = filasDe<{ id_comprobante: number; id_envio_individual: number | null; estado_sunat: string }>(
+      await tx.query(
+        `UPDATE comprobantes c
+            SET estado_sunat = l.estado, estado = CASE WHEN l.estado = 'EXCEPCION' THEN 'error' ELSE 'pendiente' END,
+                sunat_description = LEFT($3::text, 250)
+           FROM fiscal_resumen_lineas l
+          WHERE l.id_envio = $1 AND l.id_comprobante = c.id_comprobante
+            AND c.estado_sunat = 'TICKET_PENDIENTE' AND l.estado = ANY($2::text[])
+          RETURNING c.id_comprobante, c.id_envio_ultimo AS id_envio_individual, c.estado_sunat`,
+        [idEnvio, ESTADOS_ADICION, motivo],
+      ),
+    );
+    const individuales = restaurados.filter((r) => r.id_envio_individual !== null && Number(r.id_envio_individual) > 0);
+    if (individuales.length) {
+      await tx.query(
+        `UPDATE fiscal_envios e
+            SET estado = c.estado_sunat, ultimo_error = LEFT($3::text, 1000), proximo_intento_en = NULL, bloqueado_hasta = NULL,
+                respuesta_json = COALESCE(e.respuesta_json, '{}'::jsonb)
+                  || jsonb_build_object(
+                       'clasificacion', jsonb_build_object(
+                         'estado', c.estado_sunat,
+                         'accion', CASE WHEN c.estado_sunat IN ('POR_RESUMIR', 'EXCEPCION') THEN 'RESUMIR'
+                                        WHEN c.estado_sunat = 'PENDIENTE_REENVIO' THEN 'REINTENTAR' ELSE 'NINGUNA' END,
+                         'mensajeUsuario', $3::text)),
+                actualizado_en = NOW()
+           FROM comprobantes c
+          WHERE c.id_envio_ultimo = e.id_envio AND e.id_envio = ANY($1::int[]) AND e.operacion = 'emitir'
+            AND e.estado = 'TICKET_PENDIENTE' AND c.id_comprobante = ANY($2::int[])`,
+        [individuales.map((r) => Number(r.id_envio_individual)), individuales.map((r) => Number(r.id_comprobante)), motivo],
+      );
+    }
+    return restaurados.map((r) => ({ id_comprobante: Number(r.id_comprobante) }));
+  }
 
   /** Ejecuta el UPDATE de reclamo ($1 = id, $2 = segundos de reclamo) y devuelve el lote tomado con su ZIP. */
   private async reclamarCon(update: string, idEnvio: number): Promise<LoteRegistrado | null> {

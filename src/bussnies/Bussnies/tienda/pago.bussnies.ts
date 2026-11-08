@@ -1,8 +1,9 @@
-import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { DatosPago, PedidoRepository } from '../../../repository/Repository/tienda/pedido.repository';
 import { VentaTiendaRepository } from '../../../repository/Repository/tienda/venta-tienda.repository';
 import { StockTiendaRepository } from '../../../repository/Repository/tienda/stock-tienda.repository';
 import { PedidoBussnies } from './pedido.bussnies';
+import { PedidoComprobanteBussnies } from './pedido-comprobante.bussnies';
 import { EventoWebhook, PASARELA_PAGO } from '../../../util/pasarela/pasarela.interface';
 import type { PasarelaPago } from '../../../util/pasarela/pasarela.interface';
 import { RegistrarPagoRequest } from '../../../models/model/tienda/pedido.request';
@@ -33,6 +34,8 @@ export class PagoBussnies {
     private readonly stockRepo: StockTiendaRepository,
     private readonly pedidos: PedidoBussnies,
     @Inject(PASARELA_PAGO) private readonly pasarela: PasarelaPago,
+    /** Boleta o factura de la venta del pedido (S5). Sin él, el pago se confirma igual y la venta queda sin comprobante. */
+    @Optional() private readonly comprobantePedido?: PedidoComprobanteBussnies,
   ) {}
 
   /** Datos que el frontend necesita para montar el formulario de pago. */
@@ -285,11 +288,21 @@ export class PagoBussnies {
     const cuando = (await this.stockRepo.configuracion('tienda_generar_venta')) ?? 'pagado';
     if (cuando !== 'pagado') return true;
 
+    let idVenta: number | null = null;
     try {
-      await this.ventaRepo.generarDesdePedido(idPedido);
+      idVenta = await this.ventaRepo.generarDesdePedido(idPedido);
     } catch (error: any) {
       // El cliente ya pagó; no le devolvemos un error por un problema contable.
       this.log.error(`No se pudo generar la venta del pedido ${idPedido}: ${error?.message}`);
+    }
+
+    // Comprobante de la venta: aparte de la venta y sin deshacer nada si falla (queda en «Ventas sin comprobante»).
+    if (idVenta && this.comprobantePedido) {
+      try {
+        await this.comprobantePedido.emitirDePedido(idPedido, idVenta);
+      } catch (error: any) {
+        this.log.error(`Pedido ${idPedido}: no se pudo emitir el comprobante de la venta ${idVenta}: ${error?.message}`);
+      }
     }
     return true;
   }

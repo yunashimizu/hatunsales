@@ -40,6 +40,8 @@ export interface ComprobanteResponse {
   aviso?: string | null;
   /** true: el comprobante quedó firmado y guardado y su envío a SUNAT sigue en segundo plano (fiscal_envio_diferido). */
   envio_diferido?: boolean;
+  /** true: modo «resumen» de boletas: quedó firmada y guardada y SUNAT la recibe en el resumen diario, no al cobrar. */
+  por_resumen?: boolean;
   /** Último día (yyyy-mm-dd, Lima) para que SUNAT reciba el comprobante por envío individual. */
   fecha_limite_envio?: string | null;
   id_venta?: number | null;
@@ -93,6 +95,8 @@ export interface ComprobanteListadoResponse {
   /** Pasó la fecha límite de envío individual sin que SUNAT lo aceptara. */
   vencido?: boolean;
   puede_reintentar?: boolean;
+  /** «Reintentar ahora»: envío en EXCEPCION (requiere revisión) dentro de plazo; solo lo ejecuta un administrador. */
+  puede_reintentar_ahora?: boolean;
   puede_recuperar_cdr?: boolean;
   /** Solo lo ejecuta un administrador. */
   puede_confirmar_manual?: boolean;
@@ -101,6 +105,8 @@ export interface ComprobanteListadoResponse {
   puede_anular: boolean;
   /** Se puede anular dando de baja en SUNAT (RA o resumen), sin nota de crédito: aceptado y dentro de los 7 días. */
   puede_anular_sin_nota?: boolean;
+  /** «Informar por resumen»: boleta que espera su resumen diario o que venció su envío individual y está dentro de los 7 días. */
+  puede_informar_por_resumen?: boolean;
 }
 
 /** Envío a SUNAT tal como se muestra en el detalle. */
@@ -229,12 +235,16 @@ export interface ComprobanteDetalleResponse {
   archivos: string[];
   aviso: string | null;
   puede_reintentar: boolean;
+  /** «Reintentar ahora»: envío en EXCEPCION (requiere revisión) dentro de plazo; solo lo ejecuta un administrador. */
+  puede_reintentar_ahora: boolean;
   puede_recuperar_cdr: boolean;
   puede_confirmar_manual: boolean;
   puede_nota_credito: boolean;
   puede_anular: boolean;
   /** Se puede anular dando de baja en SUNAT (RA o resumen), sin nota de crédito: aceptado y dentro de los 7 días. */
   puede_anular_sin_nota: boolean;
+  /** «Informar por resumen»: boleta que espera su resumen diario o que venció su envío individual y está dentro de los 7 días. */
+  puede_informar_por_resumen: boolean;
   /** Baja o resumen vigente del comprobante (en curso o aceptado); null si no tiene. */
   baja: LoteDeComprobante | null;
 }

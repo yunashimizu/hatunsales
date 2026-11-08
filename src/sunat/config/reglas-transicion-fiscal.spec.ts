@@ -220,4 +220,31 @@ describe('reglas de transición del PUT /fiscal/configuracion', () => {
     expect(r.pares).toEqual({});
     expect(r.eventos).toEqual([]);
   });
+
+  it('un solo interruptor «enviar al cobrar / en segundo plano»: guarda fiscal_envio_diferido y audita con la clave nueva', () => {
+    const r = aplicar(ACTIVO, { envio_diferido: true });
+    expect(r.futuro.envioDiferido).toBe(true);
+    expect(r.pares).toEqual({ fiscal_envio_diferido: 'true' });
+    expect(r.eventos).toHaveLength(1);
+    expect(r.eventos[0].detalle).toMatchObject({ cambios: { envio_diferido: { de: false, a: true } } });
+    expect(JSON.stringify(r.eventos[0].detalle)).not.toContain('envio_en_linea');
+  });
+
+  it('compatibilidad: envio_en_linea (clave vieja) equivale a envio_diferido invertido y no se escribe', () => {
+    const apagado = aplicar(ACTIVO, { envio_en_linea: false });
+    expect(apagado.futuro.envioDiferido).toBe(true);
+    expect(apagado.pares).toEqual({ fiscal_envio_diferido: 'true' });
+    expect(aplicar(ACTIVO, { envio_en_linea: true }).futuro.envioDiferido).toBe(false);
+    // Si llegan las dos, manda la nueva.
+    expect(aplicar(ACTIVO, { envio_en_linea: false, envio_diferido: false }).futuro.envioDiferido).toBe(false);
+  });
+
+  it('modo de boletas con hora: guarda fiscal_boletas_modo y fiscal_resumen_hora y los audita', () => {
+    const r = aplicar(ACTIVO, { boletas_modo: 'resumen', resumen_hora: '22:15' });
+    expect(r.futuro).toMatchObject({ boletasModo: 'resumen', resumenHora: '22:15' });
+    expect(r.pares).toEqual({ fiscal_boletas_modo: 'resumen', fiscal_resumen_hora: '22:15' });
+    expect(r.eventos[0].detalle).toMatchObject({
+      cambios: { boletas_modo: { de: 'individual', a: 'resumen' }, resumen_hora: { de: '23:30', a: '22:15' } },
+    });
+  });
 });

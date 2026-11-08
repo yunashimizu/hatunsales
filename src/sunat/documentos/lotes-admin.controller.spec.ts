@@ -7,6 +7,7 @@ import { RolesGuard } from '../../guards/roles.guard';
 import { crearValidationPipe } from '../../util/http/validacion/validation-pipe.factory';
 import { FiscalConfigError } from '../config/fiscal-errores';
 import { FiscalEsquemaService } from '../config/fiscal-esquema.service';
+import { RelojFiscal } from '../config/reloj-fiscal';
 import { LotesAdminController } from './lotes-admin.controller';
 import { LotesFiscales } from './lotes.contrato';
 
@@ -19,8 +20,11 @@ describe('LotesAdminController (HTTP): bajas RA y resúmenes RC', () => {
     obtener: jest.fn(async (id: number) => (id === 1 ? { id_envio: 1, identificador: 'RA-20261105-00001' } : null)),
     archivo: jest.fn(),
     reintentar: jest.fn(async (id: number) => ({ id_envio: id, estado: 'TICKET_PENDIENTE' })),
+    liberar: jest.fn(async (id: number) => ({ id_envio: id, estado: 'EXCEPCION' })),
+    crearResumenAdicion: jest.fn(async (p: { fecha_emision: string }) => ({ id_envio: 55, estado: 'TICKET_PENDIENTE', fecha_emision: p.fecha_emision, comprobantes: 3 }) as unknown),
   };
   const esquema = { exigir: jest.fn(async () => undefined) };
+  const reloj = { fechaLima: () => '2026-11-05' };
 
   beforeAll(async () => {
     const modulo = await Test.createTestingModule({
@@ -28,6 +32,7 @@ describe('LotesAdminController (HTTP): bajas RA y resúmenes RC', () => {
       providers: [
         { provide: LotesFiscales, useValue: lotes },
         { provide: FiscalEsquemaService, useValue: esquema },
+        { provide: RelojFiscal, useValue: reloj },
       ],
     })
       .overrideGuard(JwtGuard)
@@ -117,5 +122,159 @@ describe('LotesAdminController (HTTP): bajas RA y resúmenes RC', () => {
     expect(bloqueada.body).toMatchObject({ codigo: 'FISCAL_EMISION_BLOQUEADA' });
 
     await request(app.getHttpServer()).post('/fiscal/lotes/1.5/reintentar').expect(400);
+  });
+
+  it('«Liberar»: solo con la auditoría disponible, con el usuario y la IP del token, y los errores fiscales traducidos', async () => {
+    const ok = await request(app.getHttpServer()).post('/fiscal/lotes/8/liberar').expect(200);
+    expect(ok.body).toMatchObject({ id_envio: 8, estado: 'EXCEPCION' });
+    expect(lotes.liberar).toHaveBeenCalledWith(8, expect.objectContaining({ id_usuario: 7, nombre: 'Moisés' }));
+    expect(esquema.exigir).toHaveBeenCalledWith('emision', 'auditoria');
+
+    lotes.liberar.mockRejectedValueOnce(new FiscalConfigError('FISCAL_LIBERAR_NO_PERMITIDO', 'No se puede liberar.'));
+    const noPermitido = await request(app.getHttpServer()).post('/fiscal/lotes/8/liberar').expect(409);
+    expect(noPermitido.body).toMatchObject({ codigo: 'FISCAL_LIBERAR_NO_PERMITIDO' });
+    await request(app.getHttpServer()).post('/fiscal/lotes/uno/liberar').expect(400);
+  });
+});
+
+describe('LotesAdminController: POST /fiscal/lotes/resumen («Enviar resumen del día»)', () => {
+  let app: INestApplication;
+  let usuario: Record<string, unknown> = ADMIN;
+  const lotes = {
+    crearResumenAdicion: jest.fn(async (p: { fecha_emision: string }): Promise<unknown> => ({ id_envio: 55, estado: 'TICKET_PENDIENTE', fecha_emision: p.fecha_emision, comprobantes: 3 })),
+  };
+  const esquema = { exigir: jest.fn(async () => undefined) };
+
+  beforeAll(async () => {
+    const modulo = await Test.createTestingModule({
+      controllers: [LotesAdminController],
+      providers: [
+        { provide: LotesFiscales, useValue: lotes },
+        { provide: FiscalEsquemaService, useValue: esquema },
+        { provide: RelojFiscal, useValue: { fechaLima: () => '2026-11-05' } },
+      ],
+    })
+      .overrideGuard(JwtGuard)
+      .useValue({
+        canActivate: (contexto: ExecutionContext) => {
+          contexto.switchToHttp().getRequest().user = usuario;
+          return true;
+        },
+      })
+      .compile();
+    app = modulo.createNestApplication();
+    app.useGlobalPipes(crearValidationPipe());
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    usuario = ADMIN;
+  });
+
+  it('crea el resumen de la fecha pedida (o de hoy si no llega), a nombre del administrador y con la bitácora lista', async () => {
+    const respuesta = await request(app.getHttpServer()).post('/fiscal/lotes/resumen').send({ fecha: '2026-11-03' }).expect(200);
+    expect(respuesta.body).toMatchObject({ id_envio: 55, fecha_emision: '2026-11-03', comprobantes: 3 });
+    expect(respuesta.headers['cache-control']).toBe('no-store');
+    expect(lotes.crearResumenAdicion).toHaveBeenCalledWith({
+      fecha_emision: '2026-11-03',
+      actor: expect.objectContaining({ id_usuario: 7, nombre: 'Moisés' }),
+      origen: 'manual',
+    });
+    expect(esquema.exigir).toHaveBeenCalledWith('emision', 'auditoria');
+
+    await request(app.getHttpServer()).post('/fiscal/lotes/resumen').send({}).expect(200);
+    expect(lotes.crearResumenAdicion).toHaveBeenLastCalledWith(expect.objectContaining({ fecha_emision: '2026-11-05' }));
+  });
+
+  it('valida la fecha, avisa en español cuando no hay nada por informar y traduce el plazo vencido a 409', async () => {
+    await request(app.getHttpServer()).post('/fiscal/lotes/resumen').send({ fecha: '03/11/2026' }).expect(400);
+    expect(lotes.crearResumenAdicion).not.toHaveBeenCalled();
+
+    lotes.crearResumenAdicion.mockResolvedValueOnce(null);
+    const vacio = await request(app.getHttpServer()).post('/fiscal/lotes/resumen').send({ fecha: '2026-11-04' }).expect(409);
+    expect(vacio.body).toMatchObject({ codigo: 'FISCAL_RESUMEN_NO_PERMITIDO', message: expect.stringContaining('No hay boletas por informar del 04/11') });
+
+    lotes.crearResumenAdicion.mockRejectedValueOnce(new FiscalConfigError('FISCAL_RESUMEN_FUERA_DE_PLAZO', 'Ya pasaron los 7 días'));
+    const tarde = await request(app.getHttpServer()).post('/fiscal/lotes/resumen').send({ fecha: '2026-10-20' }).expect(409);
+    expect(tarde.body).toMatchObject({ codigo: 'FISCAL_RESUMEN_FUERA_DE_PLAZO' });
+  });
+
+  it('solo el administrador (RolesGuard real): un vendedor o cajero recibe 403 y no se crea nada', async () => {
+    const real = await Test.createTestingModule({
+      controllers: [LotesAdminController],
+      providers: [
+        { provide: LotesFiscales, useValue: lotes },
+        { provide: FiscalEsquemaService, useValue: esquema },
+        { provide: RelojFiscal, useValue: { fechaLima: () => '2026-11-05' } },
+      ],
+    })
+      .overrideGuard(JwtGuard)
+      .useValue({
+        canActivate: (contexto: ExecutionContext) => {
+          contexto.switchToHttp().getRequest().user = usuario;
+          return true;
+        },
+      })
+      .compile();
+    const otra = real.createNestApplication();
+    otra.useGlobalPipes(crearValidationPipe());
+    await otra.init();
+    try {
+      for (const rol of ['vendedor', 'caja']) {
+        usuario = { ...ADMIN, rol };
+        await request(otra.getHttpServer()).post('/fiscal/lotes/resumen').send({ fecha: '2026-11-03' }).expect(403);
+      }
+      expect(lotes.crearResumenAdicion).not.toHaveBeenCalled();
+    } finally {
+      await otra.close();
+    }
+  });
+});
+
+describe('LotesAdminController: «Liberar» exige rol de administrador (RolesGuard real)', () => {
+  let app: INestApplication;
+  let usuario: Record<string, unknown>;
+  const lotes = { liberar: jest.fn(async (id: number) => ({ id_envio: id })) };
+
+  beforeAll(async () => {
+    const modulo = await Test.createTestingModule({
+      controllers: [LotesAdminController],
+      providers: [
+        { provide: LotesFiscales, useValue: lotes },
+        { provide: FiscalEsquemaService, useValue: { exigir: jest.fn(async () => undefined) } },
+        { provide: RelojFiscal, useValue: { fechaLima: () => '2026-11-05' } },
+      ],
+    })
+      .overrideGuard(JwtGuard)
+      .useValue({
+        canActivate: (contexto: ExecutionContext) => {
+          contexto.switchToHttp().getRequest().user = usuario;
+          return true;
+        },
+      })
+      .compile();
+    app = modulo.createNestApplication();
+    app.useGlobalPipes(crearValidationPipe());
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('un vendedor o cajero recibe 403 y no se libera nada; el administrador sí', async () => {
+    for (const rol of ['vendedor', 'caja']) {
+      usuario = { ...ADMIN, rol };
+      await request(app.getHttpServer()).post('/fiscal/lotes/8/liberar').expect(403);
+    }
+    expect(lotes.liberar).not.toHaveBeenCalled();
+    usuario = { ...ADMIN, rol: 'admin' };
+    await request(app.getHttpServer()).post('/fiscal/lotes/8/liberar').expect(200);
+    expect(lotes.liberar).toHaveBeenCalledTimes(1);
   });
 });

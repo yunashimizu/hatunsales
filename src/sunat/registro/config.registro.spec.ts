@@ -7,6 +7,7 @@ import { FiscalConfigService } from '../config/fiscal-config.service';
 import { GestorConfigFiscalService } from '../config/gestor-config-fiscal.service';
 import { SaludFiscalService } from '../config/salud-fiscal.service';
 import { CredencialesGreService } from '../seguridad/credenciales-gre.service';
+import { EMISOR_PRUEBA_BETA } from '../config/fiscal-tokens';
 import { REGISTRO_SUNAT_CONFIG } from './config.registro';
 
 /**
@@ -28,6 +29,8 @@ describe('REGISTRO_SUNAT_CONFIG', () => {
     return Test.createTestingModule({
       controllers: REGISTRO_SUNAT_CONFIG.controladores,
       providers: [
+        // Lo aporta REGISTRO_SUNAT_EMISION en la aplicación real (FiscalAdminBussnies lo pide).
+        { provide: EMISOR_PRUEBA_BETA, useValue: { obtenerEmisor: jest.fn() } },
         ...REGISTRO_SUNAT_CONFIG.proveedores,
         ConfiguracionRepository,
         { provide: getDataSourceToken('pgConnection'), useValue: dataSourceVacio },

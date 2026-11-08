@@ -1396,6 +1396,24 @@ export class VentaRepository {
   }
 
   /**
+   * Lo que dejó la anulación de una venta que YA está anulada, leído de la base: si hubo stock que volver al
+   * almacén (salidas registradas o, en ventas antiguas, líneas con producto) y cuántas cuentas por cobrar se
+   * cerraron. Sirve cuando la anulación la aplicó otro proceso (la nota o la baja que SUNAT aceptó) y quien
+   * responde al usuario no vio su resultado: responder «stock_devuelto: false» sería falso (S9.3).
+   */
+  async efectosDeAnulacion(idVenta: number, consultor?: Consultor): Promise<{ stock_devuelto: boolean; cxc_cerradas: number }> {
+    const ejecutor: Consultor = consultor ?? this.dataSource;
+    const conStockSalida = await this.esquema.tiene('ventaStockSalida');
+    const conCredito = await this.esquema.tiene('credito');
+    const contar = async (sql: string): Promise<number> => Number(filasDe<{ n: number | string }>(await ejecutor.query(sql, [idVenta]))[0]?.n ?? 0);
+    const salidas = conStockSalida ? await contar('SELECT COUNT(*)::int AS n FROM venta_stock_salida WHERE id_venta = $1') : 0;
+    const lineas =
+      salidas > 0 ? 0 : await contar('SELECT COUNT(*)::int AS n FROM detalle_venta WHERE id_venta = $1 AND id_producto IS NOT NULL');
+    const cxc = conCredito ? await contar(`SELECT COUNT(*)::int AS n FROM cuentas_por_cobrar WHERE id_venta = $1 AND estado = 'anulado'`) : 0;
+    return { stock_devuelto: salidas > 0 || lineas > 0, cxc_cerradas: cxc };
+  }
+
+  /**
    * Candado de la venta: el primero del orden fijo (venta → salidas de stock → inventario → cuentas
    * por cobrar) que comparten la anulación y los efectos de las notas de crédito. null si no existe.
    */

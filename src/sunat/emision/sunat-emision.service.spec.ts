@@ -18,6 +18,7 @@ import { FabricaClienteSoapSunat } from '../nucleo/soap/sunat-soap-client';
 import { ErrorTransporteSoap } from '../nucleo/soap/transporte-soap';
 import type { CredencialesSolService } from '../seguridad/credenciales-sol.service';
 import { EventoEnvioCompletado, OyenteEnvioFiscal, OyentesEnvioFiscal } from './emision.contrato';
+import { ESPERA_LENTA_MINUTOS } from './emision.tipos';
 import type { CierreEnvio, EnvioRegistrado } from './emision.tipos';
 import type { EnvioFiscalRepository, RegistroEnvioNuevo } from './envio-fiscal.repository';
 import { NUMERO_PRUEBA_CREDENCIALES, SunatEmisionService } from './sunat-emision.service';
@@ -81,10 +82,10 @@ class EnviosMemoria {
     return { ...f, zip: conZip ? f.zip : null };
   });
 
-  reclamarReintento = jest.fn(async (id: number) => {
+  reclamarReintento = jest.fn(async (id: number, forzar = false) => {
     const f = this.filas.get(id);
     if (!f || !f.libre) return null;
-    if (!((f.estado === 'PENDIENTE_REENVIO' && f.accion !== 'RECUPERAR_CDR') || f.estado === 'ENVIANDO')) return null;
+    if (!((f.estado === 'PENDIENTE_REENVIO' && f.accion !== 'RECUPERAR_CDR') || f.estado === 'ENVIANDO' || (f.estado === 'EXCEPCION' && forzar))) return null;
     const anterior = f.estado;
     Object.assign(f, { estado: 'ENVIANDO', intento: f.intento + 1, libre: false });
     return { ...f, estado_anterior: anterior };
@@ -122,7 +123,7 @@ class EnviosMemoria {
 
   marcarAceptadoManual = jest.fn(async (_tx: unknown, id: number, _mensaje: string, json: Record<string, unknown>) => {
     const f = this.filas.get(id);
-    const incierto = !!f && ((f.estado === 'PENDIENTE_REENVIO' && f.accion === 'RECUPERAR_CDR') || (f.estado === 'ENVIANDO' && f.libre));
+    const incierto = !!f && ((f.estado === 'PENDIENTE_REENVIO' && f.accion === 'RECUPERAR_CDR') || (['ENVIANDO', 'EXCEPCION'].includes(f.estado) && f.libre));
     if (!f || !incierto) return null;
     Object.assign(f, { estado: 'ACEPTADO', accion: 'NINGUNA', libre: true });
     this.manual = json;
@@ -540,7 +541,7 @@ describe('SunatEmisionService.reintentar (D5.1, D5.2)', () => {
     expect(resultado.mensaje).toMatch(/^Fuera de plazo: emita un comprobante nuevo/);
   });
 
-  it('D5.2: fuera de plazo una boleta se informa por resumen diario (no se reenvía por sendBill)', async () => {
+  it('D5.2: fuera de plazo una boleta no se reenvía por sendBill; pasados los 7 días solo queda la nota de crédito', async () => {
     const { servicio, envios, transporte, reloj } = crear();
     const doc = boleta('B001', 51);
     const preparado = servicio.preparar(doc, material);
@@ -550,8 +551,46 @@ describe('SunatEmisionService.reintentar (D5.1, D5.2)', () => {
     const resultado = await servicio.reintentar(envio.id_envio);
 
     expect(transporte.enviar).not.toHaveBeenCalled();
-    expect(resultado.estado).toBe('EXCEPCION');
-    expect(resultado.mensaje).toMatch(/^Fuera del plazo de envío individual: informe la boleta por resumen diario en SUNAT/);
+    expect(resultado).toMatchObject({ estado: 'EXCEPCION', accion: 'EMITIR_NUEVO' });
+    expect(resultado.mensaje).toMatch(/^El plazo de envío individual de B001-51 venció el 18\/10 y ya pasaron los 7 días del resumen diario\. Si el cliente reclama el comprobante, anúlelo con nota de crédito y emita uno nuevo\./);
+  });
+
+  it('S2: una boleta que venció el envío individual pero sigue dentro de los 7 días queda para el resumen diario (RESUMIR), sin nota de crédito', async () => {
+    const { servicio, envios, transporte, reloj } = crear();
+    const doc = boleta('B001', 52);
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'produccion', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true });
+    // Emitida el 13/10: el envío individual vence el 18/10; el 19/10 lleva 6 días y el resumen admite hasta el 20/10.
+    reloj.momento = new Date('2026-10-19T15:00:00Z');
+
+    const resultado = await servicio.reintentar(envio.id_envio);
+
+    expect(transporte.enviar).not.toHaveBeenCalled();
+    expect(resultado).toMatchObject({ estado: 'EXCEPCION', accion: 'RESUMIR' });
+    expect(resultado.mensaje).toMatch(/venció el 18\/10\. Se informará a SUNAT en el próximo resumen diario \(hasta el 20\/10\)/);
+    expect(resultado.mensaje).toMatch(/«Informar por resumen»/);
+    expect(resultado.mensaje).not.toMatch(/nota de crédito/);
+
+    // El 21/10 ya pasaron los 7 días: otra boleta en el mismo caso solo se resuelve con nota de crédito.
+    const tarde = envios.agregar({ ambiente: 'produccion', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true });
+    reloj.momento = new Date('2026-10-21T15:00:00Z');
+    expect(await servicio.reintentar(tarde.id_envio)).toMatchObject({ estado: 'EXCEPCION', accion: 'EMITIR_NUEVO' });
+  });
+
+  it('D5.2: fuera de plazo una factura de producción: si SUNAT no la tiene → emitir nuevo; si la consulta no es concluyente → recuperar constancia', async () => {
+    const { servicio, envios, transporte, reloj } = crear();
+    const doc = factura('F001', 53);
+    const preparado = servicio.preparar(doc, material);
+    const sinRegistro = envios.agregar({ ambiente: 'produccion', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true });
+    const sinRespuesta = envios.agregar({ ambiente: 'produccion', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true });
+    reloj.momento = new Date('2026-10-20T15:00:00Z');
+    transporte.enviar
+      .mockResolvedValueOnce({ estadoHttp: 200, cuerpo: respuestaGetStatusCdr('0011', 'El comprobante no existe') })
+      .mockRejectedValueOnce(new ErrorTransporteSoap('ETIMEDOUT', 'Tiempo agotado'));
+
+    expect(await servicio.reintentar(sinRegistro.id_envio)).toMatchObject({ estado: 'EXCEPCION', accion: 'EMITIR_NUEVO' });
+    expect(await servicio.reintentar(sinRespuesta.id_envio)).toMatchObject({ estado: 'EXCEPCION', accion: 'RECUPERAR_CDR' });
+    expect(transporte.enviar.mock.calls.every((c) => c[0].soapAction === GET_STATUS_CDR)).toBe(true);
   });
 
   it('D5.2: fuera de plazo una factura de producción consulta antes su CDR y, si SUNAT la tiene, la completa', async () => {
@@ -598,7 +637,7 @@ describe('SunatEmisionService.reintentar (D5.1, D5.2)', () => {
     expect(transporte.enviar).not.toHaveBeenCalled();
   });
 
-  it('backoff 2-5-15-30-60 min y, tras 6 intentos, EXCEPCION para revisar a mano', async () => {
+  it('backoff 2-5-15-30-60 min y, tras 6 intentos dentro del plazo, sigue cada 60 min (no es un callejón)', async () => {
     const { servicio, envios, transporte } = crear();
     transporte.enviar.mockRejectedValue(new ErrorTransporteSoap('ETIMEDOUT', 'Tiempo agotado'));
     const doc = factura();
@@ -612,9 +651,144 @@ describe('SunatEmisionService.reintentar (D5.1, D5.2)', () => {
     expect(envios.cierres.map((c) => c.cierre.proximoIntentoMin)).toEqual([5, 30]);
 
     const ultimo = await servicio.reintentar(conIntento(5).id_envio, 'tarea');
-    expect(ultimo).toMatchObject({ estado: 'EXCEPCION', accion: 'NINGUNA' });
-    expect(ultimo.mensaje).toMatch(/Se intentó 6 veces .* revise manualmente/);
+    expect(ultimo).toMatchObject({ estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR' });
+    expect(ultimo.mensaje).toMatch(/SUNAT no respondió en 6 intentos; se seguirá intentando cada hora hasta el 16\/10 \(plazo de envío\)/);
+    expect(envios.cierres.at(-1)!.cierre.proximoIntentoMin).toBe(ESPERA_LENTA_MINUTOS);
+
+    // Los siguientes (7.º, 8.º…) conservan la espera lenta.
+    const septimo = await servicio.reintentar(conIntento(6).id_envio, 'tarea');
+    expect(septimo).toMatchObject({ estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR' });
+    expect(envios.cierres.at(-1)!.cierre.proximoIntentoMin).toBe(60);
   });
+
+  it('con una respuesta que pide reintentar (no solo timeout) también sigue cada hora dentro del plazo', async () => {
+    const decision: ClasificacionRespuesta = { estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', mensajeUsuario: 'SUNAT está ocupada.', bloqueaEmision: false };
+    const { servicio, envios, transporte } = crear({ clasificador: clasificadorFijo(decision) });
+    transporte.enviar.mockResolvedValue({ estadoHttp: 200, cuerpo: '<x/>' } as { estadoHttp: number; cuerpo: string });
+    const doc = boleta('BB01', 61);
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'beta', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true, intento: 5 });
+
+    const resultado = await servicio.reintentar(envio.id_envio, 'tarea');
+
+    expect(resultado).toMatchObject({ estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR' });
+    expect(resultado.mensaje).toMatch(/hasta el 18\/10 \(plazo de envío\)\. Última respuesta: SUNAT está ocupada\./);
+    expect(envios.cierres[0].cierre.proximoIntentoMin).toBe(60);
+  });
+
+  it('al vencer el plazo en pleno reintento pasa a EXCEPCION con la acción del tipo: factura de BETA → emitir nuevo', async () => {
+    const { servicio, envios, transporte, reloj } = crear();
+    transporte.enviar.mockRejectedValue(new ErrorTransporteSoap('ETIMEDOUT', 'Tiempo agotado'));
+    const doc = factura();
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'beta', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true, intento: 6 });
+    // El intento empieza dentro del plazo (16/10) y termina pasada la medianoche (17/10).
+    jest.spyOn(reloj, 'fechaLima').mockReturnValueOnce('2026-10-16').mockReturnValue('2026-10-17');
+
+    const resultado = await servicio.reintentar(envio.id_envio, 'tarea');
+
+    expect(resultado).toMatchObject({ estado: 'EXCEPCION', accion: 'EMITIR_NUEVO' });
+    expect(resultado.mensaje).toMatch(/venció el 16\/10/);
+    expect(envios.cierres[0].cierre.proximoIntentoMin).toBeNull();
+  });
+
+  it('al vencer el plazo, una factura de PRODUCCIÓN queda para «Recuperar constancia» (RECUPERAR_CDR) y una boleta, para el resumen diario', async () => {
+    const { servicio, envios, transporte, reloj } = crear();
+    transporte.enviar.mockRejectedValue(new ErrorTransporteSoap('ETIMEDOUT', 'Tiempo agotado'));
+    const doc = factura('F001', 62);
+    const preparado = servicio.preparar(doc, material);
+    const deFactura = envios.agregar({ ambiente: 'produccion', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true, intento: 6 });
+    const bol = boleta('B001', 63);
+    const bolPreparada = servicio.preparar(bol, material);
+    const deBoleta = envios.agregar({ ambiente: 'produccion', documento: bol, preparado: bolPreparada, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true, intento: 6 });
+    jest.spyOn(reloj, 'fechaLima').mockReturnValueOnce('2026-10-16').mockReturnValue('2026-10-17');
+
+    const factura1 = await servicio.reintentar(deFactura.id_envio, 'tarea');
+    expect(factura1).toMatchObject({ estado: 'EXCEPCION', accion: 'RECUPERAR_CDR' });
+    expect(factura1.mensaje).toMatch(/«Recuperar constancia»/);
+
+    jest.spyOn(reloj, 'fechaLima').mockReturnValueOnce('2026-10-18').mockReturnValue('2026-10-19');
+    const boleta1 = await servicio.reintentar(deBoleta.id_envio, 'tarea');
+    // Emitida el 13/10 y hoy 19/10: aún dentro de los 7 días del resumen diario.
+    expect(boleta1).toMatchObject({ estado: 'EXCEPCION', accion: 'RESUMIR' });
+    expect(boleta1.mensaje).toMatch(/próximo resumen diario/);
+  });
+
+  it('reintento manual: queda auditado con el usuario y el estado previo; si no se puede auditar, igual se reintenta', async () => {
+    const { servicio, envios, transporte, auditoria } = crear();
+    const doc = factura();
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'beta', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true, intento: 3 });
+    transporte.enviar.mockResolvedValue({ estadoHttp: 200, cuerpo: respuestaSendBill(cdrDe(doc)) });
+
+    await servicio.reintentar(envio.id_envio, 'reintento', { actor: { id_usuario: 7, nombre: 'Moisés', ip: '10.0.0.5' } });
+
+    expect(auditoria.registrar).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accion: 'FISCAL_REINTENTO_MANUAL',
+        id_usuario: 7,
+        entidad: 'fiscal_envios',
+        id_entidad: envio.id_envio,
+        ip: '10.0.0.5',
+        detalle: expect.objectContaining({ estado_previo: 'PENDIENTE_REENVIO', forzado: false, intento: 3, usuario: 'Moisés' }),
+      }),
+    );
+    expect(envios.reclamarReintento).toHaveBeenCalledWith(envio.id_envio, false);
+
+    // La tarea no es un reintento manual: no audita.
+    auditoria.registrar.mockClear();
+    const otro = envios.agregar({ ambiente: 'beta', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true });
+    await servicio.reintentar(otro.id_envio, 'tarea');
+    expect(auditoria.registrar).not.toHaveBeenCalled();
+
+    // Un fallo de la bitácora no impide el reintento común.
+    auditoria.registrar.mockRejectedValueOnce(new Error('bitácora caída'));
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const tercero = envios.agregar({ ambiente: 'beta', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true });
+    await expect(servicio.reintentar(tercero.id_envio, 'reintento', { actor: { id_usuario: 7, nombre: 'Moisés', ip: null } })).resolves.toMatchObject({ aceptado: true });
+  });
+
+  it('EXCEPCION: «Reintentar ahora» (forzar) la reintenta, la audita con forzado y el estado previo, y sube el intento', async () => {
+    const { servicio, envios, transporte, auditoria } = crear();
+    const doc = factura();
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'beta', documento: doc, preparado, estado: 'EXCEPCION', accion: 'NINGUNA', libre: true, intento: 6 });
+    transporte.enviar.mockResolvedValueOnce({ estadoHttp: 200, cuerpo: respuestaSendBill(cdrDe(doc)) });
+
+    const resultado = await servicio.reintentar(envio.id_envio, 'reintento', { forzar: true, actor: { id_usuario: 7, nombre: 'Moisés', ip: null } });
+
+    expect(resultado).toMatchObject({ estado: 'ACEPTADO', aceptado: true });
+    expect(envios.reclamarReintento).toHaveBeenCalledWith(envio.id_envio, true);
+    expect(auditoria.registrar).toHaveBeenCalledWith(
+      expect.objectContaining({ accion: 'FISCAL_REINTENTO_MANUAL', detalle: expect.objectContaining({ forzado: true, estado_previo: 'EXCEPCION', intento: 6 }) }),
+    );
+    expect(envios.filas.get(envio.id_envio)!.intento).toBe(7);
+  });
+
+  it('EXCEPCION sin forzar (o desde la tarea) no se reintenta; forzar exige conocer al administrador y auditar primero', async () => {
+    const { servicio, envios, transporte, auditoria } = crear();
+    const doc = factura();
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'beta', documento: doc, preparado, estado: 'EXCEPCION', accion: 'NINGUNA', libre: true, intento: 6 });
+
+    await expect(servicio.reintentar(envio.id_envio, 'reintento', { actor: { id_usuario: 7, nombre: 'Moisés', ip: null } })).rejects.toMatchObject({
+      codigo: 'FISCAL_REENVIO_NO_PERMITIDO',
+      message: expect.stringMatching(/Reintentar ahora/),
+    });
+    await expect(servicio.reintentar(envio.id_envio, 'tarea', { forzar: true, actor: { id_usuario: 7, nombre: 'Moisés', ip: null } })).rejects.toMatchObject({
+      codigo: 'FISCAL_REENVIO_NO_PERMITIDO',
+    });
+    // Sin usuario no se fuerza.
+    await expect(servicio.reintentar(envio.id_envio, 'reintento', { forzar: true })).rejects.toMatchObject({ codigo: 'FISCAL_CONFIG_INVALIDA' });
+    expect(auditoria.registrar).not.toHaveBeenCalled();
+
+    // Si la bitácora falla, el reintento forzado no se hace (se audita antes de tocar nada).
+    auditoria.registrar.mockRejectedValueOnce(new Error('bitácora caída'));
+    await expect(servicio.reintentar(envio.id_envio, 'reintento', { forzar: true, actor: { id_usuario: 7, nombre: 'Moisés', ip: null } })).rejects.toThrow('bitácora caída');
+    expect(envios.reclamarReintento).not.toHaveBeenCalled();
+    expect(transporte.enviar).not.toHaveBeenCalled();
+  });
+
 });
 
 describe('SunatEmisionService.recuperarCdr y confirmarAceptadoManual (D4, D5.1)', () => {
@@ -672,6 +846,67 @@ describe('SunatEmisionService.recuperarCdr y confirmarAceptadoManual (D4, D5.1)'
     expect(await servicio.recuperarCdr(envio.id_envio)).toMatchObject({ aceptado: true, estado: 'ACEPTADO' });
   });
 
+  it('«Recuperar CDR» queda auditado (FISCAL_CDR_RECUPERADO) con el usuario, el estado y si llegó la constancia', async () => {
+    const { servicio, envios, transporte, auditoria } = crear();
+    const doc = factura('F001', 83);
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'produccion', documento: doc, preparado, estado: 'ENVIANDO', libre: true, codigo_sunat: 'ETIMEDOUT' });
+    transporte.enviar.mockResolvedValueOnce({ estadoHttp: 200, cuerpo: respuestaGetStatusCdr('0001', 'Existe', cdrDe(doc)) });
+
+    await servicio.recuperarCdr(envio.id_envio, { actor: { id_usuario: 7, nombre: 'Moisés', ip: '10.0.0.5' } });
+
+    expect(auditoria.registrar).toHaveBeenCalledTimes(1);
+    expect(auditoria.registrar).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accion: 'FISCAL_CDR_RECUPERADO',
+        id_usuario: 7,
+        entidad: 'fiscal_envios',
+        id_entidad: envio.id_envio,
+        ip: '10.0.0.5',
+        detalle: expect.objectContaining({ usuario: 'Moisés', estado_previo: 'ENVIANDO', estado: 'ACEPTADO', aceptado: true, constancia_recibida: true }),
+      }),
+    );
+  });
+
+  it('«Recuperar CDR» sin constancia (SUNAT no lo tiene) también se audita, con constancia_recibida en falso', async () => {
+    const { servicio, envios, transporte, auditoria } = crear();
+    const doc = factura('F001', 84);
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'produccion', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'RECUPERAR_CDR', libre: true });
+    transporte.enviar.mockResolvedValueOnce({ estadoHttp: 200, cuerpo: respuestaGetStatusCdr('0011', 'El comprobante no existe') });
+
+    await servicio.recuperarCdr(envio.id_envio, { actor: { id_usuario: 7, nombre: null, ip: null } });
+
+    expect(auditoria.registrar).toHaveBeenCalledWith(
+      expect.objectContaining({ accion: 'FISCAL_CDR_RECUPERADO', detalle: expect.objectContaining({ constancia_recibida: false, accion: 'REINTENTAR' }) }),
+    );
+  });
+
+  it('si la consulta no se puede hacer (BETA, boleta) no hay nada que auditar; y un fallo de la bitácora no tumba la consulta', async () => {
+    const { servicio, envios, transporte, auditoria } = crear();
+    const doc = factura();
+    const preparado = servicio.preparar(doc, material);
+    const beta = envios.agregar({ ambiente: 'beta', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'RECUPERAR_CDR', libre: true });
+    await expect(servicio.recuperarCdr(beta.id_envio, { actor: { id_usuario: 7, nombre: 'Moisés', ip: null } })).rejects.toMatchObject({ codigo: 'FISCAL_CONSULTA_NO_DISPONIBLE' });
+    expect(auditoria.registrar).not.toHaveBeenCalled();
+
+    const doc2 = factura('F001', 85);
+    const envio = envios.agregar({ ambiente: 'produccion', documento: doc2, preparado: servicio.preparar(doc2, material), estado: 'ENVIANDO', libre: true, codigo_sunat: 'ETIMEDOUT' });
+    transporte.enviar.mockResolvedValueOnce({ estadoHttp: 200, cuerpo: respuestaGetStatusCdr('0001', 'Existe', cdrDe(doc2)) });
+    auditoria.registrar.mockRejectedValueOnce(new Error('bitácora caída'));
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    await expect(servicio.recuperarCdr(envio.id_envio, { actor: { id_usuario: 7, nombre: 'Moisés', ip: null } })).resolves.toMatchObject({ aceptado: true });
+  });
+
+  it('la consulta interna del sistema (sin actor) no escribe en la bitácora', async () => {
+    const { servicio, envios, transporte, auditoria } = crear();
+    const doc = factura('F001', 86);
+    const envio = envios.agregar({ ambiente: 'produccion', documento: doc, preparado: servicio.preparar(doc, material), estado: 'ENVIANDO', libre: true, codigo_sunat: 'ETIMEDOUT' });
+    transporte.enviar.mockResolvedValueOnce({ estadoHttp: 200, cuerpo: respuestaGetStatusCdr('0001', 'Existe', cdrDe(doc)) });
+    await servicio.recuperarCdr(envio.id_envio);
+    expect(auditoria.registrar).not.toHaveBeenCalled();
+  });
+
   it('si SUNAT no lo tiene (0011) queda listo para reenviarlo; nunca reenvía desde la consulta', async () => {
     const { servicio, envios, transporte } = crear();
     const doc = factura('F001', 82);
@@ -720,6 +955,31 @@ describe('SunatEmisionService.recuperarCdr y confirmarAceptadoManual (D4, D5.1)'
     });
     expect(envios.manual).toMatchObject({ confirmacion_manual: { id_usuario: 7 }, clasificacion: { estado: 'ACEPTADO' } });
     expect(eventos).toEqual([expect.objectContaining({ origen: 'manual', estado: 'ACEPTADO', aceptado: true })]);
+  });
+});
+
+describe('SunatEmisionService.confirmarAceptadoManual desde EXCEPCION (S1)', () => {
+  it('un envío que requiere revisión (EXCEPCION) se confirma con la nota del administrador, auditado', async () => {
+    const { servicio, envios, auditoria } = crear();
+    const doc = boleta('B001', 91);
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'produccion', documento: doc, preparado, estado: 'EXCEPCION', accion: 'EMITIR_NUEVO', libre: true, intento: 6 });
+
+    const resultado = await servicio.confirmarAceptadoManual(envio.id_envio, 7, 'Aparece aceptada en SOL, consulta de validez');
+
+    expect(resultado).toMatchObject({ estado: 'ACEPTADO', aceptado: true });
+    expect((auditoria.registrar.mock.calls[0] as unknown as [Record<string, unknown>])[0]).toMatchObject({
+      accion: 'ENVIO_CONFIRMADO_MANUAL',
+      detalle: { evidencia: { estado_anterior: 'EXCEPCION', accion_anterior: 'EMITIR_NUEVO', intento: 6 } },
+    });
+  });
+
+  it('una EXCEPCION con un reclamo vigente (alguien la está tocando) no se confirma', async () => {
+    const { servicio, envios } = crear();
+    const doc = boleta('B001', 92);
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'produccion', documento: doc, preparado, estado: 'EXCEPCION', accion: 'NINGUNA', libre: false });
+    await expect(servicio.confirmarAceptadoManual(envio.id_envio, 7, 'Verificado en SOL')).rejects.toMatchObject({ codigo: 'FISCAL_CONFIRMACION_NO_PERMITIDA' });
   });
 });
 

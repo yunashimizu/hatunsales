@@ -19,7 +19,11 @@ class RelojPrueba extends RelojFiscal {
 
 const BLOQUEO = { codigo: '0102', motivo: 'SUNAT rechazó la clave SOL.', fecha: '2026-10-13T14:00:00.000Z' };
 
-function crear(valores: Record<string, string>, operativo: Record<string, unknown> | null) {
+function crear(
+  valores: Record<string, string>,
+  operativo: Record<string, unknown> | null,
+  recifrado?: { estadoLlave: jest.Mock },
+) {
   const snapshot = snapshotPrueba(valores);
   const config = {
     snapshot: jest.fn(async () => snapshot),
@@ -50,6 +54,7 @@ function crear(valores: Record<string, string>, operativo: Record<string, unknow
     new RelojPrueba(),
     moduleRef as unknown as ModuleRef,
     new NotificadorCambiosFiscales(),
+    recifrado as never,
   );
   return { servicio };
 }
@@ -96,5 +101,20 @@ describe('GET /fiscal/estado (SaludFiscalService)', () => {
 
     const sinModulo = crear(VALORES_COMPLETOS, null);
     expect(await sinModulo.servicio.estado()).toMatchObject({ emision: null, cola: null, plazos: null, bloqueo: null });
+  });
+});
+
+describe('GET /fiscal/estado · llave (S7)', () => {
+  const valores = { ...VALORES_COMPLETOS, fiscal_proveedor: 'sunat_directo' };
+
+  it('expone si la llave anterior sigue definida y cuántos secretos dependen de ella', async () => {
+    const estadoLlave = jest.fn(async () => ({ anterior_definida: true, secretos_con_llave_anterior: 2 }));
+    const { servicio } = crear(valores, null, { estadoLlave });
+    expect((await servicio.estado()).llave).toEqual({ anterior_definida: true, secretos_con_llave_anterior: 2 });
+  });
+
+  it('sin el servicio de re-cifrado devuelve la llave en cero (no rompe)', async () => {
+    const { servicio } = crear(valores, null);
+    expect((await servicio.estado()).llave).toEqual({ anterior_definida: false, secretos_con_llave_anterior: 0 });
   });
 });

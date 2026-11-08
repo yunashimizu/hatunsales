@@ -24,6 +24,7 @@ import {
   EnvioCerrado,
   EnvioRegistrado,
   ESTADOS_ENVIO_ABIERTOS,
+  MENSAJE_POR_RESUMIR,
   SEGUNDOS_RECLAMO,
   TIPOS_CPE_EMISION,
 } from './emision.tipos';
@@ -37,6 +38,11 @@ export interface RegistroEnvioNuevo {
   idUsuario: number | null;
   /** yyyy-mm-dd (Lima). */
   fechaLimiteEnvio: string;
+  /**
+   * Modo «resumen diario»: el envío queda POR_RESUMIR (firmado y guardado, sin mandarlo a SUNAT) con la acción
+   * RESUMIR; la tarea lo informa después en un resumen diario (RC, condición 1).
+   */
+  porResumir?: boolean;
 }
 
 export interface ArchivoNuevo {
@@ -76,7 +82,8 @@ const FILTRO_CPE = `t.operacion = 'emitir' AND t.tipo_documento IN ('01', '03', 
 const COLUMNAS_VISTA = `
   t.id_envio, t.ambiente, t.tipo_documento, t.nombre_archivo, t.estado, t.codigo_sunat, t.mensaje_sunat,
   t.respuesta_json #>> '{clasificacion,accion}' AS accion_sunat, t.id_comprobante, t.creado_en, t.actualizado_en,
-  t.intento, t.proximo_intento_en, t.bloqueado_hasta,
+  t.intento, t.proximo_intento_en, t.bloqueado_hasta, t.ultimo_error,
+  t.respuesta_json #>> '{documento,fechaEmision}' AS fecha_emision,
   t.respuesta_json #>> '{documento,serie}' AS serie,
   CASE WHEN (t.respuesta_json #>> '{documento,numero}') ~ '^[0-9]{1,9}$'
        THEN (t.respuesta_json #>> '{documento,numero}')::int END AS numero,
@@ -148,7 +155,18 @@ function aVista(fila: Record<string, any>): EnvioVista {
     proximo_intento_en: iso(fila.proximo_intento_en),
     bloqueado_hasta: iso(fila.bloqueado_hasta),
     actualizado_en: iso(fila.actualizado_en),
+    ultimo_error: fila.ultimo_error ?? null,
+    fecha_limite_envio: limiteDeEnvio(fila),
   };
+}
+
+/** Último día para enviar el comprobante por sendBill, calculado de su documento (null si el envío no lo conserva). */
+function limiteDeEnvio(fila: Record<string, any>): string | null {
+  const tipo = String(fila.tipo_documento ?? '');
+  const serie = typeof fila.serie === 'string' ? fila.serie : '';
+  const emision = typeof fila.fecha_emision === 'string' ? fila.fecha_emision : '';
+  if (!['01', '03', '07', '08'].includes(tipo) || !serie || !/^\d{4}-\d{2}-\d{2}$/.test(emision)) return null;
+  return fechaLimiteEnvioIndividual(tipo, serie, emision);
 }
 
 /** Índice o restricción de un error de unicidad de PostgreSQL (QueryFailedError copia los campos del driver). */
@@ -194,15 +212,24 @@ export class EnvioFiscalRepository {
       cadena_qr: preparado.cadenaQr,
       advertencias: preparado.advertencias,
     };
+    const porResumir = r.porResumir === true && r.idComprobante !== null;
+    const registro: Record<string, unknown> = { ...datos };
+    if (porResumir) {
+      registro.clasificacion = { estado: 'POR_RESUMIR', accion: 'RESUMIR', mensajeUsuario: MENSAJE_POR_RESUMIR };
+    }
     let filas: Array<{ id_envio: number }>;
     try {
       filas = filasDe<{ id_envio: number }>(
         await consultor.query(
+          // Normal: ENVIANDO con un reclamo de 60 s para el primer envío. POR_RESUMIR: no se envía, sin intento ni reclamo.
           `INSERT INTO fiscal_envios
              (tipo_documento, ambiente, proveedor, operacion, intento, estado, nombre_archivo, identificador,
-              id_usuario, id_comprobante, fecha_envio, bloqueado_hasta, hash_xml, respuesta_json)
-           VALUES ($1, $2, 'sunat_directo', 'emitir', 1, 'ENVIANDO', $3, $4, $5, $6, NOW(),
-                   NOW() + $7::int * INTERVAL '1 second', $8, $9::jsonb)
+              id_usuario, id_comprobante, fecha_envio, bloqueado_hasta, hash_xml, respuesta_json, ultimo_error)
+           VALUES ($1, $2, 'sunat_directo', 'emitir', CASE WHEN $10::boolean THEN 0 ELSE 1 END,
+                   CASE WHEN $10::boolean THEN 'POR_RESUMIR' ELSE 'ENVIANDO' END, $3, $4, $5, $6,
+                   CASE WHEN $10::boolean THEN NULL ELSE NOW() END,
+                   CASE WHEN $10::boolean THEN NULL ELSE NOW() + $7::int * INTERVAL '1 second' END,
+                   $8, $9::jsonb, CASE WHEN $10::boolean THEN $11::text ELSE NULL END)
            RETURNING id_envio`,
           [
             documento.tipo,
@@ -213,7 +240,9 @@ export class EnvioFiscalRepository {
             r.idComprobante,
             SEGUNDOS_RECLAMO,
             sha256(preparado.xmlFirmado),
-            JSON.stringify(datos),
+            JSON.stringify(registro),
+            porResumir,
+            MENSAJE_POR_RESUMIR,
           ],
         ),
       );
@@ -229,7 +258,7 @@ export class EnvioFiscalRepository {
       { tipo: 'zip', nombre: preparado.zip.nombreZip, mime: 'application/zip', contenido: preparado.zip.zip },
     ]);
 
-    if (r.idComprobante !== null) await this.marcarComprobanteEnviando(consultor, r, idEnvio);
+    if (r.idComprobante !== null) await this.marcarComprobanteEnviando(consultor, r, idEnvio, porResumir);
     return idEnvio;
   }
 
@@ -258,8 +287,9 @@ export class EnvioFiscalRepository {
   /**
    * Reintento seguro (D5.1): PENDIENTE_REENVIO que no espera recuperar el CDR, o ENVIANDO con el reclamo
    * vencido (resultado incierto). FOR UPDATE SKIP LOCKED: si otra instancia lo está tomando, se salta.
+   * `forzar` (solo el reintento manual del administrador) admite además un envío en EXCEPCION.
    */
-  async reclamarReintento(idEnvio: number): Promise<EnvioRegistrado | null> {
+  async reclamarReintento(idEnvio: number, forzar = false): Promise<EnvioRegistrado | null> {
     const filas = filasDe<Record<string, any>>(
       await this.bd.query(
         `WITH objetivo AS (
@@ -268,7 +298,8 @@ export class EnvioFiscalRepository {
             WHERE e.id_envio = $1 AND e.operacion = 'emitir'
               AND ((e.estado = 'PENDIENTE_REENVIO'
                     AND (e.respuesta_json #>> '{clasificacion,accion}') IS DISTINCT FROM 'RECUPERAR_CDR')
-                   OR e.estado = 'ENVIANDO')
+                   OR e.estado = 'ENVIANDO'
+                   OR (e.estado = 'EXCEPCION' AND $3::boolean))
               AND (e.bloqueado_hasta IS NULL OR e.bloqueado_hasta < NOW())
             FOR UPDATE SKIP LOCKED
          ), tomado AS (
@@ -282,7 +313,7 @@ export class EnvioFiscalRepository {
          )
          SELECT ${COLUMNAS_ENVIO}, t.estado_anterior, ${COLUMNA_ZIP}
            FROM tomado t LEFT JOIN comprobantes c ON c.id_comprobante = t.id_comprobante`,
-        [idEnvio, SEGUNDOS_RECLAMO],
+        [idEnvio, SEGUNDOS_RECLAMO, forzar],
       ),
     );
     return filas[0] ? aEnvio(filas[0]) : null;
@@ -409,7 +440,7 @@ export class EnvioFiscalRepository {
 
   /**
    * Aceptación confirmada por el administrador tras verificar en SUNAT (D5.1), dentro de su transacción
-   * (la auditoría va en la misma). Solo envíos de resultado incierto; null si cambió de estado.
+   * (la auditoría va en la misma). Solo envíos de resultado incierto o en EXCEPCION; null si cambió de estado.
    */
   async marcarAceptadoManual(
     ejecutor: EjecutorSql,
@@ -424,7 +455,7 @@ export class EnvioFiscalRepository {
                 ultimo_error = NULL, bloqueado_hasta = NULL, proximo_intento_en = NULL, actualizado_en = NOW()
           WHERE e.id_envio = $1 AND e.operacion = 'emitir'
             AND ((e.estado = 'PENDIENTE_REENVIO' AND e.respuesta_json #>> '{clasificacion,accion}' = 'RECUPERAR_CDR')
-                 OR (e.estado = 'ENVIANDO' AND (e.bloqueado_hasta IS NULL OR e.bloqueado_hasta < NOW())))
+                 OR (e.estado IN ('ENVIANDO', 'EXCEPCION') AND (e.bloqueado_hasta IS NULL OR e.bloqueado_hasta < NOW())))
           RETURNING e.id_comprobante, e.tipo_documento, e.ambiente,
                     ARRAY(SELECT DISTINCT a.tipo_artifacto FROM fiscal_artifacts a
                            WHERE a.id_envio = e.id_envio AND a.contenido IS NOT NULL) AS archivos`,
@@ -536,11 +567,12 @@ export class EnvioFiscalRepository {
                     OR (t.estado = 'PENDIENTE_REENVIO' AND t.respuesta_json #>> '{clasificacion,accion}' = 'RECUPERAR_CDR')))::int AS inciertos,
            (SELECT COUNT(*) FROM comprobantes c
              WHERE c.ambiente_fiscal = $1 AND c.proveedor_fiscal = 'sunat_directo' AND COALESCE(c.anulado, false) = false
-               AND c.estado_sunat NOT IN ('ACEPTADO', 'ACEPTADO_OBS', 'RECHAZADO', 'ANULADO', 'BAJA_PENDIENTE')
+               AND c.estado_sunat NOT IN ('ACEPTADO', 'ACEPTADO_OBS', 'RECHAZADO', 'ANULADO', 'BAJA_PENDIENTE', 'POR_RESUMIR', 'TICKET_PENDIENTE')
                AND c.fecha_limite_envio = $2::date)::int AS vencen_hoy,
            (SELECT COUNT(*) FROM comprobantes c
              WHERE c.ambiente_fiscal = $1 AND c.proveedor_fiscal = 'sunat_directo' AND COALESCE(c.anulado, false) = false
-               AND c.estado_sunat NOT IN ('ACEPTADO', 'ACEPTADO_OBS', 'RECHAZADO', 'ANULADO', 'BAJA_PENDIENTE')
+               AND c.estado_sunat NOT IN ('ACEPTADO', 'ACEPTADO_OBS', 'RECHAZADO', 'ANULADO', 'BAJA_PENDIENTE', 'TICKET_PENDIENTE')
+               AND (c.estado_sunat <> 'POR_RESUMIR' OR c.fecha_de_emision < $2::date - 7)
                AND c.fecha_limite_envio < $2::date)::int AS vencidos`,
         [ambiente, hoy],
       ),
@@ -615,7 +647,7 @@ export class EnvioFiscalRepository {
     });
   }
 
-  private async marcarComprobanteEnviando(consultor: ConsultorTx, r: RegistroEnvioNuevo, idEnvio: number): Promise<void> {
+  private async marcarComprobanteEnviando(consultor: ConsultorTx, r: RegistroEnvioNuevo, idEnvio: number, porResumir = false): Promise<void> {
     const { documento, preparado } = r;
     const parametros: unknown[] = [
       r.idComprobante,
@@ -628,6 +660,7 @@ export class EnvioFiscalRepository {
       r.fechaLimiteEnvio,
       documento.serie,
       documento.numero,
+      porResumir ? 'POR_RESUMIR' : 'ENVIANDO',
     ];
     let hora = '';
     if (await this.tieneHoraEmision(consultor)) {
@@ -637,7 +670,7 @@ export class EnvioFiscalRepository {
     const filas = filasDe<{ id_comprobante: number }>(
       await consultor.query(
         `UPDATE comprobantes
-            SET proveedor_fiscal = 'sunat_directo', ambiente_fiscal = $2, estado = 'pendiente', estado_sunat = 'ENVIANDO',
+            SET proveedor_fiscal = 'sunat_directo', ambiente_fiscal = $2, estado = 'pendiente', estado_sunat = $11,
                 id_envio_ultimo = $3, error_mensaje = NULL, cadena_qr = $4, codigo_hash = $5,
                 forma_pago = $6, cuotas = $7::jsonb, fecha_limite_envio = $8::date${hora}
           WHERE id_comprobante = $1 AND serie = $9 AND numero = $10

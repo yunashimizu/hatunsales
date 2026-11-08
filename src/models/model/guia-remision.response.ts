@@ -19,6 +19,8 @@ export interface AccionesGuiaResponse {
   puede_emitir: boolean;
   puede_consultar: boolean;
   puede_anular: boolean;
+  /** Admin: SUNAT no resolvió el ticket en 7 días; «Liberar» deja la guía lista para reenviarla tras revisarla en SUNAT. */
+  puede_liberar: boolean;
 }
 
 export interface DocumentoRelacionadoGuiaResponse {
@@ -91,8 +93,12 @@ export interface EnvioGuiaResponse {
   consultas: number;
   /** Otro proceso lo está enviando o consultando ahora mismo. */
   en_curso: boolean;
-  /** La consulta automática se detuvo (constancia que no corresponde o demasiados intentos): consulte a mano. */
+  /** La consulta automática se detuvo (constancia que no corresponde o 7 días sin respuesta): consulte a mano. */
   revision_manual: boolean;
+  /** Pasaron 7 días sin respuesta de SUNAT: se puede «Liberar» (solo administrador). */
+  liberable: boolean;
+  /** Ya se liberó: se reenvía el mismo archivo con «Emitir» tras revisar en SUNAT. */
+  liberado: boolean;
   proximo_intento_en: string | null;
   actualizado_en: string | null;
 }
@@ -145,6 +151,10 @@ export interface GuiaRemisionResponse extends GuiaRemisionResumenResponse {
   transportista: TransportistaGuiaResponse | null;
   vehiculo: VehiculoGuiaResponse | null;
   conductor: ConductorGuiaResponse | null;
+  /** Traslado en moto o auto particular (categoría M1 o L). */
+  traslado_vehiculo_m1l: boolean;
+  /** Compra (motivo 02): a quién se le compró. */
+  proveedor: { tipo_documento: string | null; numero_documento: string | null; denominacion: string | null } | null;
   items: GuiaRemisionItemResponse[];
   observaciones: string | null;
   sunat: SunatGuiaResponse;
@@ -233,7 +243,7 @@ export interface OpcionCatalogoGuia {
 }
 
 export interface CatalogosGuiaResponse {
-  motivos: Array<OpcionCatalogoGuia & { descripcion: string; requiere_venta: boolean; requiere_descripcion: boolean; requiere_establecimiento: boolean }>;
+  motivos: Array<OpcionCatalogoGuia & { descripcion: string; requiere_venta: boolean; requiere_descripcion: boolean; requiere_establecimiento: boolean; requiere_proveedor: boolean; destinatario_propio: boolean }>;
   modalidades: Array<OpcionCatalogoGuia & { descripcion: string }>;
   unidades_peso: OpcionCatalogoGuia[];
   tipos_documento_destinatario: OpcionCatalogoGuia[];

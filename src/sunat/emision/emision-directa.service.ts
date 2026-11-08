@@ -210,7 +210,13 @@ export class EmisionDirectaService implements EmisionDirecta {
     return { ambiente, documento, material, preparado };
   }
 
-  async registrarEnvio(consultor: ConsultorTx, preparado: DocumentoPreparado, idComprobante: number, idUsuario: number | null): Promise<number> {
+  async registrarEnvio(
+    consultor: ConsultorTx,
+    preparado: DocumentoPreparado,
+    idComprobante: number,
+    idUsuario: number | null,
+    opciones: { porResumir?: boolean } = {},
+  ): Promise<number> {
     const vigente = await this.ambienteVigente(consultor);
     if (vigente !== preparado.ambiente) {
       throw new FiscalConfigError(
@@ -223,7 +229,9 @@ export class EmisionDirectaService implements EmisionDirecta {
     if (!Number.isSafeInteger(idComprobante) || idComprobante <= 0) {
       throw new Error(`registrarEnvio necesita el id del comprobante recién insertado (recibió ${String(idComprobante)}).`);
     }
-    return this.emision.registrar(consultor, preparado.ambiente, preparado.documento, preparado.preparado, idComprobante, idUsuario);
+    // Solo una boleta (03) puede quedar por resumir: la factura y las notas siguen su camino normal.
+    const porResumir = opciones.porResumir === true && preparado.documento.tipo === '03';
+    return this.emision.registrar(consultor, preparado.ambiente, preparado.documento, preparado.preparado, idComprobante, idUsuario, porResumir);
   }
 
   enviarRegistrado(idEnvio: number, preparado?: DocumentoPreparado): Promise<ResultadoEmision> {
@@ -238,12 +246,12 @@ export class EmisionDirectaService implements EmisionDirecta {
     return this.enviarRegistrado(idEnvio, preparado);
   }
 
-  reintentar(idEnvio: number): Promise<ResultadoEmision> {
-    return this.emision.reintentar(idEnvio, 'reintento');
+  reintentar(idEnvio: number, opciones?: { forzar?: boolean; actor?: ActorFiscal | null }): Promise<ResultadoEmision> {
+    return this.emision.reintentar(idEnvio, 'reintento', opciones);
   }
 
-  recuperarCdr(idEnvio: number): Promise<ResultadoEmision> {
-    return this.emision.recuperarCdr(idEnvio);
+  recuperarCdr(idEnvio: number, opciones?: { actor?: ActorFiscal | null }): Promise<ResultadoEmision> {
+    return this.emision.recuperarCdr(idEnvio, opciones);
   }
 
   confirmarAceptadoManual(idEnvio: number, idUsuario: number, nota: string): Promise<ResultadoEmision> {
@@ -330,7 +338,7 @@ export class EmisionDirectaService implements EmisionDirecta {
         `La emisión está detenida: ${bloqueo.motivo} Corrija la causa y reanúdela desde Facturación SUNAT; mientras tanto las ventas se registran sin comprobante.`,
       );
     }
-    return { activo: true, ambiente, diferido: snapshot.envioDiferido === true };
+    return { activo: true, ambiente, diferido: snapshot.envioDiferido === true, ...(snapshot.boletasModo === 'resumen' ? { resumen: true } : {}) };
   }
 
   /** D1: el certificado debe ser del emisor; si su RUC no se puede leer, en producción vale la confirmación del administrador. */

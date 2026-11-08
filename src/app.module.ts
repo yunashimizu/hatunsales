@@ -129,6 +129,7 @@ import { PedidoBussnies } from './bussnies/Bussnies/tienda/pedido.bussnies';
 import { CuentaTiendaBussnies } from './bussnies/Bussnies/tienda/cuenta.bussnies';
 import { CheckoutBussnies } from './bussnies/Bussnies/tienda/checkout.bussnies';
 import { PagoBussnies } from './bussnies/Bussnies/tienda/pago.bussnies';
+import { PedidoComprobanteBussnies } from './bussnies/Bussnies/tienda/pedido-comprobante.bussnies';
 
 import { CulqiPasarela } from './util/pasarela/culqi.pasarela';
 import { PasarelaSimulada } from './util/pasarela/simulada.pasarela';
@@ -199,7 +200,7 @@ import { REGISTROS } from './registro/registros';
    MovimientoInventarioRepository, StockSucursalBussnies, ProductoImagenBussnies, StorageService,
    CatalogoRepository, CarritoRepository, PedidoRepository, CuentaTiendaRepository, CheckoutRepository,
    StockTiendaRepository, VentaTiendaRepository,
-   CatalogoBussnies, CarritoBussnies, PedidoBussnies, CuentaTiendaBussnies, CheckoutBussnies, PagoBussnies,
+   CatalogoBussnies, CarritoBussnies, PedidoBussnies, CuentaTiendaBussnies, CheckoutBussnies, PagoBussnies, PedidoComprobanteBussnies,
    CulqiPasarela, PasarelaSimulada, pasarelaProvider, WhatsappPasarela,
    ConfiguracionRepository, ConfiguracionFiscalBussnies,
    ReceptorRepository, ReceptorBussnies, ConsultaDocumentoService,

@@ -17,6 +17,8 @@ import type {
 } from '../config/fiscal-config.dto';
 import type { ActorFiscal, AmbienteFiscal } from '../config/fiscal-config.tipos';
 import type { ResultadoGuardadoFiscal } from '../config/fiscal-tokens';
+import type { ResultadoRecifrado } from '../seguridad/recifrado-fiscal.service';
+import type { EstadoAlertasFiscales } from '../alertas/alertas-fiscales.service';
 import type { ResultadoPruebaConexion } from '../config/prueba-conexion-fiscal.service';
 import type { EstadoFiscalVista } from '../config/salud-fiscal.service';
 import type { ConfiguracionFiscalVista } from '../config/vista-config-fiscal';
@@ -44,6 +46,9 @@ export interface IFiscalAdminBussnies {
   eliminarCredencialesGre(actor: ActorFiscal): Promise<EstadoCredencialesGre>;
 
   probarConexion(dto: ProbarConexionDto, actor: ActorFiscal): Promise<ResultadoPruebaConexion>;
+  recifrarSecretos(actor: ActorFiscal): Promise<ResultadoRecifrado>;
+  estadoAlertas(): Promise<EstadoAlertasFiscales>;
+  guardarCorreoAlertas(correo: string | undefined, actor: ActorFiscal): Promise<EstadoAlertasFiscales>;
   estado(): Promise<EstadoFiscalVista>;
   auditoria(dto: AuditoriaConsultaDto): Promise<{ registros: RegistroAuditoriaFiscal[]; siguiente: number | null }>;
 }

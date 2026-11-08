@@ -203,7 +203,13 @@ export type AccionSunat =
   | 'EMITIR_NUEVO'
   | 'RECUPERAR_CDR'
   | 'REVISAR_CONFIG'
-  | 'CONSULTAR_TICKET';
+  | 'CONSULTAR_TICKET'
+  /** Lote o guía que SUNAT no resolvió en 7 días: el administrador puede «Liberar» (S4). */
+  | 'LIBERAR'
+  /** El administrador ya lo liberó: el comprobante volvió a su estado anterior. */
+  | 'LIBERADO'
+  /** Boleta que se informa a SUNAT en un resumen diario (RC, condición 1), no por envío individual. */
+  | 'RESUMIR';
 
 export type OperacionSunat = 'emitir' | 'resumen' | 'baja' | 'consulta';
 

@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, UseGuards, Query } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Header, Param, UseGuards, Query } from '@nestjs/common';
 import { ProductoBussnies } from '../../bussnies/Bussnies/producto.bussnies';
 import { CrearProductoRequest, ActualizarProductoRequest, AsignarCodigosSunatRequest } from '../../models/model/producto.request';
 import { ProductoResponse } from '../../models/model/producto.response';
@@ -35,6 +35,9 @@ export class ProductoController {
   /** Debe ir antes de `:id`, o Nest lo toma como un id. */
   @Get('unidades')
   @UseGuards(OptionalJwtGuard)
+  // El catálogo sale del código (no depende del usuario ni de la base): el navegador lo
+  // reutiliza un día entero en vez de pedirlo en cada recarga.
+  @Header('Cache-Control', 'public, max-age=86400')
   unidades() {
     return this.service.unidadesMedida();
   }

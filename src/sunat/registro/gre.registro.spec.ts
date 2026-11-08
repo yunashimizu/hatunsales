@@ -7,6 +7,7 @@ import { GreEmisionService } from '../gre/gre-emision.service';
 import { ClienteRestGre } from '../gre/gre-rest-client';
 import { PreparadorGre } from '../gre/preparador-gre';
 import { greVentaPublica } from '../gre/pruebas/documentos-gre-prueba-spec';
+import { EMISOR_PRUEBA_BETA } from '../config/fiscal-tokens';
 import { REGISTRO_SUNAT_CONFIG } from './config.registro';
 import { REGISTRO_SUNAT_GRE } from './gre.registro';
 
@@ -20,6 +21,8 @@ describe('REGISTRO_SUNAT_GRE', () => {
   async function compilar() {
     return Test.createTestingModule({
       providers: [
+        // Lo aporta REGISTRO_SUNAT_EMISION en la aplicación real (FiscalAdminBussnies lo pide).
+        { provide: EMISOR_PRUEBA_BETA, useValue: { obtenerEmisor: jest.fn() } },
         ...REGISTRO_SUNAT_CONFIG.proveedores,
         ...REGISTRO_SUNAT_GRE.proveedores,
         ConfiguracionRepository,

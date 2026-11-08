@@ -13,7 +13,7 @@ import { InterruptorEmisionFiscal } from '../config/interruptor-emision.service'
 import { NotificadorCambiosFiscales } from '../config/notificador-cambios-fiscales';
 import { RelojFiscal } from '../config/reloj-fiscal';
 import { EjecutorSql, TransaccionesFiscales } from '../config/transacciones-fiscales';
-import { CifradoFiscalService } from '../seguridad/cifrado-fiscal.service';
+import { CifradoFiscalService, ResultadoDescifrado } from '../seguridad/cifrado-fiscal.service';
 import { CredencialesGre, CredencialesGreService } from '../seguridad/credenciales-gre.service';
 import { CredencialesSolService } from '../seguridad/credenciales-sol.service';
 import {
@@ -558,6 +558,55 @@ export class CertificadoFiscalService {
       pfx.plano.fill(0);
       clave.plano.fill(0);
     }
+  }
+
+  /**
+   * Revisa el certificado vigente de cada ambiente contra la llave vigente. Con `aplicar` vuelve a cifrar con la
+   * vigente el .pfx y su contraseña si solo abrían con FISCAL_SECRET_KEY_ANTERIOR (sin esperar a que alguien firme).
+   */
+  async revisarLlaves(aplicar: boolean): Promise<Array<{ ambiente: AmbienteFiscal; estado: 'al_dia' | 'con_llave_anterior' | 'recifrado' | 'falta' | 'ilegible' | 'sin_cifrado' }>> {
+    await this.esquema.exigir('secretos');
+    const resultado: Array<{ ambiente: AmbienteFiscal; estado: 'al_dia' | 'con_llave_anterior' | 'recifrado' | 'falta' | 'ilegible' | 'sin_cifrado' }> = [];
+    for (const ambiente of ['beta', 'produccion'] as const) {
+      const fila = await this.repositorio.activo(ambiente);
+      if (!fila?.pfx_cifrado?.length) {
+        resultado.push({ ambiente, estado: 'falta' });
+        continue;
+      }
+      if (!this.cifrado.disponible()) {
+        resultado.push({ ambiente, estado: 'sin_cifrado' });
+        continue;
+      }
+      const contextoPfx = CertificadoFiscalService.contextoPfx(fila.ambiente, fila.huella_sha256);
+      const contextoClave = CertificadoFiscalService.contextoClave(fila.ambiente, fila.huella_sha256);
+      let pfx: ResultadoDescifrado | null = null;
+      let clave: ResultadoDescifrado | null = null;
+      try {
+        pfx = this.cifrado.descifrarDetallado(fila.pfx_cifrado, contextoPfx);
+        clave = this.cifrado.descifrarDetallado(fila.clave_cifrada, contextoClave);
+        if (!pfx.conLlaveAnterior && !clave.conLlaveAnterior) {
+          resultado.push({ ambiente, estado: 'al_dia' });
+        } else if (!aplicar) {
+          resultado.push({ ambiente, estado: 'con_llave_anterior' });
+        } else {
+          await this.repositorio.actualizarCifrado(
+            fila.id_certificado,
+            this.cifrado.cifrar(pfx.plano, contextoPfx),
+            this.cifrado.cifrar(clave.plano, contextoClave),
+          );
+          this.invalidar(ambiente);
+          this.logger.log(`Certificado de ${ambiente} re-cifrado con la FISCAL_SECRET_KEY actual.`);
+          resultado.push({ ambiente, estado: 'recifrado' });
+        }
+      } catch (error) {
+        if (!FiscalConfigError.es(error, 'FISCAL_SECRETO_ILEGIBLE')) throw error;
+        resultado.push({ ambiente, estado: 'ilegible' });
+      } finally {
+        pfx?.plano.fill(0);
+        clave?.plano.fill(0);
+      }
+    }
+    return resultado;
   }
 
   /** Rotación de FISCAL_SECRET_KEY: se cifra de nuevo con la llave actual (en segundo plano). */

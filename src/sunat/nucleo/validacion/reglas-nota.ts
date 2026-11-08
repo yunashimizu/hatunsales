@@ -20,7 +20,7 @@ const LONGITUD_MAXIMA_SUSTENTO = 500;
 
 /**
  * Notas de crédito y débito: un único comprobante modificado (RS
- * 000048-2026), motivo válido para su tipo, sustento y, desde 2027, la ND
+ * 000048-2026; ERR-3261 en las reglas de validación vigentes desde el 1/1/2027), motivo válido para su tipo, sustento y, desde 2027, la ND
  * por penalidades (13) solo inafecta o exonerada.
  */
 export class ReglaNota implements ReglaValidacionCpe {
@@ -74,7 +74,7 @@ export class ReglaNota implements ReglaValidacionCpe {
     const maximo = contexto.montoMaximoNota;
     if (esNumeroFinito(maximo) && esNumeroFinito(doc.totales?.total) && Dinero.de(doc.totales.total).mayorQue(maximo)) {
       acumulador.error(
-        `El total de la nota de crédito (${formatoMonto(doc.totales.total)}) supera el saldo del comprobante modificado (${formatoMonto(maximo)}).`,
+        `El total de la nota de crédito (${formatoMonto(doc.totales.total)}) supera el saldo del comprobante modificado (${formatoMonto(maximo)}): una nota no puede pasar del monto del documento menos las notas de crédito previas (ERR-3503).`,
       );
     }
   }

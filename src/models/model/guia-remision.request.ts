@@ -3,6 +3,7 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsBoolean,
   IsIn,
   IsInt,
   IsNumber,
@@ -19,7 +20,7 @@ import { UNIDADES_CATALOGO_03 } from '../../sunat/catalogos/sunat.catalogos';
 
 /**
  * Cuerpos y filtros de /guia-remision (GRE remitente). Los catálogos son los de SUNAT: motivo (cat. 20,
- * solo 01, 04 y 13 habilitados), modalidad (cat. 18: 01 transporte público, 02 transporte privado),
+ * habilitados 01, 02, 04, 13, 14 y 18), modalidad (cat. 18: 01 transporte público, 02 transporte privado),
  * documento de identidad (cat. 06) y unidad (cat. 03). Un borrador puede guardarse incompleto: los
  * campos de cada bloque son opcionales y lo que falta para emitir lo señala POST /guia-remision/:id/validar
  * (reglas del motor GRE, que dependen de varios campos a la vez).
@@ -44,7 +45,7 @@ const recortarMayusculas = () =>
     return limpio === '' ? undefined : limpio;
   });
 
-export const MOTIVOS_GUIA_HABILITADOS = ['01', '04', '13'] as const;
+export const MOTIVOS_GUIA_HABILITADOS = ['01', '02', '04', '13', '14', '18'] as const;
 export const MODALIDADES_GUIA = ['01', '02'] as const;
 export const UNIDADES_PESO_GUIA = ['KGM', 'TNE'] as const;
 /** Catálogo 06 para el destinatario (el '0' sin documento no sirve en una guía). */
@@ -73,6 +74,26 @@ export class PuntoGuiaRequest {
   @recortar()
   @Matches(/^\d{4}$/, { message: 'El código de establecimiento tiene 4 dígitos (0000 = domicilio fiscal).' })
   codigo_establecimiento?: string;
+}
+
+/** Compra (motivo 02): a quién se le compró. */
+export class ProveedorGuiaRequest {
+  @IsOptional()
+  @recortar()
+  @IsIn(TIPOS_DOCUMENTO_GUIA, { message: 'Tipo de documento del proveedor: use 1 (DNI), 4 (carné de extranjería), 6 (RUC) o 7 (pasaporte).' })
+  tipo_documento?: string;
+
+  @IsOptional()
+  @recortar()
+  @IsString({ message: 'El documento del proveedor debe ser un texto.' })
+  @MaxLength(15, { message: 'El documento del proveedor admite hasta 15 caracteres.' })
+  numero_documento?: string;
+
+  @IsOptional()
+  @recortar()
+  @IsString({ message: 'El nombre del proveedor debe ser un texto.' })
+  @MaxLength(250, { message: 'El nombre o razón social del proveedor admite hasta 250 caracteres.' })
+  denominacion?: string;
 }
 
 export class DestinatarioGuiaRequest {
@@ -203,7 +224,7 @@ export class ItemGuiaRequest {
  * no cambia: si llega otra, se rechaza (se crea otra guía).
  */
 export class GuardarGuiaRemisionRequest {
-  /** Venta que sustenta el traslado: obligatoria con el motivo 01; sin venta solo se admiten 04 y 13. */
+  /** Venta que sustenta el traslado: obligatoria con los motivos 01 y 14; sin venta se admiten 02, 04, 13 y 18. */
   @IsOptional()
   @Type(() => Number)
   @IsInt({ message: 'id_venta debe ser un número entero.' })
@@ -212,7 +233,7 @@ export class GuardarGuiaRemisionRequest {
 
   @recortar()
   @IsIn(MOTIVOS_GUIA_HABILITADOS, {
-    message: 'Motivo de traslado no habilitado: use 01 (venta), 04 (traslado entre establecimientos de la misma empresa) o 13 (otros).',
+    message: 'Motivo de traslado no habilitado: use 01 (venta), 02 (compra), 04 (traslado entre establecimientos de la misma empresa), 13 (otros), 14 (venta sujeta a confirmación del comprador) o 18 (traslado por emisor itinerante).',
   })
   motivo_traslado!: string;
 
@@ -284,6 +305,17 @@ export class GuardarGuiaRemisionRequest {
   @ValidateNested()
   @Type(() => VehiculoGuiaRequest)
   vehiculo?: VehiculoGuiaRequest;
+
+  /** Compra (motivo 02): el proveedor. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ProveedorGuiaRequest)
+  proveedor?: ProveedorGuiaRequest;
+
+  /** Solo transporte privado: el traslado va en moto o auto particular (categoría M1 o L); no se piden vehículo ni conductor. */
+  @IsOptional()
+  @IsBoolean({ message: 'traslado_vehiculo_m1l debe ser verdadero o falso.' })
+  traslado_vehiculo_m1l?: boolean;
 
   /** Modalidad 02 (transporte privado): conductor principal. */
   @IsOptional()

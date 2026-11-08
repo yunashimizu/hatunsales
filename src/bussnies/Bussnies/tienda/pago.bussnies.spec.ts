@@ -10,7 +10,7 @@ import { PasarelaSimulada } from '../../../util/pasarela/simulada.pasarela';
 
 type Estado = 'pendiente' | 'pagado' | 'preparando' | 'enviado' | 'entregado' | 'cancelado';
 
-function escenario(opciones: { estado?: Estado; total?: number } = {}) {
+function escenario(opciones: { estado?: Estado; total?: number; emitirDePedido?: jest.Mock } = {}) {
   const pedidos = new Map<number, any>();
   const crearPedido = (id: number, estado: Estado) =>
     pedidos.set(id, {
@@ -72,15 +72,18 @@ function escenario(opciones: { estado?: Estado; total?: number } = {}) {
   const pasarela = new PasarelaSimulada();
   const cargo = jest.spyOn(pasarela, 'crearCargo');
 
+  const comprobantePedido = { emitirDePedido: opciones.emitirDePedido ?? jest.fn(async () => ({ emitido: true, id_comprobante: 5 })) };
+
   const servicio = new PagoBussnies(
     repo as any,
     ventaRepo as any,
     stockRepo as any,
     pedidosBussnies as any,
     pasarela,
+    comprobantePedido as any,
   );
 
-  return { servicio, repo, ventaRepo, pedidos, pagos, eventos, historial, cargo };
+  return { servicio, repo, ventaRepo, stockRepo, pedidos, pagos, eventos, historial, cargo, comprobantePedido };
 }
 
 const ENTORNO_ORIGINAL = { ...process.env };
@@ -240,5 +243,64 @@ describe('PagoBussnies · confirmación manual', () => {
     expect(pedidos.get(7).estado).toBe('pagado');
     expect(pagos).toEqual([expect.objectContaining({ idPedido: 7, estado: 'aprobado', proveedor: 'manual', referencia: 'OP-123' })]);
     expect(ventaRepo.generarDesdePedido).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe('PagoBussnies · comprobante del pedido web (S5)', () => {
+  it('al confirmar el pago emite el comprobante de la venta que nació del pedido', async () => {
+    enProduccion();
+    const { servicio, comprobantePedido, ventaRepo } = escenario();
+
+    await servicio.confirmarManual(7, 'OP-1');
+
+    expect(ventaRepo.generarDesdePedido).toHaveBeenCalledWith(7);
+    expect(comprobantePedido.emitirDePedido).toHaveBeenCalledTimes(1);
+    expect(comprobantePedido.emitirDePedido).toHaveBeenCalledWith(7, 99);
+  });
+
+  it('si la emisión falla (lanza), el pago queda confirmado igual', async () => {
+    enProduccion();
+    const emitirDePedido = jest.fn(async () => { throw new Error('SUNAT caída'); });
+    const { servicio, pedidos } = escenario({ emitirDePedido });
+
+    await expect(servicio.confirmarManual(7, 'OP-1')).resolves.toBeDefined();
+
+    expect(emitirDePedido).toHaveBeenCalledTimes(1);
+    expect(pedidos.get(7).estado).toBe('pagado');
+  });
+
+  it('si no hubo venta (no se pudo generar) no intenta ningún comprobante', async () => {
+    enProduccion();
+    const { servicio, comprobantePedido, ventaRepo, pedidos } = escenario();
+    ventaRepo.generarDesdePedido.mockRejectedValueOnce(new Error('sin caja'));
+
+    await servicio.confirmarManual(7, 'OP-1');
+
+    expect(pedidos.get(7).estado).toBe('pagado');
+    expect(comprobantePedido.emitirDePedido).not.toHaveBeenCalled();
+  });
+
+  it('con tienda_generar_venta distinto de «pagado» no hay venta ni comprobante al pagar', async () => {
+    enProduccion();
+    const { servicio, comprobantePedido, ventaRepo, stockRepo } = escenario();
+    stockRepo.configuracion.mockResolvedValue('entregado' as any);
+
+    await servicio.confirmarManual(7, 'OP-1');
+
+    expect(ventaRepo.generarDesdePedido).not.toHaveBeenCalled();
+    expect(comprobantePedido.emitirDePedido).not.toHaveBeenCalled();
+  });
+
+  it('sin el servicio de comprobantes el pago se confirma como antes', async () => {
+    enProduccion();
+    const e = escenario();
+    const sinComprobantes = new PagoBussnies(
+      { confirmarPago: jest.fn(async () => true), obtenerPorId: jest.fn(async () => ({ id_pedido: 7, estado: 'pendiente', codigo: 'X', total: '118' })) } as any,
+      e.ventaRepo as any, e.stockRepo as any, { obtener: jest.fn() } as any, new PasarelaSimulada(),
+    );
+
+    await expect(sinComprobantes.confirmarManual(7, 'OP-1')).resolves.toBeUndefined();
+    expect(e.ventaRepo.generarDesdePedido).toHaveBeenCalledTimes(1);
   });
 });

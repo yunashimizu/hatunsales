@@ -10,13 +10,13 @@ import { greOtrosPrivado, greTrasladoPrivado, greVentaPublica } from './pruebas/
 const ORDEN_XSD: Readonly<Record<string, readonly string[]>> = {
   DespatchAdvice: [
     'UBLExtensions', 'UBLVersionID', 'CustomizationID', 'ID', 'IssueDate', 'IssueTime', 'DespatchAdviceTypeCode', 'Note',
-    'AdditionalDocumentReference', 'Signature', 'DespatchSupplierParty', 'DeliveryCustomerParty', 'Shipment', 'DespatchLine',
+    'AdditionalDocumentReference', 'Signature', 'DespatchSupplierParty', 'DeliveryCustomerParty', 'SellerSupplierParty', 'Shipment', 'DespatchLine',
   ],
   AdditionalDocumentReference: ['ID', 'DocumentTypeCode', 'DocumentType', 'IssuerParty'],
   Signature: ['ID', 'SignatoryParty', 'DigitalSignatureAttachment'],
   Party: ['PartyIdentification', 'PartyName', 'PartyLegalEntity'],
   PartyLegalEntity: ['RegistrationName', 'CompanyID'],
-  Shipment: ['ID', 'HandlingCode', 'HandlingInstructions', 'GrossWeightMeasure', 'TotalTransportHandlingUnitQuantity', 'ShipmentStage', 'Delivery', 'TransportHandlingUnit'],
+  Shipment: ['ID', 'HandlingCode', 'HandlingInstructions', 'GrossWeightMeasure', 'TotalTransportHandlingUnitQuantity', 'SpecialInstructions', 'ShipmentStage', 'Delivery', 'TransportHandlingUnit'],
   ShipmentStage: ['TransportModeCode', 'TransitPeriod', 'CarrierParty', 'LoadingTransportEvent', 'DriverPerson'],
   DriverPerson: ['ID', 'FirstName', 'FamilyName', 'JobTitle', 'IdentityDocumentReference'],
   Delivery: ['DeliveryAddress', 'Despatch'],
@@ -204,6 +204,43 @@ describe('ConstructorGreUbl', () => {
     expect(texto(hijos(dam, 'ID')[0])).toBe('118-2026-10-123456');
     expect(texto(hijos(dam, 'DocumentType')[0])).toBe('Declaración Aduanera de Mercancías (DAM)');
     expect(hijos(dam, 'IssuerParty')).toHaveLength(0);
+  });
+
+  it('traslado en vehículo M1 o L: marca el indicador y no envía vehículo ni conductores, en el orden del XSD', () => {
+    const { xml } = constructor.construir(greTrasladoPrivado({ envio: { trasladoVehiculoM1L: true } }));
+    expect(violacionesDeOrden(xml)).toEqual([]);
+    const doc = parsearXml(xml);
+    expect(texto(ruta(doc, 'Shipment', 'SpecialInstructions'))).toBe('SUNAT_Envio_IndicadorTrasladoVehiculoM1L');
+    expect(descendientes(doc, 'DriverPerson')).toHaveLength(0);
+    expect(descendientes(doc, 'TransportHandlingUnit')).toHaveLength(0);
+    expect(descendientes(doc, 'TransportEquipment')).toHaveLength(0);
+  });
+
+  it('sin el indicador M1/L el vehículo y los conductores siguen yendo y no hay SpecialInstructions', () => {
+    const doc = parsearXml(constructor.construir(greTrasladoPrivado()).xml);
+    expect(descendientes(doc, 'SpecialInstructions')).toHaveLength(0);
+    expect(descendientes(doc, 'DriverPerson')).toHaveLength(2);
+    expect(texto(ruta(doc, 'TransportEquipment', 'ID'))).toBe('ABC123');
+  });
+
+  it('compra (02): el proveedor va como SellerSupplierParty entre el destinatario y el envío', () => {
+    const { xml } = constructor.construir(
+      greTrasladoPrivado({
+        envio: { motivo: '02' },
+        proveedor: { tipoDoc: '6', numDoc: '20100066603', nombre: 'FERRETERIA EL SOL S.A.C.' },
+      }),
+    );
+    expect(violacionesDeOrden(xml)).toEqual([]);
+    const doc = parsearXml(xml);
+    expect(texto(ruta(doc, 'SellerSupplierParty', 'Party', 'PartyIdentification', 'ID'))).toBe('20100066603');
+    expect(texto(ruta(doc, 'SellerSupplierParty', 'Party', 'PartyLegalEntity', 'RegistrationName'))).toBe('FERRETERIA EL SOL S.A.C.');
+  });
+
+  it('el proveedor solo viaja con el motivo 02', () => {
+    const { xml } = constructor.construir(
+      greTrasladoPrivado({ proveedor: { tipoDoc: '6', numDoc: '20100066603', nombre: 'FERRETERIA EL SOL S.A.C.' } }),
+    );
+    expect(descendientes(parsearXml(xml), 'SellerSupplierParty')).toHaveLength(0);
   });
 
   it('nombreBaseGre sigue RUC-09-SERIE-NNNNNNNN', () => {

@@ -108,6 +108,28 @@ export class CrearProductoRequest {
   id_almacen?: number;
 }
 
+/**
+ * Stock que se fija desde la ficha de edición, en el mismo PUT del producto. El servidor
+ * calcula la diferencia y la aplica en la misma transacción solo si el stock real sigue
+ * siendo `stock_anterior` (si no, 409 `STOCK_DESACTUALIZADO`).
+ */
+export class AjusteStockEdicionRequest {
+  @IsInt()
+  @Min(1)
+  id_almacen!: number;
+
+  @IsInt({ message: MSJ_STOCK_ENTERO })
+  @Min(0, { message: 'El stock no puede ser negativo' })
+  @Max(CANTIDAD_MAXIMA_OPERACION, {
+    message: `El stock no puede superar ${CANTIDAD_MAXIMA_OPERACION.toLocaleString('en-US')} unidades`,
+  })
+  stock_nuevo!: number;
+
+  @IsInt({ message: MSJ_STOCK_ENTERO })
+  @Min(0, { message: 'El stock anterior no puede ser negativo' })
+  stock_anterior!: number;
+}
+
 export class ActualizarProductoRequest {
   @IsString()
   @IsOptional()
@@ -183,6 +205,12 @@ export class ActualizarProductoRequest {
   @IsInt()
   @IsOptional()
   id_proveedor?: number;
+
+  /** Opcional: fijar el stock de un almacén en la misma petición (y transacción) que la edición. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => AjusteStockEdicionRequest)
+  ajuste_stock?: AjusteStockEdicionRequest;
 }
 
 /** Máximo de asignaciones por llamada a `PUT /producto/codigo-sunat`. */

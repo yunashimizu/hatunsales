@@ -39,6 +39,18 @@ export class CreditoController {
     });
   }
 
+  /** Antigüedad de la deuda en cuatro tramos (va antes de `cuentas/:id`, que solo acepta números). */
+  @Get('cuentas/antiguedad')
+  antiguedad() {
+    return this.service.antiguedad();
+  }
+
+  /** Total de la deuda vencida (cuentas y monto). Va antes de `cuentas/:id`, que solo acepta números. */
+  @Get('cuentas/vencidas-resumen')
+  vencidasResumen() {
+    return this.service.resumenVencidas();
+  }
+
   @Get('cuentas/:id')
   obtener(@Param('id', ParseIntPipe) id: number) {
     return this.service.obtener(id);

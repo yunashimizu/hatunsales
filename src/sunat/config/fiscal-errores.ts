@@ -25,6 +25,9 @@ export const CODIGOS_FISCALES_EMISION = [
   'FISCAL_EMISION_BLOQUEADA',
   'FISCAL_LECTURA_ERROR',
   'FISCAL_BAJA_FUERA_DE_PLAZO',
+  'FISCAL_LIBERAR_NO_PERMITIDO',
+  'FISCAL_RESUMEN_NO_PERMITIDO',
+  'FISCAL_RESUMEN_FUERA_DE_PLAZO',
 ] as const;
 
 export type CodigoFiscal = Extract<CodigoErrorTipo, `FISCAL_${string}`> | (typeof CODIGOS_FISCALES_EMISION)[number];
@@ -77,6 +80,12 @@ const ESTADO_HTTP: Record<CodigoFiscal, number> = {
   FISCAL_LECTURA_ERROR: HttpStatus.SERVICE_UNAVAILABLE,
   // Anular sin nota (comunicación de baja o resumen): pasaron los 7 días de la emisión.
   FISCAL_BAJA_FUERA_DE_PLAZO: HttpStatus.CONFLICT,
+  // «Liberar» un lote o una guía que no está en el caso (SUNAT no resolvió el ticket).
+  FISCAL_LIBERAR_NO_PERMITIDO: HttpStatus.CONFLICT,
+  // Resumen diario de boletas: nada que informar, o el comprobante no admite resumen (estado, tipo, ya aceptado).
+  FISCAL_RESUMEN_NO_PERMITIDO: HttpStatus.CONFLICT,
+  // Pasaron los 7 días desde la emisión: ya no se puede informar en un resumen.
+  FISCAL_RESUMEN_FUERA_DE_PLAZO: HttpStatus.CONFLICT,
 };
 
 /** Campos que el detalle nunca puede pisar en el cuerpo HTTP. */

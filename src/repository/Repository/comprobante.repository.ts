@@ -250,6 +250,20 @@ export class ComprobanteRepository {
    * Comprobantes de la venta con el principal vigente primero (factura o boleta no anulada ni
    * en error), luego los demás principales y al final las notas; dentro de cada grupo, el más reciente.
    */
+  /** Nombre de la categoría de cada producto (id → nombre), para elegir el código SUNAT genérico. Sin categoría no aparece. */
+  async categoriasDeProductos(ids: number[]): Promise<Map<number, string>> {
+    const unicos = [...new Set(ids.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+    if (!unicos.length) return new Map();
+    const filas: any[] = await this.dataSource.query(
+      `SELECT p.id_producto, c.nombre
+         FROM productos p
+         JOIN categorias c ON c.id_categoria = p.id_categoria
+        WHERE p.id_producto = ANY($1::int[])`,
+      [unicos],
+    );
+    return new Map(filas.filter((f) => f.nombre).map((f) => [Number(f.id_producto), String(f.nombre)]));
+  }
+
   async listarPorVenta(id_venta: number): Promise<Comprobante[]> {
     const lista = await this.comprobanteRepo.find({
       where: { id_venta },
@@ -468,7 +482,8 @@ export class ComprobanteRepository {
           COUNT(*)::int AS total
          FROM comprobantes
         WHERE COALESCE(anulado, FALSE) = FALSE
-          AND estado IN ('pendiente', 'error')`,
+          AND estado IN ('pendiente', 'error')
+          AND COALESCE(estado_sunat, '') <> 'POR_RESUMIR'`,
     );
     return {
       pendientes: Number(filas[0]?.pendientes ?? 0),

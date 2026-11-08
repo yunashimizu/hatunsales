@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { FiscalAuditoriaRepository, RegistroAuditoriaFiscal } from '../auditoria/fiscal-auditoria.repository';
 import {
   ArchivoCertificado,
@@ -28,6 +28,9 @@ import { EstadoFiscalVista, SaludFiscalService } from '../config/salud-fiscal.se
 import { ConfiguracionFiscalVista } from '../config/vista-config-fiscal';
 import { EstadoCredencialesGre } from '../seguridad/credenciales-gre.service';
 import { EstadoCredencialesSol } from '../seguridad/credenciales-sol.service';
+import { RecifradoFiscalService, ResultadoRecifrado } from '../seguridad/recifrado-fiscal.service';
+import { AlertasFiscalesService, EstadoAlertasFiscales } from '../alertas/alertas-fiscales.service';
+import { ACCIONES_AUDITORIA_FISCAL } from '../auditoria/fiscal-auditoria.repository';
 import { IFiscalAdminBussnies } from './ifiscal-admin.bussnies';
 
 /**
@@ -45,6 +48,8 @@ export class FiscalAdminBussnies implements IFiscalAdminBussnies {
     private readonly auditoriaFiscal: FiscalAuditoriaRepository,
     /** EmisorBetaService (módulo de emisión) por su token: el certificado de prueba lleva el RUC del emisor BETA. */
     @Inject(EMISOR_PRUEBA_BETA) private readonly emisorBeta: EmisorPruebaBeta,
+    @Optional() private readonly recifrado?: RecifradoFiscalService,
+    @Optional() private readonly alertas?: AlertasFiscalesService,
   ) {}
 
   obtenerConfiguracion(): Promise<ConfiguracionFiscalVista> {
@@ -106,6 +111,33 @@ export class FiscalAdminBussnies implements IFiscalAdminBussnies {
 
   probarConexion(dto: ProbarConexionDto, actor: ActorFiscal): Promise<ResultadoPruebaConexion> {
     return this.pruebaConexion.probar({ ambiente: dto.ambiente, documento: dto.documento, tipoCpe: dto.tipo_cpe }, actor);
+  }
+
+  /** Vuelve a cifrar con la llave vigente la clave SOL, las credenciales de la guía y los certificados (admin). */
+  recifrarSecretos(actor: ActorFiscal): Promise<ResultadoRecifrado> {
+    if (!this.recifrado) throw new FiscalConfigError('FISCAL_CONFIG_INVALIDA', 'El re-cifrado de secretos no está disponible en este servidor.');
+    return this.recifrado.recifrarTodo(actor);
+  }
+
+  estadoAlertas(): Promise<EstadoAlertasFiscales> {
+    return this.servicioAlertas().estado();
+  }
+
+  async guardarCorreoAlertas(correo: string | undefined, actor: ActorFiscal): Promise<EstadoAlertasFiscales> {
+    const antes = await this.servicioAlertas().estado();
+    const despues = await this.servicioAlertas().guardarCorreo(correo);
+    await this.auditoriaFiscal.registrar({
+      accion: ACCIONES_AUDITORIA_FISCAL.CONFIG_OPERACION,
+      id_usuario: actor.id_usuario ?? null,
+      ip: actor.ip ?? null,
+      detalle: { cambio: 'correo_alertas', antes: antes.correo, despues: despues.correo },
+    });
+    return despues;
+  }
+
+  private servicioAlertas(): AlertasFiscalesService {
+    if (!this.alertas) throw new FiscalConfigError('FISCAL_CONFIG_INVALIDA', 'Los avisos por correo no están disponibles en este servidor.');
+    return this.alertas;
   }
 
   estado(): Promise<EstadoFiscalVista> {

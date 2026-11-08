@@ -9,6 +9,8 @@ import {
   ID_ENVIO_GRE,
   MAXIMO_CONDUCTORES_GRE,
   MOTIVO_GRE_TRASLADO_ESTABLECIMIENTOS,
+  INDICADOR_TRASLADO_VEHICULO_M1L,
+  MOTIVO_GRE_COMPRA,
   TIPO_CONDUCTOR_PRINCIPAL,
   TIPO_CONDUCTOR_SECUNDARIO,
   TIPO_DOCUMENTO_GRE_REMITENTE,
@@ -101,6 +103,8 @@ export class ConstructorGreUbl {
       this.fragmentos.firma(doc.remitente),
       el('cac:DespatchSupplierParty', null, this.parte({ tipoDoc: '6', numDoc: doc.remitente.ruc, nombre: doc.remitente.razonSocial })),
       el('cac:DeliveryCustomerParty', null, this.parte(doc.destinatario)),
+      // Compra (02): el proveedor. [SUPUESTO: cac:SellerSupplierParty va entre DeliveryCustomerParty y Shipment en el XSD.]
+      doc.envio.motivo === MOTIVO_GRE_COMPRA && doc.proveedor ? el('cac:SellerSupplierParty', null, this.parte(doc.proveedor)) : null,
       this.envio(doc),
       doc.items.map((item, indice) => this.linea(item, indice)),
     );
@@ -156,6 +160,7 @@ export class ConstructorGreUbl {
     const { envio } = doc;
     const publico = envio.modalidad === '01';
     const bultos = envio.numeroBultos;
+    const m1l = !publico && envio.trasladoVehiculoM1L === true;
     return el(
       'cac:Shipment',
       null,
@@ -164,6 +169,8 @@ export class ConstructorGreUbl {
       texto(envio.descripcionMotivo) ? el('cbc:HandlingInstructions', null, texto(envio.descripcionMotivo)) : null,
       el('cbc:GrossWeightMeasure', { unitCode: envio.unidadPeso }, formatearDecimal(envio.pesoBrutoTotal, DECIMALES_PESO, DECIMALES_PESO)),
       bultos !== undefined && bultos !== null ? el('cbc:TotalTransportHandlingUnitQuantity', null, String(bultos)) : null,
+      // Moto o auto particular: sin vehículo ni conductores. [SUPUESTO: posición de SpecialInstructions según el XSD UBL 2.1.]
+      m1l ? el('cbc:SpecialInstructions', null, INDICADOR_TRASLADO_VEHICULO_M1L) : null,
       this.etapa(doc, publico),
       el(
         'cac:Delivery',
@@ -171,7 +178,7 @@ export class ConstructorGreUbl {
         this.direccion('cac:DeliveryAddress', envio.llegada, envio.motivo, doc.remitente.ruc),
         el('cac:Despatch', null, this.direccion('cac:DespatchAddress', envio.partida, envio.motivo, doc.remitente.ruc)),
       ),
-      !publico && doc.vehiculo ? this.vehiculo(doc.vehiculo) : null,
+      !publico && !m1l && doc.vehiculo ? this.vehiculo(doc.vehiculo) : null,
     );
   }
 
@@ -191,7 +198,7 @@ export class ConstructorGreUbl {
       el('cac:TransitPeriod', null, el('cbc:StartDate', null, envio.fechaInicioTraslado)),
       publico && doc.transportista ? this.transportista(doc.transportista) : null,
       publico ? el('cac:LoadingTransportEvent', null, el('cbc:OccurrenceDate', null, entrega)) : null,
-      publico ? null : (doc.conductores ?? []).slice(0, MAXIMO_CONDUCTORES_GRE).map((c, i) => this.conductor(c, i)),
+      publico || doc.envio.trasladoVehiculoM1L === true ? null : (doc.conductores ?? []).slice(0, MAXIMO_CONDUCTORES_GRE).map((c, i) => this.conductor(c, i)),
     );
   }
 
@@ -231,7 +238,7 @@ export class ConstructorGreUbl {
   /**
    * Punto de partida o llegada: ubigeo INEI, código de establecimiento (solo con el motivo 04, con el RUC
    * del remitente en listID) y dirección. Con otros motivos el código no se envía: no es obligatorio y
-   * que SUNAT acepte '0000' (domicilio fiscal) en la GRE está [NO VERIFICADO].
+   * que SUNAT acepte '0000' (domicilio fiscal) en la GRE es [SUPUESTO: confirmar con la primera guía real].
    */
   private direccion(nombre: 'cac:DeliveryAddress' | 'cac:DespatchAddress', punto: DireccionGre, motivo: string, rucRemitente: string): NodoXml {
     const codigo = motivo === MOTIVO_GRE_TRASLADO_ESTABLECIMIENTOS ? texto(punto.codigoEstablecimiento) : '';

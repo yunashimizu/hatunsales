@@ -294,3 +294,50 @@ describe('PedidoBussnies · respuesta', () => {
     expect(pedido.cantidad_items).toBe(5);
   });
 });
+
+describe('PedidoBussnies · resumen por preparar', () => {
+  it('delega el conteo en el repositorio y suma el total, sin traer las listas', async () => {
+    const { servicio, repo } = armar();
+    const contarPorPreparar = jest.fn(async () => ({ pendientes: 2, pagados: 3 }));
+    const listarTodos = jest.fn();
+    Object.assign(repo, { contarPorPreparar, listarTodos });
+
+    await expect(servicio.resumenPorPreparar()).resolves.toEqual({ pendientes: 2, pagados: 3, total: 5 });
+    expect(contarPorPreparar).toHaveBeenCalledTimes(1);
+    expect(listarTodos).not.toHaveBeenCalled();
+  });
+});
+
+describe('PedidoBussnies · comprobante en el detalle (S5)', () => {
+  function conComprobante(resumenDe: jest.Mock) {
+    const base = armar({ pedido: { estado: 'pagado' } });
+    const servicio = new PedidoBussnies(
+      base.servicio['repo'], base.servicio['carritoRepo'], base.servicio['carritoBussnies'], base.servicio['checkoutBussnies'],
+      base.servicio['stockRepo'], base.servicio['dataSource'], base.servicio['cuentaRepo'], { resumenDe } as any,
+    );
+    return servicio;
+  }
+
+  it('el panel recibe el comprobante con el motivo; el comprador y los pagos no', async () => {
+    const resumenDe = jest.fn(async (_pedido: any, paraPersonal: boolean) => ({ estado: 'sin_comprobante', puede_descargar: false, ...(paraPersonal ? { motivo: 'x' } : {}) }));
+    const servicio = conComprobante(resumenDe);
+
+    const panel = await servicio.obtener(57, undefined, true);
+    const comprador = await servicio.obtener(57, 3);
+    const interno = await servicio.obtener(57);
+
+    expect(panel.comprobante).toMatchObject({ motivo: 'x' });
+    expect(comprador.comprobante?.motivo).toBeUndefined();
+    expect(interno.comprobante?.motivo).toBeUndefined();
+    expect(resumenDe.mock.calls.map((c) => c[1])).toEqual([true, false, false]);
+  });
+
+  it('si no se puede leer el comprobante, el pedido sale igual sin esa sección', async () => {
+    const servicio = conComprobante(jest.fn(async () => { throw new Error('sin tabla'); }));
+
+    const pedido = await servicio.obtener(57, undefined, true);
+
+    expect(pedido.codigo).toBeDefined();
+    expect(pedido.comprobante).toBeUndefined();
+  });
+});

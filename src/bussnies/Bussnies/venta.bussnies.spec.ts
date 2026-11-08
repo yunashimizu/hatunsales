@@ -554,7 +554,7 @@ describe('VentaBussnies: comprobante de la venta (emisión directa)', () => {
 
       const [solicitud, idUsuario, opciones] = comprobantes.generar.mock.calls[0];
       expect(idUsuario).toBe(4);
-      expect(opciones).toEqual({ totalExigido: 20.19 });
+      expect(opciones).toMatchObject({ totalExigido: 20.19 });
       expect(solicitud).toMatchObject({ id_tipo: 2, id_venta: 9, forma_pago: 'Contado', medio_de_pago: 'Tarjeta' });
       expect(solicitud.items).toEqual([
         expect.objectContaining({ id_producto: 7, cantidad: 2, precio_unitario: 10, descuento: 0.4, codigo_producto_sunat: '30111601' }),
@@ -608,7 +608,7 @@ describe('VentaBussnies: comprobante de la venta (emisión directa)', () => {
       await expect(servicio.emitirComprobanteDeVenta(9, { id_tipo: 2 } as never, USUARIO)).rejects.toBeInstanceOf(BadRequestException);
       const [solicitud, , opciones] = comprobantes.generar.mock.calls[0];
       expect(solicitud.items).toHaveLength(1);
-      expect(opciones).toEqual({ totalExigido: 25 });
+      expect(opciones).toMatchObject({ totalExigido: 25 });
     });
 
     it('con la emisión inactiva responde la venta con el motivo y el pendiente (no es un error de la acción)', async () => {

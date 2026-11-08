@@ -10,6 +10,7 @@ import { ROLES_KEY } from '../../guards/roles.decorator';
 import { REGISTRO_GUIAS } from '../../registro/guias.registro';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { GuiaRemisionRepository } from '../../repository/Repository/guia-remision.repository';
+import { EMISOR_PRUEBA_BETA } from '../../sunat/config/fiscal-tokens';
 import { REGISTRO_SUNAT_CONFIG } from '../../sunat/registro/config.registro';
 import { REGISTRO_SUNAT_GRE } from '../../sunat/registro/gre.registro';
 import { REGISTRO_SUNAT_NUCLEO } from '../../sunat/registro/nucleo.registro';
@@ -30,6 +31,7 @@ const servicio = {
   emitir: jest.fn(async () => ({ guia: { id_guia: 7 }, resultado: { estado: 'TICKET_PENDIENTE' } })),
   consultar: jest.fn(async () => ({ guia: { id_guia: 7 }, resultado: { estado: 'ACEPTADA' } })),
   anular: jest.fn(async () => ({ id_guia: 7, estado: 'anulado' })),
+  liberar: jest.fn(async () => ({ id_guia: 7, estado: 'pendiente' })),
   pdf: jest.fn(async () => ({ nombre: '20610206337-09-T001-00000001.pdf', contenido: Buffer.from('%PDF-1.3') })),
   archivo: jest.fn(async () => ({ nombre: 'R-20610206337-09-T001-00000001.xml', mime: 'application/xml', contenido: Buffer.from('<cdr/>') })),
 };
@@ -93,10 +95,32 @@ describe('GuiaRemisionController (HTTP)', () => {
     expect(servicio.emitir).not.toHaveBeenCalled();
   });
 
+  it('«Liberar» una guía sin respuesta de SUNAT es solo del administrador y llega con su usuario para la auditoría', async () => {
+    expect(Reflect.getMetadata(ROLES_KEY, GuiaRemisionController.prototype.liberar)).toEqual(['admin']);
+    const http = request(app.getHttpServer());
+    for (const otro of ['vendedor', 'caja']) {
+      rol = otro;
+      const prohibido = await http.post('/guia-remision/7/liberar').expect(403);
+      expect(prohibido.body.message).toContain('admin');
+    }
+    expect(servicio.liberar).not.toHaveBeenCalled();
+    rol = 'admin';
+    await http.post('/guia-remision/7/liberar').expect(200);
+    expect(servicio.liberar).toHaveBeenCalledWith(7, expect.objectContaining({ id_usuario: 3 }));
+  });
+
   it('valida el cuerpo y los filtros (400 en español) y pasa el usuario al negocio', async () => {
     const http = request(app.getHttpServer());
-    const motivo = await http.post('/guia-remision').send({ ...CUERPO_VALIDO, motivo_traslado: '02' }).expect(400);
+    const motivo = await http.post('/guia-remision').send({ ...CUERPO_VALIDO, motivo_traslado: '05' }).expect(400);
     expect(JSON.stringify(motivo.body.message)).toContain('Motivo de traslado no habilitado');
+    // Los motivos nuevos (02, 14, 18) y el indicador M1/L sí pasan la validación del cuerpo.
+    for (const nuevo of ['02', '14', '18']) {
+      const r = await http.post('/guia-remision').send({ ...CUERPO_VALIDO, motivo_traslado: nuevo, traslado_vehiculo_m1l: true });
+      expect(JSON.stringify(r.body.message ?? '')).not.toContain('Motivo de traslado no habilitado');
+      expect(JSON.stringify(r.body.message ?? '')).not.toContain('traslado_vehiculo_m1l');
+    }
+    const m1lMalo = await http.post('/guia-remision').send({ ...CUERPO_VALIDO, traslado_vehiculo_m1l: 'si' }).expect(400);
+    expect(JSON.stringify(m1lMalo.body.message)).toContain('traslado_vehiculo_m1l');
     const sinItems = await http.post('/guia-remision').send({ ...CUERPO_VALIDO, items: [] }).expect(400);
     expect(JSON.stringify(sinItems.body.message)).toContain('al menos un bien');
     const unidad = await http.post('/guia-remision').send({ ...CUERPO_VALIDO, items: [{ id_producto: 5, cantidad: 1, unidad: 'XXX' }] }).expect(400);
@@ -165,6 +189,8 @@ describe('registro de la guía de remisión (DI)', () => {
         ...REGISTRO_SUNAT_NUCLEO.proveedores,
         ...REGISTRO_SUNAT_GRE.proveedores,
         ...REGISTRO_GUIAS.proveedores,
+        // Lo aporta REGISTRO_SUNAT_EMISION en la aplicación real (FiscalAdminBussnies lo pide).
+        { provide: EMISOR_PRUEBA_BETA, useValue: { obtenerEmisor: jest.fn() } },
         // Registrados en app.module.ts.
         GuiaRemisionRepository,
         GuiaRemisionBussnies,

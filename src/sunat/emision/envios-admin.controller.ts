@@ -27,7 +27,7 @@ import { FiscalEsquemaService } from '../config/fiscal-esquema.service';
 import { InterruptorEmisionFiscal } from '../config/interruptor-emision.service';
 import { descargaDeEnvio } from './descarga-envio';
 import { EmisionDirectaService } from './emision-directa.service';
-import { ConfirmarAceptadoDto, ListarEnviosDto } from './envios-admin.dto';
+import { ConfirmarAceptadoDto, ListarEnviosDto, ReintentarEnvioDto } from './envios-admin.dto';
 
 /**
  * Envíos de factura, boleta y notas a SUNAT (BETA y PRODUCCIÓN) para el administrador: listado,
@@ -74,17 +74,27 @@ export class EnviosAdminController {
   @Post('envios/:id/reintentar')
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
-  async reintentar(@Param('id', ParseIntPipe) id: number) {
-    await this.esquema.exigir('emision');
-    return this.emision.reintentar(id);
+  async reintentar(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ReintentarEnvioDto,
+    @UsuarioActual() usuario: UsuarioToken | undefined,
+    @Req() req: Request,
+  ) {
+    const forzar = dto?.forzar === true;
+    await this.esquema.exigir(...(forzar ? (['emision', 'auditoria'] as const) : (['emision'] as const)));
+    return this.emision.reintentar(id, { forzar, actor: actorDe(usuario, req) });
   }
 
   @Post('envios/:id/recuperar-cdr')
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
-  async recuperarCdr(@Param('id', ParseIntPipe) id: number) {
+  async recuperarCdr(
+    @Param('id', ParseIntPipe) id: number,
+    @UsuarioActual() usuario: UsuarioToken | undefined,
+    @Req() req: Request,
+  ) {
     await this.esquema.exigir('emision');
-    return this.emision.recuperarCdr(id);
+    return this.emision.recuperarCdr(id, { actor: actorDe(usuario, req) });
   }
 
   @Post('envios/:id/confirmar-aceptado')

@@ -214,6 +214,18 @@ describe('validarDocumentoCpe', () => {
       expect(contiene(errores(nc), 'no se puede usar sobre una boleta')).toBe(true);
     });
 
+    it('el tope de la NC cita ERR-3503: monto del documento menos las notas previas', () => {
+      const lista = errores(notaCreditoPrueba(), { montoMaximoNota: 5 });
+      expect(contiene(lista, 'ERR-3503')).toBe(true);
+      expect(contiene(lista, 'notas de crédito previas')).toBe(true);
+    });
+
+    it('una NC exactamente igual al saldo es válida (el tope es ≤, no <)', () => {
+      const total = notaCreditoPrueba().totales.total;
+      expect(errores(notaCreditoPrueba(), { montoMaximoNota: total })).toEqual([]);
+      expect(contiene(errores(notaCreditoPrueba(), { montoMaximoNota: total - 0.01 }), 'ERR-3503')).toBe(true);
+    });
+
     it('la NC no puede superar el saldo del comprobante modificado', () => {
       expect(contiene(errores(notaCreditoPrueba(), { montoMaximoNota: 5 }), 'supera el saldo')).toBe(true);
       expect(errores(notaCreditoPrueba(), { montoMaximoNota: 10 })).toEqual([]);
@@ -222,6 +234,19 @@ describe('validarDocumentoCpe', () => {
 
   describe('reglas RS 000048-2026 (obligatorias desde el 01/01/2027, RS 000143-2026)', () => {
     const CODIGO_OBLIGATORIO = 'código de producto SUNAT de 8 dígitos';
+
+    it('el error del código cita las reglas de validación vigentes desde el 1/1/2027 (ERR-3496/3506), no la RS 000048-2026', () => {
+      const despues = facturaPrueba(undefined, { fechaEmision: '2027-01-02' });
+      const mensaje = errores(despues, { hoy: '2027-01-02' }).find((e) => e.includes(CODIGO_OBLIGATORIO)) ?? '';
+      expect(mensaje).toContain('reglas de validación de SUNAT');
+      expect(mensaje).toContain('ERR-3496/3506');
+      expect(mensaje).not.toContain('000048');
+    });
+
+    it('un código de producto mal formado sigue siendo error aunque falten meses para 2027', () => {
+      const mal = facturaPrueba([{ descripcion: 'CEMENTO', cantidad: 1, precio: 10, codigoSunat: '1234' }]);
+      expect(contiene(errores(mal), 'exactamente 8 dígitos')).toBe(true);
+    });
 
     it('en auto se activan por la fecha de emisión: el código de producto pasa a ser obligatorio', () => {
       const antes = facturaPrueba();

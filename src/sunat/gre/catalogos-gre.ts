@@ -27,14 +27,40 @@ export const CATALOGO_20_MOTIVOS_TRASLADO: Readonly<Record<string, string>> = Ob
 });
 
 /**
- * Motivos que el motor sabe emitir. Los demás piden datos que el sistema todavía no captura
- * (proveedor en 02/07, comprador en 03, DAM, contenedores y precintos en 08/09/19…).
+ * Motivos que el motor sabe emitir: 01 venta, 02 compra (con los datos del proveedor), 04 traslado entre
+ * establecimientos, 13 otros, 14 venta sujeta a confirmación del comprador y 18 traslado por emisor itinerante.
+ * Los demás piden datos que el sistema todavía no captura (comprador en 03, recojo en 07, DAM, contenedores
+ * y precintos en 08/09/19…).
+ * [SUPUESTO: 02, 14 y 18 se agregaron según el catálogo 20 sin una guía real de SUNAT que los confirme; el 02 asume
+ * que el destinatario es el propio remitente y que el proveedor va en cac:SellerSupplierParty. Confirmar con la primera
+ * guía real de cada motivo.]
  */
-export const MOTIVOS_GRE_SOPORTADOS: readonly string[] = Object.freeze(['01', '04', '13']);
+export const MOTIVOS_GRE_SOPORTADOS: readonly string[] = Object.freeze(['01', '02', '04', '13', '14', '18']);
 
 export const MOTIVO_GRE_VENTA = '01';
+export const MOTIVO_GRE_COMPRA = '02';
 export const MOTIVO_GRE_TRASLADO_ESTABLECIMIENTOS = '04';
 export const MOTIVO_GRE_OTROS = '13';
+export const MOTIVO_GRE_VENTA_CONFIRMACION = '14';
+export const MOTIVO_GRE_EMISOR_ITINERANTE = '18';
+
+/** Motivos que salen de una venta registrada (la guía lleva lo vendido): el 01 y el 14. */
+export const MOTIVOS_GRE_CON_VENTA: readonly string[] = Object.freeze(['01', '14']);
+/** Motivos en que el destinatario es el propio remitente (los bienes llegan a su establecimiento). */
+export const MOTIVOS_GRE_DESTINATARIO_PROPIO: readonly string[] = Object.freeze(['02', '04']);
+
+/**
+ * Indicador de traslado en vehículos de categoría M1 o L (motos y autos particulares): va como
+ * cbc:SpecialInstructions de cac:Shipment y, cuando se marca, no se consignan vehículo ni conductores.
+ * [SUPUESTO: nombre confirmado en la documentación de integradores (versión 1.6 del 01/12/2023); la posición exacta
+ * en el XML (SpecialInstructions entre TotalTransportHandlingUnitQuantity y ShipmentStage) sigue el orden del XSD UBL 2.1
+ * y se confirma con la primera guía real.]
+ */
+export const INDICADOR_TRASLADO_VEHICULO_M1L = 'SUNAT_Envio_IndicadorTrasladoVehiculoM1L';
+
+/** Días máximos entre la emisión y el inicio del traslado; desde AVISO se advierte. [SUPUESTO: criterio del proyecto, no un plazo de SUNAT.] */
+export const MAXIMO_DIAS_INICIO_TRASLADO = 30;
+export const AVISO_DIAS_INICIO_TRASLADO = 7;
 
 /** Catálogo 18: modalidad de traslado. */
 export const CATALOGO_18_MODALIDAD_TRASLADO: Readonly<Record<ModalidadTransporteGre, string>> = Object.freeze({

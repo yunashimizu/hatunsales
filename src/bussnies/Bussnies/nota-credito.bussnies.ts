@@ -21,7 +21,7 @@ import {
   VentaDeNota,
 } from '../../repository/Repository/nota-credito.repository';
 import { VentaRepository } from '../../repository/Repository/venta.repository';
-import { FiscalAuditoriaRepository } from '../../sunat/auditoria/fiscal-auditoria.repository';
+import { ACCIONES_AUDITORIA_FISCAL, FiscalAuditoriaRepository } from '../../sunat/auditoria/fiscal-auditoria.repository';
 import { aHttp, FiscalConfigError } from '../../sunat/config/fiscal-errores';
 import { LotesFiscales } from '../../sunat/documentos/lotes.contrato';
 import type { LoteDeComprobante, ResultadoLote } from '../../sunat/documentos/lotes.contrato';
@@ -556,7 +556,8 @@ export function clasificarParaAnular(c: CabeceraComprobante, ambienteVigente: st
   if (c.proveedor_fiscal !== 'sunat_directo' || c.ambiente_fiscal !== ambienteVigente) return 'local';
   const estado = c.estado_sunat ?? 'NO_ENVIADO';
   if (c.aceptada_sunat && ESTADOS_ACEPTADO.has(estado)) return 'aceptado';
-  if (!c.id_envio_ultimo || estado === 'NO_ENVIADO' || ESTADOS_SIN_VALIDEZ.has(estado)) return 'nunca_enviado';
+  // POR_RESUMIR: la boleta espera su resumen diario y SUNAT todavía no la conoce; anularla es solo del sistema.
+  if (!c.id_envio_ultimo || estado === 'NO_ENVIADO' || estado === 'POR_RESUMIR' || ESTADOS_SIN_VALIDEZ.has(estado)) return 'nunca_enviado';
   const codigo = Number(c.envio?.codigo);
   if (estado === 'EXCEPCION' && Number.isInteger(codigo) && codigo >= 100 && codigo <= 1999) return 'nunca_enviado';
   return 'incierto';
@@ -1111,7 +1112,14 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       const respuesta = this.notaDeOrigenARespuesta(previa);
       if (previa.aceptada_sunat && ESTADOS_ACEPTADO.has(previa.estado_sunat ?? '')) {
         if (previa.efectos_aplicados || (await this.efectosSinFallar(previa.id_comprobante, respuesta.numero_formateado))) {
-          return { ...vacio, estado: 'anulada', nota: respuesta, venta_anulada: !!venta, avisos: [`${numero} ya se anuló con la nota ${respuesta.numero_formateado}.`] };
+          return {
+            ...vacio,
+            ...(await this.resultadoDeAnulacion(venta, origen, otros.map((o) => o.comprobante))),
+            estado: 'anulada',
+            nota: respuesta,
+            venta_anulada: !!venta,
+            avisos: [`${numero} ya se anuló con la nota ${respuesta.numero_formateado}.`],
+          };
         }
         return { ...vacio, estado: 'anulacion_en_curso', nota: respuesta, venta_anulada: false, avisos: [this.avisoEfectosPendientes(respuesta.numero_formateado)] };
       }
@@ -1158,6 +1166,7 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       if (await this.efectosSinFallar(nota.id_comprobante, nota.numero_formateado)) {
         return {
           ...vacio,
+          ...(await this.resultadoDeAnulacion(venta, aceptado, otros.map((o) => o.comprobante))),
           estado: 'anulada',
           nota,
           venta_anulada: !!venta,
@@ -1251,6 +1260,7 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     if (lote.aceptado && (await this.efectosDeBajaSinFallar(lote.id_envio, numero))) {
       return {
         ...vacio,
+        ...(await this.resultadoDeAnulacion(venta, aceptado, otros.map((o) => o.comprobante))),
         estado: 'anulada',
         venta_anulada: !!venta,
         avisos: [
@@ -1428,7 +1438,7 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
    * las notas y lo acreditado, y rehace el plan: si otra nota se registró entretanto (en curso, o el
    * plan ya no da lo mismo) responde 409 sin reservar número.
    */
-  private emitirPlan(
+  private async emitirPlan(
     origen: OrigenNota,
     plan: PlanNota,
     sustento: string,
@@ -1470,7 +1480,57 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
         }
       },
     };
-    return this.emisor.emitirNotaCredito(solicitud);
+    const respuesta = await this.emisor.emitirNotaCredito(solicitud);
+    await this.auditarNotaEmitida(origen, plan, respuesta, idUsuario);
+    return respuesta;
+  }
+
+  /** Quién emitió la nota de crédito y sobre qué comprobante (sin romper la emisión si la bitácora falla). */
+  private async auditarNotaEmitida(origen: OrigenNota, plan: PlanNota, respuesta: ComprobanteResponse, idUsuario: number | null): Promise<void> {
+    try {
+      await this.auditoria.registrar({
+        accion: ACCIONES_AUDITORIA_FISCAL.NC_EMITIDA,
+        id_usuario: idUsuario,
+        entidad: 'comprobantes',
+        id_entidad: respuesta.id_comprobante ?? null,
+        detalle: {
+          nota: respuesta.numero_formateado ?? null,
+          origen: this.numeroDe(origen),
+          id_comprobante_origen: origen.id_comprobante,
+          id_venta: origen.id_venta ?? null,
+          motivo: plan.motivo,
+          efecto: plan.efecto,
+          total: plan.total,
+          estado_sunat: respuesta.estado_sunat ?? null,
+          aceptada_sunat: respuesta.aceptada_sunat === true,
+        },
+      });
+    } catch (error) {
+      this.logger.warn(`No se pudo auditar la nota de crédito sobre ${this.numeroDe(origen)}: ${this.mensajeDe(error)}`);
+    }
+  }
+
+  /**
+   * Lo que de verdad dejó la anulación cuando la aplicaron los efectos de la nota o de la baja que SUNAT
+   * aceptó (no esta llamada): los comprobantes anulados y, leídos de la base, el stock devuelto y las cuentas
+   * por cobrar cerradas. Sin esto la respuesta decía «stock_devuelto: false» con la venta ya repuesta (S9.3).
+   * Sin la venta (comprobante suelto) no hay stock ni deuda que informar.
+   */
+  private async resultadoDeAnulacion(
+    venta: VentaDeNota | null,
+    origen: CabeceraComprobante,
+    otros: CabeceraComprobante[],
+  ): Promise<Pick<ResultadoAnulacion, 'comprobantes_anulados' | 'stock_devuelto' | 'cxc_cerradas'>> {
+    const comprobantes = venta ? [origen, ...otros] : [origen];
+    const comprobantes_anulados = comprobantes.map((c) => ({ id_comprobante: c.id_comprobante, numero_formateado: this.numeroDe(c) }));
+    if (!venta) return { comprobantes_anulados, stock_devuelto: false, cxc_cerradas: 0 };
+    try {
+      const efectos = await this.ventas.efectosDeAnulacion(venta.id_venta);
+      return { comprobantes_anulados, stock_devuelto: efectos.stock_devuelto, cxc_cerradas: efectos.cxc_cerradas };
+    } catch (error) {
+      this.logger.warn(`No se pudo leer el stock devuelto de la venta ${venta.id_venta} tras anularla: ${this.mensajeDe(error)}`);
+      return { comprobantes_anulados, stock_devuelto: false, cxc_cerradas: 0 };
+    }
   }
 
   /**

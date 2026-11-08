@@ -53,6 +53,15 @@ export class AjustarStockRequest {
   @IsOptional()
   @MaxLength(250)
   comentario?: string;
+
+  /**
+   * Stock que el cliente vio en ese almacén antes de pedir el ajuste. Si el real ya es otro,
+   * responde 409 `STOCK_DESACTUALIZADO` sin tocar nada (protege de ajustes dobles).
+   */
+  @IsOptional()
+  @IsInt({ message: MENSAJE_ENTERO })
+  @Min(0, { message: 'El stock esperado no puede ser negativo' })
+  stock_esperado?: number;
 }
 
 export class TransferirStockRequest {

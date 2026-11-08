@@ -2,9 +2,10 @@ import { BadRequestException, Inject, Injectable, Logger, NotFoundException } fr
 import { ProductoImagenRepository } from '../../repository/Repository/producto-imagen.repository';
 import { ProductoRepository } from '../../repository/Repository/producto.repository';
 import { ALMACEN_ARCHIVOS } from '../../util/storage/almacen.interface';
-import type { AlmacenArchivos } from '../../util/storage/almacen.interface';
+import type { AlmacenArchivos, ArchivoGuardado } from '../../util/storage/almacen.interface';
 import { almacenamientoConfig } from '../../config/almacenamiento.config';
 import { ProductoImagen } from '../../models/DBModel/producto-imagen.entity';
+import { enParalelo } from '../../util/concurrencia.util';
 
 export interface ArchivoSubido {
   originalname: string;
@@ -12,6 +13,9 @@ export interface ArchivoSubido {
   buffer: Buffer;
   size: number;
 }
+
+/** Cuántas fotos de un mismo lote se mandan al almacén a la vez. */
+const SUBIDAS_SIMULTANEAS = 3;
 
 @Injectable()
 export class ProductoImagenBussnies {
@@ -37,15 +41,17 @@ export class ProductoImagenBussnies {
 
     archivos.forEach((archivo) => this.validar(archivo));
 
-    const yaTiene = await this.repo.contarPorProducto(id_producto);
-    let orden = await this.repo.siguienteOrden(id_producto);
+    // Un solo viaje para saber cuántas fotos hay y qué orden toca (antes eran dos).
+    const { total: yaTiene, siguienteOrden } = await this.repo.resumenGaleria(id_producto);
 
-    const guardadas: ProductoImagen[] = [];
-    // Archivos ya enviados al almacén en este lote, con o sin fila creada todavía.
+    // Archivos ya enviados al almacén en este lote, con o sin fila creada todavía. Cada
+    // clave se anota apenas el almacén la devuelve, para poder borrarla si algo falla después.
     const clavesSubidas: string[] = [];
 
+    let subidas: ArchivoGuardado[];
     try {
-      for (const [indice, archivo] of archivos.entries()) {
+      // De a SUBIDAS_SIMULTANEAS: Cloudinary tarda 0,5–2 s por foto y en fila se sumaban.
+      subidas = await enParalelo(archivos, SUBIDAS_SIMULTANEAS, async (archivo) => {
         const subida = await this.almacen.guardar({
           buffer: archivo.buffer,
           nombre_original: archivo.originalname,
@@ -53,31 +59,42 @@ export class ProductoImagenBussnies {
           carpeta: String(id_producto),
         });
         clavesSubidas.push(subida.clave);
-
-        const imagen = new ProductoImagen();
-        imagen.producto = producto as any;
-        imagen.url = subida.url;
-        imagen.thumb_url = subida.thumb_url;
-        imagen.mime = subida.mime;
-        imagen.size = subida.size;
-        imagen.width = subida.width as number;
-        imagen.height = subida.height as number;
-        imagen.clave_almacen = subida.clave;
-        imagen.proveedor = subida.proveedor;
-        imagen.orden = orden++;
-        // La primera imagen que tenga el producto queda como principal.
-        imagen.is_primary = yaTiene === 0 && indice === 0;
-
-        guardadas.push(await this.repo.create(imagen));
-      }
+        return subida;
+      });
     } catch (error) {
-      // Todo o nada: sin esto, un fallo a medias deja archivos huérfanos en el almacén
-      // y el reintento del usuario los duplicaría en la galería.
-      await this.deshacerLote(guardadas, clavesSubidas);
+      // Todo o nada: `enParalelo` ya esperó a las subidas en vuelo, así que `clavesSubidas`
+      // tiene todo lo que llegó al almacén. Sin esto quedarían archivos huérfanos y el
+      // reintento del usuario los duplicaría. Aún no hay filas.
+      await this.deshacerLote([], clavesSubidas);
       throw error;
     }
 
-    return guardadas;
+    // Las filas se arman en el orden recibido, sin importar qué subida terminó antes.
+    const imagenes = subidas.map((subida, indice) => {
+      const imagen = new ProductoImagen();
+      imagen.producto = producto as any;
+      imagen.url = subida.url;
+      imagen.thumb_url = subida.thumb_url;
+      imagen.mime = subida.mime;
+      imagen.size = subida.size;
+      imagen.width = subida.width as number;
+      imagen.height = subida.height as number;
+      imagen.clave_almacen = subida.clave;
+      imagen.proveedor = subida.proveedor;
+      imagen.orden = siguienteOrden + indice;
+      // La primera imagen que tenga el producto queda como principal (el índice único
+      // parcial solo admite una principal por producto).
+      imagen.is_primary = yaTiene === 0 && indice === 0;
+      return imagen;
+    });
+
+    try {
+      // Una sola transacción para todas las filas: o entran todas o ninguna.
+      return await this.repo.crearVarias(imagenes);
+    } catch (error) {
+      await this.deshacerLote([], clavesSubidas);
+      throw error;
+    }
   }
 
   /**
@@ -120,8 +137,10 @@ export class ProductoImagenBussnies {
     }
 
     // Si la foto es idéntica, el almacén reutiliza el mismo archivo: no hay nada que borrar.
+    // Sin `await`: la fila ya apunta al archivo nuevo y el usuario no tiene por qué esperar
+    // el `destroy` del almacén. `borrarDelAlmacen` captura y registra sus propios errores.
     if (claveVieja && claveVieja !== subida.clave) {
-      await this.borrarDelAlmacen(claveVieja);
+      void this.borrarDelAlmacen(claveVieja);
     }
 
     return this.repo.findByProducto(id_producto);
@@ -186,8 +205,10 @@ export class ProductoImagenBussnies {
 
     // Después de quitar la fila: el archivo puede estar compartido (misma foto en otro
     // producto o en una recepción) y el almacén solo lo borra si ya nadie lo usa.
+    // Sin `await`: el orden fila → archivo se mantiene (la fila ya se quitó), pero la
+    // respuesta no espera al almacén; un fallo se registra y ya no rompe la respuesta.
     if (imagen.clave_almacen) {
-      await this.almacen.eliminar(imagen.clave_almacen);
+      void this.borrarDelAlmacen(imagen.clave_almacen);
     }
 
     return this.repo.findByProducto(id_producto);

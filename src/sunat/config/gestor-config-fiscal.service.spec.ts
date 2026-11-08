@@ -72,7 +72,7 @@ describe('GestorConfigFiscalService: credenciales SOL y el interruptor de produc
 
   it('otros cambios no tocan el interruptor', async () => {
     const { gestor, interruptor } = crear(null);
-    const resultado = await gestor.guardar({ envio_en_linea: false }, ACTOR);
+    const resultado = await gestor.guardar({ envio_diferido: true }, ACTOR);
     expect(interruptor.limpiar).not.toHaveBeenCalled();
     expect(resultado.advertencias).toEqual([]);
   });
@@ -86,6 +86,9 @@ describe('GestorConfigFiscalService: credenciales SOL y el interruptor de produc
     expect(vista.cert_ruc_confirmado).toBe(false);
     expect(vista.emision_bloqueada).toEqual({ beta: null, produccion: null });
     expect(vista.estado).not.toHaveProperty('nubefact_configurado');
+    // Un solo interruptor de envío y la hora del resumen diario; «envío en línea» ya no existe en la vista.
+    expect(vista).toMatchObject({ boletas_modo: 'individual', resumen_hora: '23:30', envio_diferido: false });
+    expect(vista).not.toHaveProperty('envio_en_linea');
     expect(vista.aviso_legal_ose.texto).not.toMatch(/siga emitiendo con Nubefact/);
     expect(vista.aviso_legal_ose.normas).toEqual(['RS 117-2017/SUNAT', 'RS 239-2018/SUNAT']);
   });

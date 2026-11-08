@@ -1,5 +1,5 @@
 import { PLAZOS_ENVIO_DIAS } from '../catalogos/sunat.catalogos';
-import { sumarDias } from './fechas-fiscales';
+import { diasEntre, sumarDias } from './fechas-fiscales';
 
 /**
  * Reglas de envío que comparten la emisión, el reintento, la recuperación de CDR y la tarea
@@ -42,4 +42,25 @@ export function rucDeUsuarioSol(usuario: string): string | null {
 export function usuarioSolCorrespondeAlEmisor(usuario: string, rucEmisor: string): boolean {
   const ruc = rucDeUsuarioSol(usuario);
   return ruc !== null && ruc === (rucEmisor ?? '').trim();
+}
+
+/** Último día (yyyy-mm-dd) en que una boleta o una nota de boleta aún puede informarse en un resumen diario (7 días desde la emisión). */
+export function fechaLimiteResumen(fechaEmision: string): string {
+  return sumarDias(fechaEmision, PLAZOS_ENVIO_DIAS.resumenDiario);
+}
+
+/**
+ * ¿Una boleta (o nota de boleta) emitida en `fechaEmision` todavía puede informarse en un resumen diario `hoy`?
+ * Sí hasta el 7.º día desde la emisión (RS 114-2019). Una factura o una nota de factura nunca va por resumen.
+ */
+export function admiteResumenDiario(tipo: string, serie: string, fechaEmision: string, hoy: string): boolean {
+  if (esDocumentoDeFactura(tipo, serie)) return false;
+  const dias = diasEntre(fechaEmision, hoy);
+  return dias >= 0 && dias <= PLAZOS_ENVIO_DIAS.resumenDiario;
+}
+
+/** Más de 5 días desde la emisión (venció el envío individual) y todavía dentro de los 7 del resumen. */
+export function pasoDelEnvioIndividual(fechaEmision: string, hoy: string): boolean {
+  const dias = diasEntre(fechaEmision, hoy);
+  return dias > PLAZOS_ENVIO_DIAS.boletaIndividual && dias <= PLAZOS_ENVIO_DIAS.resumenDiario;
 }

@@ -8,7 +8,7 @@ import type { FiscalConfigService } from '../config/fiscal-config.service';
 import type { SnapshotConfigFiscal } from '../config/fiscal-config.tipos';
 import type { FiscalEsquemaService } from '../config/fiscal-esquema.service';
 import type { TransaccionesFiscales } from '../config/transacciones-fiscales';
-import { EMISOR_PRUEBA, facturaPrueba } from '../nucleo/pruebas/documentos-prueba-spec';
+import { boletaPrueba, EMISOR_PRUEBA, facturaPrueba, notaCreditoPrueba } from '../nucleo/pruebas/documentos-prueba-spec';
 import type { CredencialesSolService } from '../seguridad/credenciales-sol.service';
 import { EmisionDirectaService } from './emision-directa.service';
 import type { DocumentoPreparado } from './emision.contrato';
@@ -134,6 +134,21 @@ describe('EmisionDirectaService.modo() (nunca lanza)', () => {
     expect(await crear({ ...EN_PRODUCCION, fiscal_envio_diferido: 'true' }).servicio.modo()).toEqual({ activo: true, ambiente: 'produccion', diferido: true });
     // Con la emisión apagada no hay nada que diferir.
     expect(await crear({ ...EN_BETA, fiscal_beta_pos_directo: '', fiscal_envio_diferido: 'true' }).servicio.modo()).toMatchObject({ activo: false });
+  });
+
+  it('fiscal_boletas_modo: «resumen» lo informa el modo activo (las boletas van al resumen diario); por defecto no aparece', async () => {
+    expect(await crear(EN_PRODUCCION).servicio.modo()).not.toHaveProperty('resumen');
+    expect(await crear({ ...EN_PRODUCCION, fiscal_boletas_modo: 'resumen' }).servicio.modo()).toEqual({ activo: true, ambiente: 'produccion', diferido: false, resumen: true });
+    expect(await crear({ ...EN_BETA, fiscal_boletas_modo: 'resumen', fiscal_envio_diferido: 'true' }).servicio.modo()).toEqual({
+      activo: true,
+      ambiente: 'beta',
+      diferido: true,
+      resumen: true,
+    });
+    // Un solo interruptor: la clave vieja «envío en línea» apagada también deja el envío diferido.
+    expect(await crear({ ...EN_PRODUCCION, fiscal_envio_en_linea: 'false' }).servicio.modo()).toMatchObject({ activo: true, diferido: true });
+    // Con la emisión apagada no hay resumen que hacer.
+    expect(await crear({ ...VALORES_COMPLETOS, fiscal_boletas_modo: 'resumen' }).servicio.modo()).toMatchObject({ activo: false });
   });
 
   it('sin el esquema fiscal: FISCAL_MIGRACION_PENDIENTE; si no se pudo verificar o leer: FISCAL_LECTURA_ERROR', async () => {
@@ -270,7 +285,23 @@ describe('EmisionDirectaService.registrarEnvio / emitirPreparado', () => {
     const consultor = { query: jest.fn() };
     const p = preparado('produccion');
     expect(await servicio.registrarEnvio(consultor, p, 9, 1)).toBe(321);
-    expect(emision.registrar).toHaveBeenCalledWith(consultor, 'produccion', p.documento, p.preparado, 9, 1);
+    expect(emision.registrar).toHaveBeenCalledWith(consultor, 'produccion', p.documento, p.preparado, 9, 1, false);
+  });
+
+  it('en modo «resumen» una boleta se registra POR_RESUMIR (sin enviarla); la factura y las notas siguen su camino normal', async () => {
+    const { servicio, emision } = crear(EN_PRODUCCION);
+    const consultor = { query: jest.fn() };
+    const boleta = { ...preparado('produccion'), documento: boletaPrueba(undefined, { serie: 'B001', numero: 7 }) } as unknown as DocumentoPreparado;
+    await servicio.registrarEnvio(consultor, boleta, 9, 1, { porResumir: true });
+    expect(emision.registrar).toHaveBeenLastCalledWith(consultor, 'produccion', boleta.documento, boleta.preparado, 9, 1, true);
+
+    // Una factura (o una nota) pedida «por resumir» se registra normal: solo las boletas se informan en el resumen.
+    const factura = preparado('produccion');
+    await servicio.registrarEnvio(consultor, factura, 9, 1, { porResumir: true });
+    expect(emision.registrar).toHaveBeenLastCalledWith(consultor, 'produccion', factura.documento, factura.preparado, 9, 1, false);
+    const nota = { ...preparado('produccion'), documento: notaCreditoPrueba(undefined, { serie: 'BC01', numero: 2 }) } as unknown as DocumentoPreparado;
+    await servicio.registrarEnvio(consultor, nota, 9, 1, { porResumir: true });
+    expect(emision.registrar).toHaveBeenLastCalledWith(consultor, 'produccion', nota.documento, nota.preparado, 9, 1, false);
   });
 
   it('emitirPreparado registra en su propia transacción y luego envía con el documento en memoria', async () => {
@@ -278,7 +309,7 @@ describe('EmisionDirectaService.registrarEnvio / emitirPreparado', () => {
     const p = preparado('produccion');
     await servicio.emitirPreparado(p, 9, null);
     expect(transacciones.ejecutar).toHaveBeenCalledTimes(1);
-    expect(emision.registrar).toHaveBeenCalledWith(tx, 'produccion', p.documento, p.preparado, 9, null);
+    expect(emision.registrar).toHaveBeenCalledWith(tx, 'produccion', p.documento, p.preparado, 9, null, false);
     expect(emision.enviar).toHaveBeenCalledWith(321, { ambiente: 'produccion', documento: p.documento, preparado: p.preparado });
   });
 

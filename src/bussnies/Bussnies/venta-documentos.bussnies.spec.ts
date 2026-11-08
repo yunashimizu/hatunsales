@@ -125,6 +125,7 @@ const DETALLE = {
   vencido: false,
   fecha_limite_envio: '2026-10-27',
   aviso: null as string | null,
+  puede_informar_por_resumen: false,
 };
 
 const VENDIDO: ProductoVendidoGuia = {
@@ -588,7 +589,7 @@ describe('VentaDocumentosBussnies.documentos (GET /venta/:id/documentos)', () =>
       expect(r.avisos).toEqual([`F001-00000012 todavía no tiene la respuesta de SUNAT: ${siguiente}.`]);
     });
 
-    it('fuera de plazo: la factura pide un comprobante nuevo y la boleta el resumen diario', async () => {
+    it('fuera de plazo: la factura pide un comprobante nuevo; la boleta, el resumen diario (≤ 7 días) o la nota de crédito (> 7 días)', async () => {
       const facturaVencida = await crear({
         comprobantes: [factura({ estado: 'pendiente', estado_sunat: 'PENDIENTE_REENVIO', aceptada_sunat: false })],
         detalles: { 10: { vencido: true, fecha_limite_envio: '2026-10-20', puede_nota_credito: false } },
@@ -600,7 +601,15 @@ describe('VentaDocumentosBussnies.documentos (GET /venta/:id/documentos)', () =>
         detalles: { 10: { vencido: true, fecha_limite_envio: '2026-10-20', puede_nota_credito: false } },
       }).negocio.documentos(5, ADMIN);
       expect(boletaVencida.avisos).toEqual([
-        'Venció el plazo de envío individual de B001-00000012 (vencía el 20/10/2026): informe la boleta en SUNAT con el resumen diario.',
+        'Venció el plazo de envío individual de B001-00000012 (vencía el 20/10/2026) y ya pasaron los 7 días del resumen diario: si el cliente reclama el comprobante, anúlelo con nota de crédito y emita uno nuevo.',
+      ]);
+
+      const boletaInformable = await crear({
+        comprobantes: [boleta({ estado: 'pendiente', estado_sunat: 'PENDIENTE_REENVIO', aceptada_sunat: false })],
+        detalles: { 10: { vencido: true, fecha_limite_envio: '2026-10-20', puede_nota_credito: false, puede_informar_por_resumen: true } },
+      }).negocio.documentos(5, ADMIN);
+      expect(boletaInformable.avisos).toEqual([
+        'Venció el plazo de envío individual de B001-00000012 (vencía el 20/10/2026): se informará a SUNAT en el próximo resumen diario (hasta 7 días después de la emisión).',
       ]);
     });
 

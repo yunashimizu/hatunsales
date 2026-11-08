@@ -391,12 +391,110 @@ describe('ComprobanteBussnies: detalle, listado, acciones y descargas', () => {
       expect(await fila(incierta, { envio_libre: false, envio_accion: null })).toMatchObject({ puede_reintentar: false });
     });
 
+    it('EXCEPCION (requiere revisión) dentro del plazo: el administrador puede reintentar ahora, recuperar la constancia o confirmar a mano', async () => {
+      const excepcion = cpe({ estado: 'error', aceptada_sunat: false, estado_sunat: 'EXCEPCION' });
+      expect(await fila(excepcion, { envio_accion: 'NINGUNA' })).toMatchObject({
+        puede_reintentar: false,
+        puede_reintentar_ahora: true,
+        puede_recuperar_cdr: true,
+        puede_confirmar_manual: true,
+        vencido: false,
+      });
+      // Otro proceso lo está tocando: nada de reintentar ahora.
+      expect(await fila(excepcion, { envio_accion: 'NINGUNA', envio_libre: false })).toMatchObject({ puede_reintentar_ahora: false });
+      // Una boleta no tiene getStatusCdr, pero sí se puede confirmar tras verla en SOL.
+      const boleta = cpe({ tipo: { id_tipo: 2 }, serie: 'B001', estado: 'error', aceptada_sunat: false, estado_sunat: 'EXCEPCION' });
+      expect(await fila(boleta, { envio_accion: 'NINGUNA' })).toMatchObject({ puede_reintentar_ahora: true, puede_recuperar_cdr: false, puede_confirmar_manual: true });
+    });
+
+    it('EXCEPCION con el plazo vencido: figura como vencido y ya no se ofrece reintentar (queda recuperar o confirmar)', async () => {
+      const excepcion = cpe({ estado: 'error', aceptada_sunat: false, estado_sunat: 'EXCEPCION' });
+      expect(await fila(excepcion, { fecha_limite_envio: '2026-10-20', envio_accion: 'RECUPERAR_CDR' })).toMatchObject({
+        vencido: true,
+        puede_reintentar: false,
+        puede_reintentar_ahora: false,
+        puede_recuperar_cdr: true,
+        puede_confirmar_manual: true,
+      });
+    });
+
     it('vencido: pasó el plazo sin aceptación y ya no se ofrece reenviar', async () => {
       const pendiente = cpe({ estado: 'pendiente', aceptada_sunat: false, estado_sunat: 'PENDIENTE_REENVIO' });
       expect(await fila(pendiente, { fecha_limite_envio: '2026-10-20', envio_accion: 'REINTENTAR' })).toMatchObject({
         vencido: true,
         puede_reintentar: false,
         puede_recuperar_cdr: true,
+      });
+    });
+
+    describe('«Informar por resumen» (puede_informar_por_resumen)', () => {
+      const LOTES = { estadoDeComprobante: jest.fn() };
+      /** Boleta B001 de S/ 59, emitida en la fecha dada (dd-mm-aaaa); hoy es el 21/10/2026. */
+      const boleta = (estado_sunat: string, emision: string, cambios: Partial<Record<keyof Comprobante, unknown>> = {}) =>
+        cpe({ tipo: { id_tipo: 2 }, serie: 'B001', numero: 7, estado: 'pendiente', aceptada_sunat: false, estado_sunat, fecha_de_emision: emision, ...cambios });
+
+      it('boleta POR_RESUMIR: no está vencida ni se reintenta; se puede informar por resumen dentro de los 7 días', async () => {
+        // Emitida hace 3 días (18/10): el envío individual aún no venció (límite 23/10) y ni se usa.
+        const porResumir = boleta('POR_RESUMIR', '18-10-2026');
+        expect(await fila(porResumir, { fecha_limite_envio: '2026-10-23', envio_accion: 'RESUMIR' }, LOTES)).toMatchObject({
+          estado_sunat: 'POR_RESUMIR',
+          accion_sunat: 'RESUMIR',
+          vencido: false,
+          puede_reintentar: false,
+          puede_reintentar_ahora: false,
+          puede_confirmar_manual: false,
+          puede_informar_por_resumen: true,
+        });
+        // Sin el contrato de lotes no se ofrece.
+        expect(await fila(porResumir, { envio_accion: 'RESUMIR' })).toMatchObject({ puede_informar_por_resumen: false });
+      });
+
+      it('boleta POR_RESUMIR de hace más de 7 días: ya no puede informarse y figura como vencida (queda la nota de crédito)', async () => {
+        expect(await fila(boleta('POR_RESUMIR', '10-10-2026'), { fecha_limite_envio: '2026-10-15', envio_accion: 'RESUMIR' }, LOTES)).toMatchObject({
+          vencido: true,
+          puede_informar_por_resumen: false,
+        });
+      });
+
+      it('boleta que falló en el envío individual: solo cuando ya venció ese plazo (5 días) y sigue dentro de los 7', async () => {
+        const pendiente = boleta('PENDIENTE_REENVIO', '14-10-2026');
+        // Emitida el 14/10, hoy 21/10: 7 días; el plazo individual venció el 19/10.
+        expect(await fila(pendiente, { fecha_limite_envio: '2026-10-19', envio_accion: 'REINTENTAR' }, LOTES)).toMatchObject({
+          vencido: true,
+          puede_reintentar: false,
+          puede_informar_por_resumen: true,
+        });
+        // Todavía dentro del plazo individual: se reintenta por su camino, no se informa por resumen.
+        expect(await fila(boleta('PENDIENTE_REENVIO', '19-10-2026'), { fecha_limite_envio: '2026-10-24', envio_accion: 'REINTENTAR' }, LOTES)).toMatchObject({
+          vencido: false,
+          puede_reintentar: true,
+          puede_informar_por_resumen: false,
+        });
+        // Pasaron los 7 días (emitida el 13/10): solo nota de crédito.
+        expect(await fila(boleta('EXCEPCION', '13-10-2026', { estado: 'error' }), { fecha_limite_envio: '2026-10-18', envio_accion: 'EMITIR_NUEVO' }, LOTES)).toMatchObject({
+          vencido: true,
+          puede_informar_por_resumen: false,
+        });
+      });
+
+      it('nunca para una factura, una boleta ya aceptada, anulada, en un resumen en curso o de otro ambiente', async () => {
+        const extra = { fecha_limite_envio: '2026-10-19', envio_accion: 'REINTENTAR' };
+        expect(await fila(cpe({ estado: 'pendiente', aceptada_sunat: false, estado_sunat: 'PENDIENTE_REENVIO', fecha_de_emision: '14-10-2026' }), extra, LOTES)).toMatchObject({ puede_informar_por_resumen: false });
+        expect(await fila(boleta('ACEPTADO', '14-10-2026', { aceptada_sunat: true, estado: 'emitido' }), extra, LOTES)).toMatchObject({ puede_informar_por_resumen: false });
+        expect(await fila(boleta('PENDIENTE_REENVIO', '14-10-2026', { anulado: true }), extra, LOTES)).toMatchObject({ puede_informar_por_resumen: false });
+        expect(await fila(boleta('TICKET_PENDIENTE', '14-10-2026'), extra, LOTES)).toMatchObject({ puede_informar_por_resumen: false, vencido: false });
+        expect(await fila(boleta('PENDIENTE_REENVIO', '14-10-2026', { ambiente_fiscal: 'beta' }), extra, LOTES)).toMatchObject({ puede_informar_por_resumen: false });
+      });
+
+      it('informarPorResumen delega en el contrato de lotes con el usuario; sin él responde 409', async () => {
+        const resumir = jest.fn().mockResolvedValue({ id_envio: 70, estado: 'TICKET_PENDIENTE', comprobantes: 1 });
+        const { servicio } = crear({ lotes: { estadoDeComprobante: jest.fn(), resumirComprobante: resumir } });
+        const actor = { id_usuario: 7, nombre: 'Moisés', ip: '10.0.0.5' };
+        expect(await servicio.informarPorResumen(50, actor)).toMatchObject({ id_envio: 70 });
+        expect(resumir).toHaveBeenCalledWith({ id_comprobante: 50, actor });
+
+        const sinLotes = crear().servicio;
+        await expect(sinLotes.informarPorResumen(50, actor)).rejects.toBeInstanceOf(ConflictException);
       });
     });
 
@@ -426,8 +524,18 @@ describe('ComprobanteBussnies: detalle, listado, acciones y descargas', () => {
 
       const respuesta = await servicio.reintentar(50);
 
-      expect(emision.reintentar).toHaveBeenCalledWith(501);
+      expect(emision.reintentar).toHaveBeenCalledWith(501, {});
       expect(respuesta).toMatchObject({ id_comprobante: 50, serie: 'F001', numero: 12, estado: 'emitido', ambiente_fiscal: 'produccion', aviso: null });
+    });
+
+    it('«Reintentar ahora»: pasa al envío si es forzado y quién lo pide, para la bitácora', async () => {
+      const { servicio, emision } = crear({ comprobante: cpe({ estado: 'error', aceptada_sunat: false, estado_sunat: 'EXCEPCION' }) });
+      emision.reintentar.mockResolvedValue(resultadoEmision({ ambiente: 'produccion', id_envio: 501 }));
+      const actor = { id_usuario: 7, nombre: 'Moisés', ip: '10.0.0.5' };
+
+      await servicio.reintentar(50, { forzar: true, actor });
+
+      expect(emision.reintentar).toHaveBeenCalledWith(501, { forzar: true, actor });
     });
 
     it('un comprobante histórico o sin envío no se reintenta ni consulta por otro proveedor', async () => {
@@ -444,10 +552,10 @@ describe('ComprobanteBussnies: detalle, listado, acciones y descargas', () => {
       emision.recuperarCdr.mockResolvedValue(resultadoEmision({ ambiente: 'produccion' }));
       emision.confirmarAceptadoManual.mockResolvedValue(resultadoEmision({ ambiente: 'beta' }));
 
-      await servicio.recuperarCdr(50);
+      await servicio.recuperarCdr(50, { id_usuario: 1, nombre: 'Ana', ip: '1.1.1.1' });
       const confirmado = await servicio.confirmarAceptado(50, 1, 'Verificado en SOL: aceptado el 21/10');
 
-      expect(emision.recuperarCdr).toHaveBeenCalledWith(501);
+      expect(emision.recuperarCdr).toHaveBeenCalledWith(501, { actor: { id_usuario: 1, nombre: 'Ana', ip: '1.1.1.1' } });
       expect(emision.confirmarAceptadoManual).toHaveBeenCalledWith(501, 1, 'Verificado en SOL: aceptado el 21/10');
       expect(confirmado.aviso).toBe('Prueba SUNAT BETA: sin validez tributaria.');
       await expect(servicio.confirmarAceptado(50, 1, 'ok')).rejects.toBeInstanceOf(BadRequestException);
@@ -558,6 +666,17 @@ describe('ComprobanteBussnies: detalle, listado, acciones y descargas', () => {
 
       expect(generarPdf.mock.calls[0][0]).toMatchObject({ ambiente: 'beta', avisoEstado: 'PENDIENTE DE CONFIRMACIÓN DE SUNAT' });
       expect(generarPdf.mock.calls[0][1]).toEqual({ formato: 'a4' });
+    });
+
+    it('la boleta que espera su resumen diario no lleva aviso de pendiente (es válida); la que está en un resumen en curso, sí', async () => {
+      const { servicio } = crear({ comprobante: cpe({ tipo: { id_tipo: 2 }, serie: 'B001', estado: 'pendiente', aceptada_sunat: false, estado_sunat: 'POR_RESUMIR' }) });
+      await servicio.obtenerPdf(50);
+      expect(generarPdf.mock.calls[0][0]).toMatchObject({ avisoEstado: null });
+
+      generarPdf.mockClear();
+      const enResumen = crear({ comprobante: cpe({ tipo: { id_tipo: 2 }, serie: 'B001', estado: 'pendiente', aceptada_sunat: false, estado_sunat: 'TICKET_PENDIENTE' }) });
+      await enResumen.servicio.obtenerPdf(50);
+      expect(generarPdf.mock.calls[0][0]).toMatchObject({ avisoEstado: 'PENDIENTE DE CONFIRMACIÓN DE SUNAT' });
     });
 
     it('si el generador falla responde 500 con un mensaje accionable', async () => {

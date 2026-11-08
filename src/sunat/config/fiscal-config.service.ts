@@ -126,8 +126,9 @@ export class FiscalConfigService {
     return (await this.snapshot()).boletasModo;
   }
 
-  async envioEnLinea(): Promise<boolean> {
-    return (await this.snapshot()).envioEnLinea;
+  /** HH:mm (Lima) del resumen diario de boletas. */
+  async resumenHora(): Promise<string> {
+    return (await this.snapshot()).resumenHora;
   }
 
   async envioDiferido(): Promise<boolean> {

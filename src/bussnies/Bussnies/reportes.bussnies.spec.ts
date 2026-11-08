@@ -543,3 +543,461 @@ describe('ReportesBussnies · exportes profesionales', () => {
     });
   });
 });
+
+/**
+ * Registro de ventas para el SIRE (RVIE): lo que entra, en negativo las notas de crédito, los anulados en cero,
+ * el nombre oficial del archivo y los casos de borde (mes sin ventas, cliente sin documento).
+ */
+describe('ReportesBussnies · registro de ventas (SIRE / RVIE)', () => {
+  const fila = (id: number, datos: Record<string, unknown> = {}) => ({
+    id_comprobante: id,
+    id_tipo: 1,
+    serie: 'F001',
+    numero: id,
+    fecha_de_emision: '2026-10-05',
+    fecha_de_vencimiento: '2026-10-05',
+    creado_en: new Date('2026-10-05T15:00:00Z'),
+    cliente_tipo_doc: 6,
+    cliente_numero_doc: '20100066603',
+    cliente_denominacion: 'FERRETERIA EL SOL S.A.C.',
+    total_gravada: '100.00',
+    total_exonerada: '0.00',
+    total_inafecta: '0.00',
+    total_igv: '18.00',
+    total: '118.00',
+    id_moneda: 1,
+    anulado: false,
+    estado: 'emitido',
+    estado_sunat: 'ACEPTADO',
+    aceptada_sunat: true,
+    ambiente_fiscal: 'produccion',
+    doc_modificado_tipo: null,
+    doc_modificado_serie: null,
+    doc_modificado_numero: null,
+    fecha_doc_modificado: null,
+    ...datos,
+  });
+  const montar = (lista: any[]) => {
+    const repo = { obtenerComprobantesRvie: jest.fn().mockResolvedValue(lista) };
+    return { servicio: new ReportesBussnies(repo as any), repo };
+  };
+  const columnas = (linea: string) => linea.split('|');
+  const lineas = (txt: string) => txt.split('\r\n').filter(Boolean);
+
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }).setSystemTime(new Date('2026-11-08T15:00:00Z')));
+  afterEach(() => jest.useRealTimers());
+
+  it('estructura: 34 columnas separadas por «|», periodo, fechas dd/mm/aaaa, tipo 01, importes con dos decimales', async () => {
+    const { servicio, repo } = montar([fila(12)]);
+    const r = await servicio.registroVentasRvie('202610');
+
+    expect(repo.obtenerComprobantesRvie).toHaveBeenCalledWith('202610');
+    const [linea] = lineas(r.contenido);
+    const c = columnas(linea);
+    expect(c).toHaveLength(34);
+    expect(c.slice(0, 13)).toEqual([emisorConfig.ruc, emisorConfig.razon_social, '202610', '', '05/10/2026', '05/10/2026', '01', 'F001', '12', '', '6', '20100066603', 'FERRETERIA EL SOL S.A.C.']);
+    expect(c.slice(13, 27)).toEqual(['0.00', '100.00', '0.00', '18.00', '0.00', '0.00', '0.00', '0.00', '0.00', '0.00', '0.00', '0.00', '118.00', 'PEN']);
+    expect(r.contenido.endsWith('\r\n')).toBe(true);
+    expect(r.contenido.charCodeAt(0)).not.toBe(0xfeff);
+    expect(r.resumen).toMatchObject({ periodo: '202610', filas: 1, por_tipo: { factura: 1, boleta: 0, nota_credito: 0, nota_debito: 0 } });
+    expect(r.resumen.aviso).toContain('PLE 14.1');
+  });
+
+  it('la nota de crédito va en negativo y lleva el documento que modifica; la nota de débito en positivo', async () => {
+    const { servicio } = montar([
+      fila(12),
+      fila(3, {
+        id_tipo: 7, serie: 'FC01', total_gravada: '50.00', total_igv: '9.00', total: '59.00',
+        doc_modificado_tipo: '01', doc_modificado_serie: 'F001', doc_modificado_numero: 12, fecha_doc_modificado: '2026-10-05',
+      }),
+      fila(4, { id_tipo: 8, serie: 'FD01', total_gravada: '10.00', total_igv: '1.80', total: '11.80' }),
+    ]);
+    const [, nc, nd] = lineas((await servicio.registroVentasRvie('202610')).contenido).map(columnas);
+
+    expect(nc[6]).toBe('07');
+    expect(nc.slice(14, 17)).toEqual(['-50.00', '0.00', '-9.00']);
+    expect(nc[25]).toBe('-59.00');
+    expect(nc.slice(28, 32)).toEqual(['05/10/2026', '01', 'F001', '12']);
+    expect(nd[6]).toBe('08');
+    expect(nd[25]).toBe('11.80');
+    expect(nd.slice(28, 32)).toEqual(['', '', '', '']);
+  });
+
+  it('el comprobante dado de baja en SUNAT sale en cero y «ANULADO»; el anulado solo en el sistema, las pruebas, errores, rechazados y pendientes quedan fuera', async () => {
+    const { servicio } = montar([
+      fila(1),
+      fila(2, { estado_sunat: 'ANULADO', anulado: true }),
+      fila(3, { anulado: true, aceptada_sunat: false, estado_sunat: 'NO_ENVIADO' }),
+      fila(4, { ambiente_fiscal: 'beta' }),
+      fila(5, { estado: 'error', aceptada_sunat: false, estado_sunat: 'EXCEPCION' }),
+      fila(6, { estado_sunat: 'RECHAZADO', aceptada_sunat: false }),
+      fila(7, { estado_sunat: 'PENDIENTE_REENVIO', aceptada_sunat: false }),
+      fila(8, { anulado: true }), // anulada con nota de crédito: sigue aceptada en SUNAT
+    ]);
+    const r = await servicio.registroVentasRvie('202610');
+    const filas = lineas(r.contenido).map(columnas);
+
+    expect(filas.map((c) => c[8])).toEqual(['1', '2', '8']);
+    const anulado = filas[1];
+    expect(anulado[10]).toBe('0');
+    expect(anulado[11]).toBe('0');
+    expect(anulado[12]).toBe('ANULADO');
+    expect(anulado.slice(13, 26)).toEqual(Array(13).fill('0.00'));
+    expect(filas[2][25]).toBe('118.00');
+    expect(r.resumen).toMatchObject({
+      filas: 3,
+      anulados: 1,
+      omitidos: { pruebas: 1, con_error: 1, rechazados: 1, sin_aceptar: 1, anulados_sin_sunat: 1 },
+    });
+  });
+
+  it('nombre oficial del archivo: LE + RUC + AAAAMM + 00 + 140400 + 02 + O I M G, y con el mes vacío I = 0 y contenido vacío', async () => {
+    const con = await montar([fila(1)]).servicio.registroVentasRvie('202610');
+    expect(con.nombre).toBe(`LE${emisorConfig.ruc}20261000140400021112.txt`);
+    expect(con.tipo).toBe('text/plain; charset=utf-8');
+
+    const sin = await montar([]).servicio.registroVentasRvie('202609');
+    expect(sin.nombre).toBe(`LE${emisorConfig.ruc}20260900140400021012.txt`);
+    expect(sin.contenido).toBe('');
+    expect(sin.resumen).toMatchObject({ filas: 0, anulados: 0 });
+  });
+
+  it('un cliente sin documento (boleta sin DNI) sale con tipo 0 y «-»; el «|» y los saltos del nombre no rompen la línea', async () => {
+    const { servicio } = montar([
+      fila(9, { id_tipo: 2, serie: 'B001', cliente_tipo_doc: null, cliente_numero_doc: '', cliente_denominacion: 'CLIENTES VARIOS' }),
+      fila(10, { id_tipo: 2, serie: 'B001', cliente_denominacion: 'PEREZ | SOLIS\n  HNOS', cliente_tipo_doc: 1, cliente_numero_doc: '45612378' }),
+    ]);
+    const [sinDoc, conBarra] = lineas((await servicio.registroVentasRvie('202610')).contenido).map(columnas);
+
+    expect(sinDoc).toHaveLength(34);
+    expect(sinDoc.slice(10, 13)).toEqual(['0', '-', 'CLIENTES VARIOS']);
+    expect(sinDoc[6]).toBe('03');
+    expect(conBarra).toHaveLength(34);
+    expect(conBarra.slice(10, 13)).toEqual(['1', '45612378', 'PEREZ SOLIS HNOS']);
+  });
+
+  it('solo cuenta lo emitido en ese mes (también las fechas DD-MM-AAAA de Nubefact) y avisa de los dólares', async () => {
+    const { servicio } = montar([
+      fila(1, { fecha_de_emision: '2026-09-30' }),
+      fila(2, { fecha_de_emision: '15-10-2026', estado_sunat: null, ambiente_fiscal: null, aceptada_sunat: true }),
+      fila(3, { id_moneda: 2, total: '50.00', total_gravada: '42.37', total_igv: '7.63' }),
+      fila(4, { fecha_de_emision: 'basura', creado_en: new Date('2026-11-01T02:00:00Z') }), // 31/10 21:00 en Lima
+    ]);
+    const r = await servicio.registroVentasRvie('202610');
+    const filas = lineas(r.contenido).map(columnas);
+
+    // En orden de fecha: el 3 (5/10), el 2 (15/10) y el 4 (31/10).
+    expect(filas.map((c) => c[8])).toEqual(['3', '2', '4']);
+    expect(filas[0][26]).toBe('USD');
+    expect(filas[0][27]).toBe('');
+    expect(filas[1][4]).toBe('15/10/2026');
+    expect(filas[2][4]).toBe('31/10/2026');
+    expect(r.resumen.en_dolares).toBe(1);
+  });
+
+  it('el CSV lleva cabeceras, la columna Estado, BOM y comillas donde hace falta', async () => {
+    const { servicio } = montar([
+      fila(1, { cliente_denominacion: 'SOLIS, HNOS "EL SOL"' }),
+      fila(2, { estado_sunat: 'ANULADO', anulado: true }),
+    ]);
+    const r = await servicio.registroVentasRvieCsv('202610');
+    const [cabecera, a, b] = r.contenido.replace('﻿', '').split('\r\n');
+
+    expect(r.contenido.charCodeAt(0)).toBe(0xfeff);
+    expect(r.nombre).toBe(`registro-ventas-sire-${emisorConfig.ruc}-202610.csv`);
+    expect(r.tipo).toBe('text/csv; charset=utf-8');
+    expect(cabecera.split(',')).toHaveLength(35);
+    expect(cabecera).toContain('Base imponible gravada');
+    expect(cabecera.endsWith(',Estado')).toBe(true);
+    expect(a).toContain('"SOLIS, HNOS ""EL SOL"""');
+    expect(a.endsWith(',Aceptado')).toBe(true);
+    expect(b.endsWith(',Anulado')).toBe(true);
+  });
+
+  it('rechaza un periodo mal escrito o futuro (400) y avisa claro si la consulta falla (503)', async () => {
+    const { servicio, repo } = montar([]);
+    for (const malo of ['', '2026', '2026-10', '202613', '201912', 'octubre']) {
+      await expect(servicio.registroVentasRvie(malo)).rejects.toBeInstanceOf(BadRequestException);
+    }
+    await expect(servicio.registroVentasRvie('202612')).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.obtenerComprobantesRvie).not.toHaveBeenCalled();
+
+    repo.obtenerComprobantesRvie.mockRejectedValueOnce(new Error('column "doc_modificado_tipo" does not exist'));
+    await expect(servicio.registroVentasRvie('202610')).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+// ── Fase F: rentabilidad, estancados, mapa de calor ─────────────────────────
+
+function armarF(lista: any[] = [], extra: Record<string, jest.Mock> = {}) {
+  const repo = {
+    obtenerVentasPorPeriodo: jest.fn().mockResolvedValue(lista),
+    obtenerRentabilidadProductos: jest.fn().mockResolvedValue([]),
+    obtenerProductosEstancados: jest.fn().mockResolvedValue([]),
+    ...extra,
+  };
+  return { servicio: new ReportesBussnies(repo as any), repo };
+}
+
+function filaRent(datos: Record<string, unknown> = {}) {
+  return {
+    id_producto: 1,
+    codigo: 'MARTILLO-1',
+    producto: 'Martillo',
+    categoria: 'Herramientas',
+    cantidad: '10',
+    ingreso: '236.00',
+    costo: '150.00',
+    ultima_venta: new Date('2026-11-04T15:00:00Z'),
+    sin_costo: false,
+    ...datos,
+  };
+}
+
+describe('ReportesBussnies · rentabilidad por producto (F1)', () => {
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }));
+  afterEach(() => jest.useRealTimers());
+
+  it('calcula margen en soles y en porcentaje y pide solo los comprobantes que cuentan', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const lista = [
+      comprobante(1, { total: '100.00' }),
+      comprobante(2, { total: '50.00', anulado: true }),
+      comprobante(3, { total: '20.00', estado_sunat: 'RECHAZADO' }),
+      comprobante(4, { total: '30.00', ambiente_fiscal: 'beta' }),
+      comprobante(5, { total: '40.00', tipo: { id_tipo: 7 } }),
+    ];
+    const { servicio, repo } = armarF(lista, { obtenerRentabilidadProductos: jest.fn().mockResolvedValue([filaRent()]) });
+
+    const r = await servicio.rentabilidadProductos({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-08' });
+
+    expect(repo.obtenerRentabilidadProductos).toHaveBeenCalledWith([1, 5], 501);
+    expect(r.fecha_inicio).toBe('2026-11-01');
+    expect(r.fecha_fin).toBe('2026-11-08');
+    expect(r.productos[0]).toMatchObject({
+      producto: 'Martillo',
+      cantidad: 10,
+      ingreso: 236,
+      costo: 150,
+      margen: 86,
+      margen_pct: 36.44,
+      ultima_venta: '2026-11-04',
+      sin_costo: false,
+    });
+    expect(r.nota_costo).toContain('precio de compra actual');
+  });
+
+  it('el margen se calcula sobre la venta sin IGV: gravada pura', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const fila = filaRent({ cantidad: '2', ingreso: '118.00', ingreso_sin_igv: '100.00', costo: '60.00' });
+    const { servicio } = armarF([comprobante(1)], { obtenerRentabilidadProductos: jest.fn().mockResolvedValue([fila]) });
+
+    const r = await servicio.rentabilidadProductos({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-08' });
+
+    expect(r.productos[0]).toMatchObject({ ingreso: 118, ingreso_sin_igv: 100, costo: 60, margen: 40, margen_pct: 40 });
+    expect(r.totales).toMatchObject({ ingreso: 118, ingreso_sin_igv: 100, margen: 40, margen_pct: 40 });
+    expect(r.nota_costo).toContain('venta sin IGV − costo');
+  });
+
+  it('con gravadas y exoneradas mezcladas el margen y los totales por categoría usan la base sin IGV', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    // Comprobante de 218 (118 gravado + 100 exonerado, IGV 18): la base es 200/218 de cada ítem.
+    const filas = [
+      filaRent({ id_producto: 1, producto: 'Gravado', ingreso: '118.00', ingreso_sin_igv: '108.26', costo: '70.00' }),
+      filaRent({ id_producto: 2, producto: 'Exonerado', ingreso: '100.00', ingreso_sin_igv: '91.74', costo: '50.00' }),
+    ];
+    const { servicio } = armarF([comprobante(1)], { obtenerRentabilidadProductos: jest.fn().mockResolvedValue(filas) });
+
+    const r = await servicio.rentabilidadProductos({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-08' });
+
+    expect(r.productos.map((p) => [p.margen, p.margen_pct])).toEqual([[38.26, 35.34], [41.74, 45.5]]);
+    expect(r.categorias[0]).toMatchObject({ ingreso: 218, ingreso_sin_igv: 200, costo: 120, margen: 80, margen_pct: 40 });
+    expect(r.totales).toMatchObject({ ingreso: 218, ingreso_sin_igv: 200, margen: 80, margen_pct: 40 });
+  });
+
+  it('sin fechas usa el mes en curso de Lima', async () => {
+    jest.setSystemTime(new Date('2026-11-09T03:00:00Z')); // 8/11 22:00 en Lima
+    const { servicio, repo } = armarF([]);
+
+    const r = await servicio.rentabilidadProductos({});
+
+    const [desde, hasta] = repo.obtenerVentasPorPeriodo.mock.calls[0];
+    expect(desde.toISOString()).toBe('2026-11-01T05:00:00.000Z');
+    expect(hasta.toISOString()).toBe('2026-11-09T05:00:00.000Z');
+    expect(r.productos).toEqual([]);
+    expect(r.totales.margen_pct).toBeNull();
+  });
+
+  it('suma los productos por categoría y deja la categoría de mayor ingreso primero', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const filas = [
+      filaRent({ id_producto: 1, producto: 'Martillo', ingreso: '100.00', costo: '60.00', cantidad: '4' }),
+      filaRent({ id_producto: 2, producto: 'Pintura', categoria: 'Pinturas', ingreso: '500.00', costo: '350.00', cantidad: '5' }),
+      filaRent({ id_producto: 3, producto: 'Clavos', ingreso: '20.00', costo: '10.00', cantidad: '2' }),
+    ];
+    const { servicio } = armarF([comprobante(1)], { obtenerRentabilidadProductos: jest.fn().mockResolvedValue(filas) });
+
+    const r = await servicio.rentabilidadProductos({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-08' });
+
+    expect(r.categorias.map((c) => c.categoria)).toEqual(['Pinturas', 'Herramientas']);
+    expect(r.categorias[1]).toMatchObject({ productos: 2, cantidad: 6, ingreso: 120, costo: 70, margen: 50, margen_pct: 41.67 });
+    expect(r.totales).toMatchObject({ productos: 3, cantidad: 11, ingreso: 620, costo: 420, margen: 200, margen_pct: 32.26 });
+  });
+
+  it('avisa los productos sin precio de compra y un margen negativo se conserva', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const filas = [
+      filaRent({ producto: 'Sin costo', ingreso: '80.00', costo: '0.00', sin_costo: true }),
+      filaRent({ id_producto: 2, producto: 'A pérdida', ingreso: '50.00', costo: '70.00', ultima_venta: null }),
+    ];
+    const { servicio } = armarF([comprobante(1)], { obtenerRentabilidadProductos: jest.fn().mockResolvedValue(filas) });
+
+    const r = await servicio.rentabilidadProductos({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-08' });
+
+    expect(r.productos[0].sin_costo).toBe(true);
+    expect(r.productos[1]).toMatchObject({ margen: -20, margen_pct: -40, ultima_venta: null });
+  });
+
+  it('con más de 500 productos devuelve 500 y lo avisa', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const filas = Array.from({ length: 501 }, (_, i) => filaRent({ id_producto: i + 1, producto: `P${i}`, ingreso: '10.00', costo: '5.00' }));
+    const { servicio } = armarF([comprobante(1)], { obtenerRentabilidadProductos: jest.fn().mockResolvedValue(filas) });
+
+    const r = await servicio.rentabilidadProductos({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-08' });
+
+    expect(r.productos).toHaveLength(500);
+    expect(r.recortado).toBe(true);
+  });
+});
+
+describe('ReportesBussnies · stock estancado (F1)', () => {
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }));
+  afterEach(() => jest.useRealTimers());
+
+  it('acepta 30, 60 o 90 días (otro valor va al más cercano) y calcula el corte desde ahora', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const { servicio, repo } = armarF();
+
+    expect((await servicio.productosEstancados('60')).dias).toBe(60);
+    expect((await servicio.productosEstancados(95)).dias).toBe(90);
+    expect((await servicio.productosEstancados(undefined)).dias).toBe(30);
+    expect((await servicio.productosEstancados('xx')).dias).toBe(30);
+
+    const [corte, limite] = repo.obtenerProductosEstancados.mock.calls[0];
+    expect(corte.toISOString()).toBe('2026-09-09T15:00:00.000Z');
+    expect(limite).toBe(200);
+  });
+
+  it('valoriza el stock, cuenta los días sin venta en días de Lima y deja null lo que nunca se vendió', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const filas = [
+      { id_producto: 1, codigo: 'A1', producto: 'Taladro', categoria: 'Herramientas', stock: '4', precio_compra: '125.50', ultima_venta: new Date('2026-09-01T02:00:00Z'), total_filas: '2' },
+      { id_producto: 2, codigo: '', producto: 'Cinta', categoria: null, stock: '10', precio_compra: '3.00', ultima_venta: null, total_filas: '2' },
+    ];
+    const { servicio } = armarF([], { obtenerProductosEstancados: jest.fn().mockResolvedValue(filas) });
+
+    const r = await servicio.productosEstancados(30);
+
+    expect(r.productos[0]).toMatchObject({ valorizado: 502, ultima_venta: '2026-08-31', dias_sin_venta: 69 });
+    expect(r.productos[1]).toMatchObject({ valorizado: 30, ultima_venta: null, dias_sin_venta: null, categoria: 'Sin categoría' });
+    expect(r.valorizado_total).toBe(532);
+    expect(r.total_productos).toBe(2);
+    expect(r.recortado).toBe(false);
+  });
+
+  it('avisa cuando hay más productos de los que se devuelven', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const fila = { id_producto: 1, codigo: 'A', producto: 'X', categoria: 'C', stock: '1', precio_compra: '1', ultima_venta: null, total_filas: '350' };
+    const { servicio } = armarF([], { obtenerProductosEstancados: jest.fn().mockResolvedValue([fila]) });
+
+    const r = await servicio.productosEstancados(90);
+
+    expect(r.total_productos).toBe(350);
+    expect(r.recortado).toBe(true);
+  });
+});
+
+describe('ReportesBussnies · mapa de calor hora × día (F2)', () => {
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }));
+  afterEach(() => jest.useRealTimers());
+
+  // Hoy es domingo 8/11/2026 en Lima. El jueves 5/11 a las 16:30 de Lima son las 21:30 UTC.
+  const jueves = (hora: string, datos: Record<string, unknown> = {}, id = 1) =>
+    comprobante(id, { creado_en: new Date(`2026-11-05T${hora}Z`), total: '100.00', ...datos });
+
+  it('devuelve siempre 168 celdas, pide las últimas 4 semanas y usa el día y la hora de Lima', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const lista = [
+      jueves('21:30:00'), // jueves 16:30 Lima
+      jueves('02:00:00', {}, 2), // 4/11 21:00 Lima = miércoles (en UTC ya es jueves)
+      comprobante(3, { creado_en: new Date('2026-11-09T02:00:00Z'), total: '40.00' }), // domingo 8/11 21:00 Lima
+    ];
+    const { servicio, repo } = armarF(lista);
+
+    const r = await servicio.ventasMapaCalor();
+
+    const [desde, hasta] = repo.obtenerVentasPorPeriodo.mock.calls[0];
+    expect(desde.toISOString()).toBe('2026-10-12T05:00:00.000Z');
+    expect(hasta.toISOString()).toBe('2026-11-09T05:00:00.000Z');
+    expect(r).toMatchObject({ desde: '2026-10-12', hasta: '2026-11-08', semanas: 4 });
+    expect(r.celdas).toHaveLength(168);
+    const celda = (dia: number, hora: number) => r.celdas.find((c) => c.dia === dia && c.hora === hora)!;
+    expect(celda(4, 16)).toMatchObject({ total: 100, ventas: 1 });
+    expect(celda(3, 21)).toMatchObject({ total: 100, ventas: 1 });
+    expect(celda(0, 21)).toMatchObject({ total: 40, ventas: 1 });
+    expect(celda(4, 17)).toMatchObject({ total: 0, ventas: 0 });
+  });
+
+  it('usa el mismo criterio de ventas netas: la nota de crédito resta y anulados, rechazados y pruebas no cuentan', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const lista = [
+      jueves('21:30:00'),
+      jueves('21:40:00', { tipo: { id_tipo: 7 }, total: '30.00' }, 2),
+      jueves('21:45:00', { anulado: true }, 3),
+      jueves('21:50:00', { estado_sunat: 'RECHAZADO' }, 4),
+      jueves('21:55:00', { ambiente_fiscal: 'beta' }, 5),
+    ];
+    const { servicio } = armarF(lista);
+
+    const r = await servicio.ventasMapaCalor(4);
+
+    expect(r.celdas.find((c) => c.dia === 4 && c.hora === 16)).toMatchObject({ total: 70, ventas: 1 });
+  });
+
+  it('la mejor franja son dos horas seguidas con más ventas; sin ventas no hay franja', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const lista = [
+      jueves('21:30:00', { total: '100.00' }), // jueves 16
+      jueves('22:30:00', { total: '80.00' }, 2), // jueves 17
+      jueves('15:00:00', { total: '150.00' }, 3), // jueves 10
+    ];
+    const { servicio } = armarF(lista);
+
+    const r = await servicio.ventasMapaCalor(4);
+    expect(r.mejor).toEqual({ dia: 4, hora_inicio: 16, hora_fin: 18, total: 180 });
+
+    const vacio = await armarF([]).servicio.ventasMapaCalor(4);
+    expect(vacio.mejor).toBeNull();
+  });
+
+  it('limita las semanas entre 1 y 12 y usa 4 si el valor no sirve', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const { servicio } = armarF([]);
+
+    expect((await servicio.ventasMapaCalor('0')).semanas).toBe(4);
+    expect((await servicio.ventasMapaCalor('abc')).semanas).toBe(4);
+    expect((await servicio.ventasMapaCalor('99')).semanas).toBe(12);
+    const una = await servicio.ventasMapaCalor('1');
+    expect(una).toMatchObject({ semanas: 1, desde: '2026-11-02', hasta: '2026-11-08' });
+  });
+
+  it('resumenDia da ventas netas, cantidad de facturas y boletas y ticket promedio', async () => {
+    jest.setSystemTime(new Date('2026-11-08T15:00:00Z'));
+    const hoy = (id: number, datos: Record<string, unknown>) => comprobante(id, { creado_en: new Date('2026-11-08T14:00:00Z'), ...datos });
+    const { servicio } = armarF([hoy(1, { total: '100.00' }), hoy(2, { total: '50.00' }), hoy(3, { total: '30.00', tipo: { id_tipo: 7 } })]);
+
+    const r = await servicio.resumenDia('2026-11-08');
+
+    expect(r).toEqual({ fecha: '2026-11-08', total: 120, ventas: 2, ticket_promedio: 60 });
+  });
+});

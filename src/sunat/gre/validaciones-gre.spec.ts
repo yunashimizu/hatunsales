@@ -89,11 +89,43 @@ describe('validarDocumentoGre', () => {
   });
 
   describe('motivos', () => {
-    it('solo 01, 04 y 13 están habilitados; los demás dan un error claro', () => {
-      const compra = validar(greVentaPublica({ envio: { motivo: '02' } }));
-      expect(compra.errores.join(' ')).toContain('«Compra» (02) no está habilitado todavía');
+    it('están habilitados 01, 02, 04, 13, 14 y 18; los demás dan un error claro que los nombra', () => {
+      for (const motivo of ['01', '04', '13', '14', '18']) {
+        expect(validar(greVentaPublica({ envio: { motivo, descripcionMotivo: 'TRASLADO A TALLER' } })).errores.join(' ')).not.toContain('no está habilitado');
+      }
+      const consignacion = validar(greVentaPublica({ envio: { motivo: '05' } }));
+      expect(consignacion.errores.join(' ')).toContain('«Consignación» (05) no está habilitado todavía');
+      expect(consignacion.errores.join(' ')).toMatch(/02 \(compra\).*14 \(venta sujeta a confirmación del comprador\).*18/);
       expect(validar(greVentaPublica({ envio: { motivo: '19' } })).errores.join(' ')).toContain('no está habilitado todavía');
       expect(validar(greVentaPublica({ envio: { motivo: '99' } })).errores.join(' ')).toContain('no existe en el catálogo 20');
+    });
+
+    it('14 (venta sujeta a confirmación) y 18 (emisor itinerante) pasan sin errores con transporte público', () => {
+      for (const motivo of ['14', '18']) {
+        const resultado = validar(greVentaPublica({ envio: { motivo } }));
+        expect(resultado.errores).toEqual([]);
+      }
+    });
+
+    it('02 (compra): el destinatario es el propio remitente y el proveedor es obligatorio y válido', () => {
+      const propio = { tipoDoc: '6', numDoc: '20610206337', nombre: 'HATUNSALES S.A.C.' };
+      const sinProveedor = validar(greVentaPublica({ destinatario: propio, envio: { motivo: '02' } }));
+      expect(sinProveedor.porCampo).toEqual(expect.arrayContaining([expect.objectContaining({ campo: 'proveedor.numDoc', nivel: 'error' })]));
+
+      const otroDestinatario = validar(greVentaPublica({ envio: { motivo: '02' }, proveedor: { tipoDoc: '6', numDoc: '20100066603', nombre: 'FERRETERIA EL SOL S.A.C.' } }));
+      expect(otroDestinatario.errores.join(' ')).toContain('en una compra (motivo 02) el destinatario es el propio remitente');
+
+      const rucMalo = validar(greVentaPublica({ destinatario: propio, envio: { motivo: '02' }, proveedor: { tipoDoc: '6', numDoc: '20100066604', nombre: 'X' } }));
+      expect(rucMalo.errores.join(' ')).toContain('Proveedor:');
+
+      const bien = validar(greVentaPublica({ destinatario: propio, envio: { motivo: '02' }, proveedor: { tipoDoc: '6', numDoc: '20100066603', nombre: 'FERRETERIA EL SOL S.A.C.' } }));
+      expect(bien.errores).toEqual([]);
+    });
+
+    it('un proveedor con un motivo distinto del 02 solo advierte que se ignorará', () => {
+      const resultado = validar(greVentaPublica({ proveedor: { tipoDoc: '6', numDoc: '20100066603', nombre: 'X' } }));
+      expect(resultado.errores).toEqual([]);
+      expect(resultado.advertencias.join(' ')).toContain('solo se envía con el motivo 02');
     });
 
     it('04: el destinatario es el propio remitente', () => {
@@ -195,6 +227,37 @@ describe('validarDocumentoGre', () => {
   });
 
   describe('traslado, peso y puntos', () => {
+    it('inicio del traslado: hasta 30 días después de la emisión; desde 7 días solo advierte', () => {
+      // Emisión 2026-10-21: 30 días = 2026-11-20.
+      expect(validar(greVentaPublica({ envio: { fechaInicioTraslado: '2026-11-20' } })).errores).toEqual([]);
+      const lejos = validar(greVentaPublica({ envio: { fechaInicioTraslado: '2026-11-21' } }));
+      expect(lejos.porCampo).toEqual(expect.arrayContaining([expect.objectContaining({ campo: 'envio.fechaInicioTraslado', nivel: 'error' })]));
+      expect(lejos.errores.join(' ')).toContain('a más de 30 días de la emisión');
+      expect(lejos.errores.join(' ')).toContain('2026-11-20');
+
+      const seisDias = validar(greVentaPublica({ envio: { fechaInicioTraslado: '2026-10-27' } }));
+      expect(seisDias.advertencias.join(' ')).not.toContain('7 días o más');
+      const sieteDias = validar(greVentaPublica({ envio: { fechaInicioTraslado: '2026-10-28' } }));
+      expect(sieteDias.errores).toEqual([]);
+      expect(sieteDias.advertencias.join(' ')).toContain('7 días o más después de la emisión');
+    });
+
+    it('traslado en vehículo M1 o L (moto o auto particular): sin vehículo ni conductor y solo con transporte privado', () => {
+      const sinDatos = greTrasladoPrivado({ envio: { trasladoVehiculoM1L: true }, vehiculo: undefined, conductores: [] });
+      expect(validar(sinDatos).errores).toEqual([]);
+
+      const conDatos = validar(greTrasladoPrivado({ envio: { trasladoVehiculoM1L: true } }));
+      expect(conDatos.errores).toEqual([]);
+      expect(conDatos.advertencias.join(' ')).toContain('categoría M1 o L');
+
+      // Sin el indicador, el transporte privado sigue exigiendo placa y conductor.
+      expect(campos(greTrasladoPrivado({ vehiculo: undefined, conductores: [] }))).toEqual(expect.arrayContaining(['vehiculo.placa', 'conductores']));
+
+      const publico = validar(greVentaPublica({ envio: { trasladoVehiculoM1L: true } }));
+      expect(publico.porCampo).toEqual(expect.arrayContaining([expect.objectContaining({ campo: 'envio.trasladoVehiculoM1L', nivel: 'error' })]));
+      expect(publico.errores.join(' ')).toContain('solo aplica al transporte privado');
+    });
+
     it('inicio del traslado igual o posterior a la emisión', () => {
       expect(campos(greVentaPublica({ envio: { fechaInicioTraslado: '2026-10-20' } }))).toContain('envio.fechaInicioTraslado');
       expect(validar(greVentaPublica({ envio: { fechaInicioTraslado: '2026-10-25' } })).errores).toEqual([]);

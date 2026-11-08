@@ -29,17 +29,30 @@ export class ProductoImagenRepository extends CrudRepository<ProductoImagen> {
     });
   }
 
-  async contarPorProducto(id_producto: number): Promise<number> {
-    return this.imagenRepo.count({ where: { producto: { id_producto } } });
+  /**
+   * Cuántas fotos tiene el producto y qué `orden` toca a la siguiente, en UN solo viaje
+   * (antes eran dos consultas seguidas: un conteo y un MAX).
+   */
+  async resumenGaleria(id_producto: number): Promise<{ total: number; siguienteOrden: number }> {
+    const filas: Array<{ total: number | string; siguiente: number | string }> = await this.imagenRepo.query(
+      `SELECT COUNT(*)::int AS total, COALESCE(MAX(orden), -1) + 1 AS siguiente
+         FROM productos_imagenes
+        WHERE id_producto = $1`,
+      [id_producto],
+    );
+    return {
+      total: Number(filas?.[0]?.total ?? 0),
+      siguienteOrden: Number(filas?.[0]?.siguiente ?? 0),
+    };
   }
 
-  async siguienteOrden(id_producto: number): Promise<number> {
-    const fila = await this.imagenRepo
-      .createQueryBuilder('i')
-      .select('COALESCE(MAX(i.orden), -1)', 'ultimo')
-      .where('i.id_producto = :id_producto', { id_producto })
-      .getRawOne();
-    return Number(fila?.ultimo ?? -1) + 1;
+  /**
+   * Guarda varias fotos con una sola llamada: TypeORM las inserta en una transacción y con
+   * un INSERT de varias filas, en lugar de BEGIN/INSERT/COMMIT por cada foto. Devuelve las
+   * entidades con su `id_imagen`, en el mismo orden recibido.
+   */
+  crearVarias(imagenes: ProductoImagen[]): Promise<ProductoImagen[]> {
+    return this.imagenRepo.save(imagenes);
   }
 
   async marcarPrincipal(id_producto: number, id_imagen: number): Promise<void> {

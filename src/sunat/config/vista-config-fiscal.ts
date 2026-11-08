@@ -26,7 +26,9 @@ export interface ConfiguracionFiscalVista {
   proveedor_efectivo: ProveedorFiscal;
   ambiente: AmbienteFiscal;
   boletas_modo: ModoBoletas;
-  envio_en_linea: boolean;
+  /** HH:mm (Lima) del resumen diario de boletas (modo «resumen»). */
+  resumen_hora: string;
+  /** Un solo interruptor: true = el comprobante se envía a SUNAT en segundo plano; false = al cobrar. */
   envio_diferido: boolean;
   tareas_activas: boolean;
   aplicar_reglas_2027: ModoReglas2027;
@@ -113,7 +115,7 @@ export function construirVistaConfigFiscal(d: DatosVistaConfigFiscal): Configura
     proveedor_efectivo: d.proveedorEfectivo,
     ambiente: s.ambiente,
     boletas_modo: s.boletasModo,
-    envio_en_linea: s.envioEnLinea,
+    resumen_hora: s.resumenHora,
     envio_diferido: s.envioDiferido,
     tareas_activas: s.tareasActivas,
     aplicar_reglas_2027: s.reglas2027,

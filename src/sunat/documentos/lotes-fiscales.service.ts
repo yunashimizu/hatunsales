@@ -4,11 +4,11 @@ import { CertificadoFiscalService } from '../certificado/certificado-fiscal.serv
 import type { MaterialFirma } from '../certificado/material-firma';
 import { FiscalConfigError } from '../config/fiscal-errores';
 import { FiscalConfigService } from '../config/fiscal-config.service';
-import type { AmbienteFiscal, SnapshotConfigFiscal } from '../config/fiscal-config.tipos';
+import type { ActorFiscal, AmbienteFiscal, SnapshotConfigFiscal } from '../config/fiscal-config.tipos';
 import { EMISOR_PRUEBA_BETA } from '../config/fiscal-tokens';
 import type { EmisorPruebaBeta } from '../config/fiscal-tokens';
 import { InterruptorEmisionFiscal } from '../config/interruptor-emision.service';
-import { RelojFiscal } from '../config/reloj-fiscal';
+import { fechaEnLima, RelojFiscal } from '../config/reloj-fiscal';
 import { TransaccionesFiscales } from '../config/transacciones-fiscales';
 import { ArchivoEnvio, EventoEnvioCompletado, OyentesEnvioFiscal, TIPOS_ARCHIVO_ENVIO, TipoArchivoEnvio } from '../emision/emision.contrato';
 import {
@@ -23,29 +23,50 @@ import { SunatEmisionService } from '../emision/sunat-emision.service';
 import { ClasificadorRespuestaSunat } from '../nucleo/clasificador-respuesta';
 import type { ClasificacionRespuesta, DocumentoCpe, EstadoSunat, RespuestaSunat } from '../nucleo/documento-fiscal.types';
 import { esErrorDeConfiguracion, esErrorNucleoFiscal } from '../nucleo/errores-nucleo';
+import { diasEntre, esFechaIso, sumarDias } from '../nucleo/fechas-fiscales';
 import { identificadorResumen } from '../nucleo/identificadores-cpe';
 import { PreparadorEnvioCpe } from '../nucleo/preparador-envio-cpe';
 import type { LotePreparado } from '../nucleo/preparador-envio-cpe';
 import type { SunatSoapClient } from '../nucleo/soap/sunat-soap-client';
 import { bajaDentroDePlazo } from '../nucleo/ubl/constructor-comunicacion-baja';
 import type { DatosComunicacionBaja } from '../nucleo/ubl/constructor-comunicacion-baja';
-import type { DatosResumenDiario } from '../nucleo/ubl/constructor-resumen-diario';
+import { MAXIMO_LINEAS_RESUMEN } from '../nucleo/ubl/constructor-resumen-diario';
+import type { DatosResumenDiario, LineaResumenDiario } from '../nucleo/ubl/constructor-resumen-diario';
+import { esDocumentoDeFactura, fechaLimiteEnvioIndividual } from '../nucleo/reglas-envio';
+import { PLAZOS_ENVIO_DIAS } from '../catalogos/sunat.catalogos';
 import { tipoComprobanteSunat } from '../../util/fiscal/tipos-comprobante';
-import { CabeceraBaja, LoteCerrado, LoteFiscalRepository, LoteRegistrado, PrefijoLote } from './lote-fiscal.repository';
+import {
+  CabeceraBaja,
+  CandidatoResumen,
+  ESTADOS_ADICION,
+  LoteCerrado,
+  LoteFiscalRepository,
+  LoteLiberado,
+  LoteRegistrado,
+  PrefijoLote,
+} from './lote-fiscal.repository';
 import {
   FiltroLotes,
   LineaAceptadaSinAnular,
   LoteDeComprobante,
   LotesFiscales,
   LoteVista,
+  PeticionResumenAdicion,
   ResultadoLote,
+  ResultadoResumenAdicion,
 } from './lotes.contrato';
 
 /** Espera entre consultas del ticket (minutos): la primera, a 1 min del envío, y luego 2, 5, 15, 30 y 60. */
 export const ESPERA_TICKET_MINUTOS: readonly number[] = [1, 2, 5, 15, 30, 60];
 
-/** Tras estas consultas sin respuesta de SUNAT el lote queda en EXCEPCION para consultarlo a mano. */
+/** Tras estas consultas sin respuesta de SUNAT el lote pasa a la consulta lenta (ESPERA_TICKET_LENTA_MINUTOS). */
 export const MAXIMO_CONSULTAS_TICKET = 12;
+
+/** Espera entre consultas del ticket una vez agotadas las rápidas, hasta DIAS_CONSULTA_TICKET desde el registro (S4). */
+export const ESPERA_TICKET_LENTA_MINUTOS = 120;
+
+/** Días que se sigue consultando un ticket sin respuesta; al cumplirlos el lote queda EXCEPCION/LIBERAR. */
+export const DIAS_CONSULTA_TICKET = 7;
 
 /** Largo máximo del motivo de la baja (LONGITUD_MAXIMA_MOTIVO del constructor de la comunicación de baja). */
 export const LONGITUD_MAXIMA_MOTIVO_BAJA = 100;
@@ -56,9 +77,16 @@ const TIMEOUT_LOTE_MS = 30_000;
 const REINTENTOS_GUARDADO = 3;
 
 const CONDICION_ANULAR = 3 as const;
+const CONDICION_ADICIONAR = 1 as const;
 
 function esAceptado(estado: string): boolean {
   return estado === 'ACEPTADO' || estado === 'ACEPTADO_OBS';
+}
+
+/** yyyy-mm-dd → dd/mm. */
+function fechaCorta(iso: string): string {
+  const [, mes, dia] = /^\d{4}-(\d{2})-(\d{2})/.exec(iso) ?? [];
+  return mes && dia ? `${dia}/${mes}` : iso;
 }
 
 function mensajeDe(error: unknown): string {
@@ -211,6 +239,174 @@ export class LotesFiscalesService implements LotesFiscales {
     return this.transmitir(lote, 'envio');
   }
 
+  /**
+   * Resumen diario de adición (S2): arma, firma y registra UN resumen con las boletas y notas de boleta elegibles de
+   * `fecha_emision` (ver LoteFiscalRepository.candidatosResumen) y lo manda a SUNAT. null si no hay nada que informar.
+   */
+  async crearResumenAdicion(p: PeticionResumenAdicion): Promise<ResultadoResumenAdicion | null> {
+    const fecha = p.fecha_emision;
+    if (!esFechaIso(fecha)) throw new FiscalConfigError('FISCAL_CONFIG_INVALIDA', 'Indique la fecha de emisión de las boletas con el formato aaaa-mm-dd.');
+    const hoy = this.reloj.fechaLima();
+    const dias = diasEntre(fecha, hoy);
+    if (dias < 0) throw new FiscalConfigError('FISCAL_CONFIG_INVALIDA', 'La fecha de emisión no puede ser posterior a hoy.');
+    if (dias > PLAZOS_ENVIO_DIAS.resumenDiario) {
+      throw new FiscalConfigError(
+        'FISCAL_RESUMEN_FUERA_DE_PLAZO',
+        `Ya pasaron los ${PLAZOS_ENVIO_DIAS.resumenDiario} días desde el ${fechaCorta(fecha)}: esas boletas ya no se pueden informar en un resumen diario. Si el cliente reclama alguna, anúlela con una nota de crédito.`,
+        { fecha_emision: fecha },
+      );
+    }
+
+    const snapshot = await this.config.snapshotFresco();
+    const ambiente = snapshot.ambiente;
+    await this.exigirSinBloqueo(ambiente);
+    const candidatos = await this.lotes.candidatosResumen({
+      ambiente,
+      hoy,
+      fecha,
+      ids: p.ids_comprobantes,
+      // La tarea no insiste con lo que SUNAT ya rechazó; una persona sí puede volver a pedirlo.
+      soloSinRechazo: p.origen === 'tarea',
+      limite: MAXIMO_LINEAS_RESUMEN + 1,
+    });
+    if (!candidatos.length) return null;
+
+    const emisor = await this.emisorDe(ambiente, snapshot);
+    const lineas: LineaResumenDiario[] = [];
+    const incluidos: CandidatoResumen[] = [];
+    let omitidos = 0;
+    for (const candidato of candidatos.slice(0, MAXIMO_LINEAS_RESUMEN)) {
+      const documento = (await this.envios.leer(candidato.id_envio_ultimo))?.datos?.documento ?? null;
+      const linea = documento && documento.emisor?.ruc === emisor.ruc ? this.lineaDeAdicion(documento, candidato, lineas.length + 1, fecha) : null;
+      if (!linea) {
+        omitidos += 1;
+        this.logger.warn(`${candidato.serie}-${candidato.numero} no entra al resumen del ${fecha}: no conserva su documento o no es de este emisor.`);
+        continue;
+      }
+      lineas.push(linea);
+      incluidos.push(candidato);
+    }
+    const pendientes = Math.max(0, candidatos.length - MAXIMO_LINEAS_RESUMEN);
+    if (!lineas.length) {
+      throw new FiscalConfigError(
+        'FISCAL_RESUMEN_NO_PERMITIDO',
+        'Las boletas de esa fecha no conservan su documento electrónico: no se pueden informar en un resumen.',
+        { omitidos },
+      );
+    }
+    const material = await this.materialDe(ambiente);
+    this.exigirRucCertificado(ambiente, material, emisor.ruc, snapshot);
+
+    const motivo = `Resumen diario de boletas del ${fecha}`;
+    let idEnvio = 0;
+    let identificador = '';
+    for (let vuelta = 0; ; vuelta++) {
+      try {
+        idEnvio = await this.transacciones.ejecutar(async (tx) => {
+          const correlativo = await this.lotes.siguienteCorrelativo(tx, ambiente, 'RC', hoy);
+          identificador = identificadorResumen('RC', hoy, correlativo);
+          const lote = this.prepararAdicion(identificador, hoy, fecha, lineas, emisor, material);
+          const id = await this.lotes.registrar(tx, {
+            ambiente,
+            operacion: 'resumen',
+            lote,
+            fechaReferencia: fecha,
+            idUsuario: p.actor?.id_usuario ?? null,
+            motivo,
+            lineas: incluidos.map((c, i) => ({
+              id_comprobante: c.id_comprobante,
+              serie: lineas[i].serie,
+              numero: lineas[i].numero,
+              tipo_documento: lineas[i].tipoDocumento,
+              condicion: CONDICION_ADICIONAR,
+            })),
+          });
+          await this.auditoria.registrar(
+            {
+              accion: ACCIONES_AUDITORIA_FISCAL.RESUMEN_SOLICITADO,
+              id_usuario: p.actor?.id_usuario ?? null,
+              entidad: 'fiscal_envios',
+              id_entidad: id,
+              detalle: {
+                usuario: p.actor?.nombre ?? null,
+                origen: p.origen,
+                identificador,
+                fecha_emision: fecha,
+                comprobantes: incluidos.length,
+                ids_comprobantes: incluidos.slice(0, 50).map((c) => c.id_comprobante),
+                ambiente,
+              },
+              ip: p.actor?.ip ?? null,
+            },
+            tx,
+          );
+          return id;
+        });
+        break;
+      } catch (error) {
+        if (vuelta === 0 && FiscalConfigError.es(error, 'FISCAL_NUMERO_OCUPADO')) continue;
+        throw error;
+      }
+    }
+
+    const reclamado = await this.lotes.reclamarPrimerEnvio(idEnvio);
+    const resultado = reclamado ? await this.transmitir(reclamado, 'envio') : this.resultadoActual(await this.leerOFallar(idEnvio));
+    return { ...resultado, fecha_emision: fecha, comprobantes: lineas.length, pendientes, omitidos };
+  }
+
+  async resumirComprobante(p: { id_comprobante: number; actor: ActorFiscal | null }): Promise<ResultadoResumenAdicion> {
+    const cabecera = await this.lotes.cabeceraComprobante(p.id_comprobante);
+    if (!cabecera) throw new FiscalConfigError('FISCAL_DOC_NO_ENCONTRADO', `No existe el comprobante ${p.id_comprobante}.`);
+    const numero = `${cabecera.serie}-${cabecera.numero}`;
+    const tipo = tipoComprobanteSunat(cabecera.id_tipo);
+    const no = (mensaje: string) => new FiscalConfigError('FISCAL_RESUMEN_NO_PERMITIDO', mensaje);
+    if (!tipo || esDocumentoDeFactura(tipo, cabecera.serie)) {
+      throw no(`${numero} no es una boleta ni una nota de boleta: solo ellas se informan en un resumen diario.`);
+    }
+    if (cabecera.proveedor_fiscal !== 'sunat_directo') {
+      throw new FiscalConfigError('FISCAL_DOC_OTRO_PROVEEDOR', `${numero} se emitió con el sistema anterior: no se informa desde aquí.`);
+    }
+    const snapshot = await this.config.snapshotFresco();
+    if (cabecera.ambiente_fiscal !== snapshot.ambiente) {
+      throw new FiscalConfigError(
+        'FISCAL_AMBIENTE_CAMBIO',
+        `${numero} se emitió en ${NOMBRE_AMBIENTE[cabecera.ambiente_fiscal === 'produccion' ? 'produccion' : 'beta']} y el ambiente vigente es ${NOMBRE_AMBIENTE[snapshot.ambiente]}: no se informa desde aquí.`,
+        { ambiente: snapshot.ambiente },
+      );
+    }
+    if (cabecera.anulado) throw no(`${numero} ya está anulado.`);
+    if (cabecera.aceptada_sunat || ['ACEPTADO', 'ACEPTADO_OBS'].includes(cabecera.estado_sunat ?? '')) {
+      throw no(`${numero} ya lo aceptó SUNAT: no hace falta informarlo en un resumen (y SUNAT lo rechazaría como repetido).`);
+    }
+    const estado = cabecera.estado_sunat ?? '';
+    if (['TICKET_PENDIENTE', 'BAJA_PENDIENTE', 'ENVIANDO'].includes(estado)) {
+      throw new FiscalConfigError('FISCAL_ENVIO_EN_CURSO', `${numero} ya está en proceso con SUNAT (${estado === 'TICKET_PENDIENTE' ? 'en un resumen' : 'envío o baja en curso'}): espere su resultado.`);
+    }
+    if (!ESTADOS_ADICION.includes(estado)) throw no(`${numero} no está en un estado que admita el resumen (${estado || 'sin estado'}).`);
+    const hoy = this.reloj.fechaLima();
+    const fecha = cabecera.fecha_de_emision;
+    if (!esFechaIso(fecha)) throw no(`${numero} no tiene una fecha de emisión válida.`);
+    if (diasEntre(fecha, hoy) > PLAZOS_ENVIO_DIAS.resumenDiario) {
+      throw new FiscalConfigError(
+        'FISCAL_RESUMEN_FUERA_DE_PLAZO',
+        `Ya pasaron los ${PLAZOS_ENVIO_DIAS.resumenDiario} días desde la emisión de ${numero}: no se puede informar en un resumen. Si el cliente lo reclama, anúlelo con una nota de crédito y emita uno nuevo.`,
+        { fecha_emision: fecha },
+      );
+    }
+    if (estado !== 'POR_RESUMIR' && hoy <= fechaLimiteEnvioIndividual(tipo, cabecera.serie, fecha)) {
+      throw no(`${numero} todavía está dentro del plazo de envío individual: use «Reintentar» (informarlo en un resumen a la vez podría duplicarlo en SUNAT).`);
+    }
+    const resultado = await this.crearResumenAdicion({
+      fecha_emision: fecha,
+      ids_comprobantes: [p.id_comprobante],
+      actor: p.actor,
+      origen: 'comprobante',
+    });
+    if (!resultado) throw no(`${numero} ya no está disponible para el resumen: actualice la pantalla y revíselo.`);
+    return resultado;
+  }
+
+
   estadoDeComprobante(idComprobante: number): Promise<LoteDeComprobante | null> {
     return this.lotes.loteDeComprobante(idComprobante);
   }
@@ -236,12 +432,14 @@ export class LotesFiscalesService implements LotesFiscales {
 
   /**
    * Según el estado: PENDIENTE_REENVIO (o ENVIANDO con el reclamo vencido) vuelve a enviar el MISMO ZIP;
-   * TICKET_PENDIENTE (o EXCEPCION por consultas agotadas) consulta el ticket. Respeta el interruptor del
+   * TICKET_PENDIENTE (o EXCEPCION con el ticket sin resolver: «Consultar ahora») consulta el ticket. Respeta el interruptor del
    * ambiente (FISCAL_EMISION_BLOQUEADA). `origen` distingue la tarea del reintento manual en el evento.
    */
   async reintentar(idEnvio: number, origen: Extract<OrigenEnvio, 'reintento' | 'tarea'> = 'reintento'): Promise<ResultadoLote> {
     const actual = await this.leerOFallar(idEnvio);
-    const consulta = actual.estado === 'TICKET_PENDIENTE' || (actual.estado === 'EXCEPCION' && actual.accion === 'CONSULTAR_TICKET' && !!actual.sunat_ticket);
+    const consulta =
+      actual.estado === 'TICKET_PENDIENTE'
+      || (actual.estado === 'EXCEPCION' && (actual.accion === 'CONSULTAR_TICKET' || actual.accion === 'LIBERAR') && !!actual.sunat_ticket);
     const reenvio = actual.estado === 'PENDIENTE_REENVIO' || (actual.estado === 'ENVIANDO' && actual.libre);
     if (!consulta && !reenvio) {
       const motivo = actual.estado === 'ENVIANDO' ? 'se está enviando ahora mismo' : `su estado es ${actual.estado}`;
@@ -252,6 +450,74 @@ export class LotesFiscalesService implements LotesFiscales {
     }
     await this.exigirSinBloqueo(actual.ambiente);
     return consulta ? this.consultarTicket(idEnvio, origen) : this.enviar(idEnvio, origen);
+  }
+
+  /**
+   * «Liberar» (S4, solo administrador): SUNAT no resolvió el ticket en 7 días y el administrador suelta el lote.
+   * Cada comprobante vuelve a su estado anterior (para pedir la baja de nuevo con otro identificador) y queda
+   * en la bitácora con el usuario, en la misma transacción. No llama a SUNAT.
+   */
+  async liberar(idEnvio: number, actor: ActorFiscal): Promise<ResultadoLote> {
+    if (!actor?.id_usuario) {
+      throw new FiscalConfigError('FISCAL_CONFIG_INVALIDA', 'No se pudo identificar al administrador que libera el lote: vuelva a iniciar sesión.');
+    }
+    const actual = await this.leerOFallar(idEnvio);
+    const sinResolver = actual.estado === 'EXCEPCION' && (actual.accion === 'CONSULTAR_TICKET' || actual.accion === 'LIBERAR');
+    if (!sinResolver) {
+      throw new FiscalConfigError(
+        'FISCAL_LIBERAR_NO_PERMITIDO',
+        `El lote ${actual.identificador} no se puede liberar (su estado es ${actual.estado}). Solo se liberan los lotes cuya respuesta SUNAT no llegó a tiempo.`,
+      );
+    }
+    const mensaje =
+      `Lote liberado por el administrador: SUNAT no respondió el ticket ${actual.sunat_ticket ?? ''}. `
+      + 'Los comprobantes volvieron a su estado anterior: si todavía está dentro de los 7 días de la emisión, pida la baja de nuevo; si no, anúlelos con una nota de crédito.';
+    const fecha = this.reloj.ahora().toISOString();
+    const liberado = await this.lotes.liberar(
+      idEnvio,
+      mensaje,
+      {
+        clasificacion: { estado: 'EXCEPCION', accion: 'LIBERADO', mensajeUsuario: mensaje },
+        liberado: { id_usuario: actor.id_usuario, fecha, accion_previa: actual.accion, ticket: actual.sunat_ticket },
+      },
+      async (tx, resultado) => {
+        await this.auditoria.registrar(
+          {
+            accion: ACCIONES_AUDITORIA_FISCAL.LOTE_LIBERADO,
+            id_usuario: actor.id_usuario,
+            entidad: 'fiscal_envios',
+            id_entidad: idEnvio,
+            detalle: {
+              usuario: actor.nombre,
+              identificador: resultado.identificador,
+              operacion: resultado.operacion,
+              ticket: actual.sunat_ticket,
+              accion_previa: actual.accion,
+              ids_comprobantes: resultado.ids_comprobantes,
+              ambiente: actual.ambiente,
+            },
+            ip: actor.ip,
+          },
+          tx,
+        );
+      },
+    );
+    if (!liberado) {
+      throw new FiscalConfigError(
+        'FISCAL_ENVIO_EN_CURSO',
+        'El lote se está consultando ahora mismo o cambió de estado; actualice la vista y revíselo de nuevo.',
+      );
+    }
+    return {
+      id_envio: idEnvio,
+      operacion: liberado.operacion,
+      identificador: liberado.identificador,
+      estado: 'EXCEPCION',
+      aceptado: false,
+      ticket: actual.sunat_ticket,
+      mensaje,
+      codigo: actual.codigo_sunat,
+    };
   }
 
   // ── Envío y consulta ─────────────────────────────────────────────────────
@@ -390,26 +656,38 @@ export class LotesFiscalesService implements LotesFiscales {
 
   /**
    * Una consulta sin respuesta definitiva: el ticket sigue vigente y se vuelve a consultar con una espera
-   * creciente. Tras MAXIMO_CONSULTAS_TICKET consultas el lote queda en EXCEPCION (con la acción
-   * CONSULTAR_TICKET: el comprobante sigue en BAJA_PENDIENTE porque SUNAT pudo haberlo procesado).
+   * creciente. Tras MAXIMO_CONSULTAS_TICKET consultas no se rinde: sigue en TICKET_PENDIENTE y consulta cada
+   * ESPERA_TICKET_LENTA_MINUTOS hasta DIAS_CONSULTA_TICKET días desde el registro del lote. Recién entonces
+   * queda en EXCEPCION con la acción LIBERAR (el comprobante sigue en BAJA_PENDIENTE porque SUNAT pudo haberlo
+   * procesado) y el administrador decide: consultar otra vez o «Liberar».
    */
   private async reprogramarConsulta(lote: LoteRegistrado, mensaje: string, origen: OrigenEnvio): Promise<ResultadoLote> {
     const ticket = lote.sunat_ticket as string;
     const consultas = lote.intento - 1; // el primer intento fue el envío; esta consulta es la número `consultas`
+    let espera: number;
+    let mensajeGuardado = mensaje;
     if (consultas >= MAXIMO_CONSULTAS_TICKET) {
-      const final = `SUNAT no resolvió el ticket ${ticket} tras ${consultas} consultas; consulte de nuevo manualmente. Última respuesta: ${mensaje}`;
-      const cierre: CierreEnvio = {
-        estado: 'EXCEPCION',
-        accion: 'CONSULTAR_TICKET',
-        mensaje: final,
-        sunat: null,
-        json: { clasificacion: { estado: 'EXCEPCION', accion: 'CONSULTAR_TICKET', mensajeUsuario: final } },
-        proximoIntentoMin: null,
-      };
-      return this.cerrar(lote, cierre, origen);
+      const limite = this.limiteConsultaTicket(lote);
+      if (limite !== null && this.reloj.ahora().getTime() >= limite.getTime()) {
+        const final =
+          `SUNAT no resolvió el ticket ${ticket} en ${DIAS_CONSULTA_TICKET} días. Consúltelo de nuevo o libere el lote: `
+          + `el comprobante volverá a su estado anterior. Última respuesta: ${mensaje}`;
+        const cierre: CierreEnvio = {
+          estado: 'EXCEPCION',
+          accion: 'LIBERAR',
+          mensaje: final,
+          sunat: null,
+          json: { clasificacion: { estado: 'EXCEPCION', accion: 'LIBERAR', mensajeUsuario: final } },
+          proximoIntentoMin: null,
+        };
+        return this.cerrar(lote, cierre, origen);
+      }
+      espera = ESPERA_TICKET_LENTA_MINUTOS;
+      mensajeGuardado = `SUNAT sigue sin responder; se consultará cada 2 horas hasta el ${this.fechaLimiteTicket(lote)}. Última respuesta: ${mensaje}`;
+    } else {
+      espera = ESPERA_TICKET_MINUTOS[Math.min(Math.max(lote.intento - 1, 0), ESPERA_TICKET_MINUTOS.length - 1)];
     }
-    const espera = ESPERA_TICKET_MINUTOS[Math.min(Math.max(lote.intento - 1, 0), ESPERA_TICKET_MINUTOS.length - 1)];
-    await this.guardarTicket(lote, ticket, mensaje, espera);
+    await this.guardarTicket(lote, ticket, mensajeGuardado, espera);
     return {
       id_envio: lote.id_envio,
       operacion: lote.operacion,
@@ -417,9 +695,24 @@ export class LotesFiscalesService implements LotesFiscales {
       estado: 'TICKET_PENDIENTE',
       aceptado: false,
       ticket,
-      mensaje,
+      mensaje: mensajeGuardado,
       codigo: null,
     };
+  }
+
+  /** Instante en que se cumplen los 7 días de consulta (desde el registro del lote); null si no se conoce. */
+  private limiteConsultaTicket(lote: LoteRegistrado): Date | null {
+    const creado = lote.creado_en ? new Date(lote.creado_en) : null;
+    if (!creado || Number.isNaN(creado.getTime())) return null;
+    return new Date(creado.getTime() + DIAS_CONSULTA_TICKET * 24 * 60 * 60 * 1000);
+  }
+
+  /** dd/mm del último día de consulta, para el mensaje. */
+  private fechaLimiteTicket(lote: LoteRegistrado): string {
+    const creado = lote.creado_en ? new Date(lote.creado_en) : this.reloj.ahora();
+    const limite = sumarDias(fechaEnLima(Number.isNaN(creado.getTime()) ? this.reloj.ahora() : creado), DIAS_CONSULTA_TICKET);
+    const [, mes, dia] = /^\d{4}-(\d{2})-(\d{2})/.exec(limite) ?? [];
+    return mes && dia ? `${dia}/${mes}` : limite;
   }
 
   /** Guarda el ticket con hasta 3 reintentos de BD: sin él no se podría consultar el resultado (queda en el log). */
@@ -545,6 +838,68 @@ export class LotesFiscalesService implements LotesFiscales {
         ],
       };
       return this.preparador.prepararResumenDiario(datos, material, opciones);
+    } catch (error) {
+      if (esErrorNucleoFiscal(error)) {
+        throw new FiscalConfigError(
+          esErrorDeConfiguracion(error) ? 'FISCAL_CONFIG_INVALIDA' : 'FISCAL_VALIDACION_CPE',
+          error.message,
+          error.detalle ? { ...error.detalle } : {},
+        );
+      }
+      throw error;
+    }
+  }
+
+  /** La línea del resumen (condición 1) de una boleta o nota de boleta, desde el documento que se firmó; null si no corresponde. */
+  private lineaDeAdicion(documento: DocumentoCpe, candidato: CandidatoResumen, numeroLinea: number, fecha: string): LineaResumenDiario | null {
+    const tipo = documento.tipo;
+    if ((tipo !== '03' && tipo !== '07' && tipo !== '08') || documento.fechaEmision !== fecha) return null;
+    if (documento.serie !== candidato.serie || documento.numero !== candidato.numero || !/^B/i.test(documento.serie)) return null;
+    let modificado: LineaResumenDiario['documentoModificado'];
+    if (tipo !== '03') {
+      const referencia = documento.referencia;
+      if (!referencia || referencia.tipoDoc !== '03') return null;
+      modificado = { tipoDocumento: '03', serie: referencia.serie, numero: referencia.numero };
+    }
+    return {
+      numeroLinea,
+      tipoDocumento: tipo,
+      serie: documento.serie,
+      numero: documento.numero,
+      tipoDocumentoCliente: documento.cliente.tipoDoc,
+      numeroDocumentoCliente: documento.cliente.numDoc,
+      gravada: documento.totales.gravada,
+      exonerada: documento.totales.exonerada,
+      inafecta: documento.totales.inafecta,
+      gratuita: 0,
+      igv: documento.totales.igv,
+      porcentajeIgv: documento.lineas.find((l) => l.afectacion === '10')?.porcentajeIgv ?? documento.lineas[0]?.porcentajeIgv,
+      total: documento.totales.total,
+      estado: CONDICION_ADICIONAR,
+      documentoModificado: modificado,
+      moneda: documento.moneda,
+      fechaEmision: documento.fechaEmision,
+    };
+  }
+
+  /** XML firmado del resumen diario con las boletas a adicionar (condición 1). */
+  private prepararAdicion(
+    identificador: string,
+    hoy: string,
+    fechaEmision: string,
+    lineas: LineaResumenDiario[],
+    emisor: { ruc: string; razonSocial: string },
+    material: MaterialFirma,
+  ): LotePreparado {
+    try {
+      const datos: DatosResumenDiario = {
+        identificador,
+        fechaGeneracion: hoy,
+        fechaEmisionDocumentos: fechaEmision,
+        emisor: { ruc: emisor.ruc, razonSocial: emisor.razonSocial },
+        lineas,
+      };
+      return this.preparador.prepararResumenDiario(datos, material, { ahora: this.reloj.ahora() });
     } catch (error) {
       if (esErrorNucleoFiscal(error)) {
         throw new FiscalConfigError(

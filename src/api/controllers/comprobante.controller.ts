@@ -2,31 +2,36 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   HttpCode,
   Param,
   ParseIntPipe,
   Post,
   Query,
+  Req,
   Res,
   StreamableFile,
   UseGuards,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { ComprobanteBussnies } from '../../bussnies/Bussnies/comprobante.bussnies';
 import {
   GenerarComprobanteRequest,
   ConsultarComprobanteRequest,
   ConfirmarAceptadoRequest,
   ReenviarCorreoRequest,
+  ReintentarComprobanteRequest,
 } from '../../models/model/c-electronico/comprobante.request';
 import { CorreoComprobanteService } from '../../correo/correo-comprobante.service';
 import { AnularDocumentoRequest } from '../../models/model/c-electronico/nota-credito.request';
+import { normalizarRol } from '../../config/roles.config';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
 import { Roles } from '../../guards/roles.decorator';
 import { UsuarioActual } from '../../guards/usuario-actual.decorator';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
+import { actorDe } from '../../sunat/admin/actor-fiscal';
 import { TIPOS_ARCHIVO_ENVIO } from '../../sunat/emision/emision.contrato';
 import type { TipoArchivoEnvio } from '../../sunat/emision/emision.contrato';
 import type { FormatoPdfComprobante } from '../../util/documentos/comprobante-pdf';
@@ -78,16 +83,40 @@ export class ComprobanteController {
     return this.service.consultar(body);
   }
 
+  /**
+   * Reenvía el mismo archivo. Con `forzar: true` («Reintentar ahora») también reintenta un envío que quedó en
+   * «Requiere revisión»: solo un administrador. Todo reintento manual queda en la bitácora fiscal.
+   */
   @Post(':id/reintentar')
   @HttpCode(200)
-  reintentar(@Param('id', ParseIntPipe) id: number) {
-    return this.service.reintentar(id);
+  reintentar(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: ReintentarComprobanteRequest,
+    @UsuarioActual() usuario: UsuarioToken | undefined,
+    @Req() req: Request,
+  ) {
+    const forzar = body?.forzar === true;
+    if (forzar && normalizarRol(usuario?.rol) !== 'admin') {
+      throw new ForbiddenException('Solo un administrador puede reintentar ahora un envío que requiere revisión.');
+    }
+    return this.service.reintentar(id, { forzar, actor: actorDe(usuario, req) });
+  }
+
+  /**
+   * «Informar por resumen»: mete la boleta (o nota de boleta) en el resumen diario de su fecha de emisión, hasta 7 días
+   * después. Administrador o vendedor; queda en la bitácora fiscal. 409 si ya está aceptada, en curso o fuera de plazo.
+   */
+  @Post(':id/resumir')
+  @Roles('admin', 'vendedor')
+  @HttpCode(200)
+  resumir(@Param('id', ParseIntPipe) id: number, @UsuarioActual() usuario: UsuarioToken | undefined, @Req() req: Request) {
+    return this.service.informarPorResumen(id, actorDe(usuario, req));
   }
 
   @Post(':id/recuperar-cdr')
   @HttpCode(200)
-  recuperarCdr(@Param('id', ParseIntPipe) id: number) {
-    return this.service.recuperarCdr(id);
+  recuperarCdr(@Param('id', ParseIntPipe) id: number, @UsuarioActual() usuario: UsuarioToken | undefined, @Req() req: Request) {
+    return this.service.recuperarCdr(id, actorDe(usuario, req));
   }
 
   /** El administrador verificó en SUNAT Operaciones en Línea que el comprobante fue aceptado (auditado). */

@@ -55,6 +55,14 @@ interface ItemRecargo {
   tipo_de_igv: number;
 }
 
+/** Opciones internas de la emisión de una venta guardada (no viajan en el HTTP): pedidos web. */
+export interface OpcionesEmisionVenta {
+  /** Envía a SUNAT en segundo plano aunque el negocio cobre «en línea». */
+  forzarDiferido?: boolean;
+  /** Correo al que se manda el comprobante cuando SUNAT lo acepta. */
+  correo_cliente?: string;
+}
+
 const SIN_RECARGO: RecargoTarjeta = { aplica: false, porcentaje: 0, base_tarjeta: 0, monto: 0 };
 
 /**
@@ -313,6 +321,7 @@ export class VentaBussnies {
     idVenta: number,
     dto: EmitirComprobanteVentaRequest,
     usuario?: UsuarioToken,
+    opciones: OpcionesEmisionVenta = {},
   ): Promise<VentaResponse> {
     const venta = await this.repo.obtenerParaComprobante(idVenta);
     if (!venta) throw new NotFoundException(`No existe la venta ${idVenta}`);
@@ -337,10 +346,15 @@ export class VentaBussnies {
     }
 
     const solicitud = await this.solicitudDesdeVentaGuardada(venta, dto);
+    if (opciones.correo_cliente) {
+      solicitud.enviar_cliente = true;
+      solicitud.correo_cliente = opciones.correo_cliente;
+    }
     const respuesta = await this.obtener(idVenta);
     try {
       respuesta.comprobante = await this.comprobantes.generar(solicitud, usuario?.id_usuario ?? null, {
         totalExigido: venta.total,
+        forzarDiferido: opciones.forzarDiferido === true,
       });
       this.avisarSiNoAceptado(respuesta);
     } catch (error: any) {

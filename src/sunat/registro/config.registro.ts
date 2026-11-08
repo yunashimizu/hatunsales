@@ -23,6 +23,7 @@ import { BovedaSecretosFiscales } from '../seguridad/boveda-secretos.service';
 import { CifradoFiscalService } from '../seguridad/cifrado-fiscal.service';
 import { CredencialesGreService } from '../seguridad/credenciales-gre.service';
 import { CredencialesSolService } from '../seguridad/credenciales-sol.service';
+import { RecifradoFiscalService } from '../seguridad/recifrado-fiscal.service';
 import { RepositorioSecretosFiscales, SecretosFiscalesRepository } from '../seguridad/secretos-fiscales.repository';
 
 /**
@@ -58,6 +59,7 @@ export const REGISTRO_SUNAT_CONFIG: RegistroModulo = {
     BovedaSecretosFiscales,
     CredencialesSolService,
     CredencialesGreService,
+    RecifradoFiscalService,
 
     // Configuración y certificado
     FiscalConfigService,

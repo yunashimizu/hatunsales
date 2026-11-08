@@ -12,6 +12,7 @@ import type {
   TipoArchivoGuia,
   ValidacionGuiaResponse,
 } from '../../models/model/guia-remision.response';
+import type { ActorFiscal } from '../../sunat/config/fiscal-config.tipos';
 import type { ModoEmisionGre } from '../../sunat/gre/gre.contrato';
 
 export interface IGuiaRemisionBussniees {
@@ -26,6 +27,7 @@ export interface IGuiaRemisionBussniees {
   crearYEmitir(dto: GuardarGuiaRemisionRequest, idUsuario: number | null): Promise<OperacionGuiaResponse>;
   emitir(idGuia: number, idUsuario: number | null): Promise<OperacionGuiaResponse>;
   consultar(idGuia: number): Promise<OperacionGuiaResponse>;
+  liberar(idGuia: number, actor: ActorFiscal): Promise<GuiaRemisionResponse>;
   anular(idGuia: number, dto: AnularGuiaRemisionRequest, idUsuario: number | null): Promise<GuiaRemisionResponse>;
   pdf(idGuia: number): Promise<{ nombre: string; contenido: Buffer }>;
   archivo(idGuia: number, tipo: TipoArchivoGuia): Promise<{ nombre: string; mime: string; contenido: Buffer }>;

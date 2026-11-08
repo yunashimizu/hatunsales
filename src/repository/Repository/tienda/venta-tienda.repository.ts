@@ -2,6 +2,20 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
+/** Lo que el pedido web pidió para su comprobante, más el cliente y la venta que nació de él. */
+export interface DatosComprobantePedido {
+  id_pedido: number;
+  codigo: string;
+  id_venta: number | null;
+  id_cliente: number | null;
+  /** 'boleta' o 'factura', tal como lo eligió el comprador (boleta si no eligió). */
+  tipo_comprobante: 'boleta' | 'factura';
+  documento_receptor: string | null;
+  nombre_receptor: string | null;
+  correo: string | null;
+  direccion: string | null;
+}
+
 /**
  * Convierte un pedido web en una venta del módulo administrativo.
  *
@@ -106,6 +120,47 @@ export class VentaTiendaRepository {
       this.log.log(`Pedido ${idPedido} → venta ${idVenta}`);
       return idVenta;
     });
+  }
+
+  /**
+   * Lo que el comprador pidió para su comprobante (tipo, documento, nombre), su correo y la dirección de envío.
+   * La venta no guarda estos datos: se leen del pedido al emitir, con el id de la venta ya creada.
+   */
+  async datosParaComprobante(idPedido: number): Promise<DatosComprobantePedido | null> {
+    const filas = await this.dataSource.query(
+      `SELECT p.id_pedido, p.codigo, p.id_venta, p.id_cliente,
+              p.tipo_comprobante, p.documento_receptor, p.nombre_receptor,
+              NULLIF(TRIM(c.email), '') AS correo,
+              NULLIF(TRIM(CONCAT_WS(', ', NULLIF(TRIM(d.direccion), ''), NULLIF(TRIM(d.distrito), ''),
+                                          NULLIF(TRIM(d.provincia), ''), NULLIF(TRIM(d.departamento), ''))), '') AS direccion
+         FROM pedidos p
+         LEFT JOIN clientes c ON c.id_cliente = p.id_cliente
+         LEFT JOIN direcciones_envio d ON d.id_direccion = p.id_direccion
+        WHERE p.id_pedido = $1`,
+      [idPedido],
+    );
+    const fila = filas[0];
+    if (!fila) return null;
+    return {
+      id_pedido: Number(fila.id_pedido),
+      codigo: String(fila.codigo ?? ''),
+      id_venta: fila.id_venta ? Number(fila.id_venta) : null,
+      id_cliente: fila.id_cliente ? Number(fila.id_cliente) : null,
+      tipo_comprobante: String(fila.tipo_comprobante ?? '').trim().toLowerCase() === 'factura' ? 'factura' : 'boleta',
+      documento_receptor: String(fila.documento_receptor ?? '').trim() || null,
+      nombre_receptor: String(fila.nombre_receptor ?? '').trim() || null,
+      correo: fila.correo ? String(fila.correo) : null,
+      direccion: fila.direccion ? String(fila.direccion) : null,
+    };
+  }
+
+  /** Enlaza el comprobante con su pedido (`pedidos.id_comprobante`); no pisa un enlace anterior. */
+  async vincularComprobante(idPedido: number, idComprobante: number): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE pedidos SET id_comprobante = $1, actualizado_en = NOW()
+        WHERE id_pedido = $2 AND id_comprobante IS NULL`,
+      [idComprobante, idPedido],
+    );
   }
 
   /** `venta_stock_salida` es de la fase 4; sin ella el pedido conserva su reserva como antes. */

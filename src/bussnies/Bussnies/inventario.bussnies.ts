@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { InventarioRepository, FiltroInventario } from '../../repository/Repository/inventario.repository';
 import { ProductoRepository } from '../../repository/Repository/producto.repository';
@@ -81,6 +81,11 @@ export class InventarioBussnies implements IInventarioBussniees {
     return this.repo.almacenes();
   }
 
+  /** Stock del producto en cada almacén (los que no tienen fila salen con 0 y `registrado: false`). */
+  stockPorProducto(idProducto: number) {
+    return this.repo.stockPorProducto(idProducto);
+  }
+
   alertas() {
     return this.repo.listarDetallado({ solo_alertas: true, por_pagina: 200 });
   }
@@ -124,9 +129,27 @@ export class InventarioBussnies implements IInventarioBussniees {
       .join(' · ');
 
     try {
-      return await this.repo.ajustar(dto.id_producto, dto.id_almacen, Number(dto.cantidad), descripcion, manager);
+      return await this.repo.ajustar(
+        dto.id_producto,
+        dto.id_almacen,
+        Number(dto.cantidad),
+        descripcion,
+        manager,
+        dto.stock_esperado === undefined || dto.stock_esperado === null ? undefined : Number(dto.stock_esperado),
+      );
     } catch (error: any) {
       const mensaje = String(error?.message ?? '');
+      if (mensaje.startsWith('STOCK_DESACTUALIZADO:')) {
+        // 409 con código para que el panel recargue el stock y deje la ficha abierta.
+        const stockActual = Number(mensaje.split(':')[1]);
+        throw new ConflictException({
+          codigo: 'STOCK_DESACTUALIZADO',
+          stock_actual: stockActual,
+          message:
+            `El stock de este producto en ese almacén cambió mientras lo editaba: ahora hay ${stockActual}. ` +
+            'Recargue la ficha y vuelva a intentar.',
+        });
+      }
       if (mensaje.startsWith('STOCK_NEGATIVO:')) {
         const disponible = mensaje.split(':')[1];
         throw new BadRequestException(

@@ -6,6 +6,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
@@ -27,6 +28,7 @@ import { MetodoEnvio } from '../../../models/DBModel/tienda/metodo-envio.entity'
 import { MetodoPago } from '../../../models/DBModel/tienda/metodo-pago.entity';
 import { Cupon } from '../../../models/DBModel/tienda/cupon.entity';
 import { hoyLima } from '../../../util/fecha-lima';
+import { PedidoComprobanteBussnies } from './pedido-comprobante.bussnies';
 
 /** Orden en que avanza un pedido; se usa para validar transiciones. */
 const FLUJO_ESTADOS = ['pendiente', 'pagado', 'preparando', 'enviado', 'entregado'];
@@ -70,6 +72,8 @@ export class PedidoBussnies {
     @InjectDataSource('pgConnection')
     private readonly dataSource: DataSource,
     private readonly cuentaRepo: CuentaTiendaRepository,
+    /** Estado del comprobante en el detalle del pedido; sin él el detalle sale sin esa sección. */
+    @Optional() private readonly comprobantePedido?: PedidoComprobanteBussnies,
   ) {}
 
   async crearDesdeCarrito(idCliente: number, dto: CrearPedidoRequest): Promise<PedidoResponse> {
@@ -189,7 +193,8 @@ export class PedidoBussnies {
     return pedidos.map((pedido) => this.mapPedido(pedido));
   }
 
-  async obtener(idPedido: number, idCliente?: number): Promise<PedidoResponse> {
+  /** `paraPersonal`: la ficha del panel (incluye el motivo si el pedido quedó sin comprobante); nunca para el comprador. */
+  async obtener(idPedido: number, idCliente?: number, paraPersonal = false): Promise<PedidoResponse> {
     const pedido = await this.repo.obtenerPorId(idPedido);
     if (!pedido) throw new NotFoundException(`Pedido ${idPedido} no encontrado`);
 
@@ -197,7 +202,7 @@ export class PedidoBussnies {
       throw new ForbiddenException('Este pedido no te pertenece');
     }
 
-    return this.mapPedido(pedido);
+    return this.conComprobante(pedido, this.mapPedido(pedido), paraPersonal && idCliente === undefined);
   }
 
   async obtenerPorCodigo(codigo: string, idCliente?: number): Promise<PedidoResponse> {
@@ -208,12 +213,29 @@ export class PedidoBussnies {
       throw new ForbiddenException('Este pedido no te pertenece');
     }
 
-    return this.mapPedido(pedido);
+    return this.conComprobante(pedido, this.mapPedido(pedido), false);
+  }
+
+  /** Agrega el estado del comprobante; si no se puede leer, el pedido sale igual sin esa sección. */
+  private async conComprobante(pedido: Pedido, respuesta: PedidoResponse, paraPersonal: boolean): Promise<PedidoResponse> {
+    if (!this.comprobantePedido) return respuesta;
+    try {
+      respuesta.comprobante = await this.comprobantePedido.resumenDe(pedido, paraPersonal);
+    } catch (error: any) {
+      this.log.warn(`Pedido ${pedido.id_pedido}: no se pudo leer su comprobante: ${error?.message}`);
+    }
+    return respuesta;
   }
 
   async listarTodos(estado?: string): Promise<PedidoResponse[]> {
     const pedidos = await this.repo.listarTodos(estado);
     return pedidos.map((pedido) => this.mapPedido(pedido));
+  }
+
+  /** Cuántos pedidos web esperan al negocio (pendientes de pago y pagados por preparar), sin traer las listas. */
+  async resumenPorPreparar(): Promise<{ pendientes: number; pagados: number; total: number }> {
+    const { pendientes, pagados } = await this.repo.contarPorPreparar();
+    return { pendientes, pagados, total: pendientes + pagados };
   }
 
   /**

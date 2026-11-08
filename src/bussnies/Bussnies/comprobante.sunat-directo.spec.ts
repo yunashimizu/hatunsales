@@ -104,7 +104,8 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
       expect(vista.ambiente_fiscal).toBe('beta');
       expect(vista.aviso).toBe(CONTEXTO_BETA.aviso);
       expect(vista.emision_activa).toBe(true);
-      expect(vista.advertencias).toEqual([]);
+      // El producto de la boleta de prueba no tiene código SUNAT ni hay uno por defecto: la vista previa avisa del genérico.
+      expect(vista.advertencias).toEqual([expect.stringContaining('código genérico')]);
     });
 
     it('la vista previa trae nombre comercial, teléfono, correo y el logo configurado del emisor', async () => {
@@ -284,6 +285,27 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
       expect(respuesta.error).toBeUndefined();
     });
 
+    it('con forzarDiferido (pedido web) responde en proceso aunque el negocio cobre «en línea»', async () => {
+      const bd = crearBdFalsa({ maximos: { BB01: [4] } });
+      const { servicio, emision } = crearMotor({ bd });
+      emision.modo.mockResolvedValue({ activo: true, ambiente: 'beta', diferido: false });
+      emision.enviarRegistrado.mockReturnValue(new Promise(() => undefined));
+
+      const respuesta = await servicio.generar(boleta(), null, { forzarDiferido: true });
+
+      expect(respuesta).toMatchObject({ estado: 'pendiente', estado_sunat: 'ENVIANDO', envio_diferido: true });
+      expect(respuesta.error).toBeUndefined();
+    });
+
+    it('emisionDisponible informa si la emisión está activa y el motivo si no lo está', async () => {
+      const { servicio, emision } = crearMotor({ bd: crearBdFalsa({}) });
+      emision.modo.mockResolvedValueOnce({ activo: true, ambiente: 'beta' });
+      await expect(servicio.emisionDisponible()).resolves.toEqual({ activo: true });
+
+      emision.modo.mockResolvedValueOnce({ activo: false, ambiente: 'beta', codigo: 'FISCAL_EMISION_INACTIVA', motivo: 'apagada' });
+      await expect(servicio.emisionDisponible()).resolves.toEqual({ activo: false, motivo: 'apagada' });
+    });
+
     it('sin el modo diferido (o con diferido apagado) el comportamiento es el de siempre: espera a SUNAT', async () => {
       for (const modo of [{ activo: true, ambiente: 'beta' }, { activo: true, ambiente: 'beta', diferido: false }]) {
         const bd = crearBdFalsa({ maximos: { BB01: [4] } });
@@ -305,6 +327,62 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
 
       await expect(servicio.generar(boleta())).rejects.toBeDefined();
       expect(emision.enviarRegistrado).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('modo «resumen» de boletas (fiscal_boletas_modo)', () => {
+    it('una boleta se registra POR_RESUMIR y NO se manda a SUNAT: responde registrada, sin error y con el QR para el PDF', async () => {
+      const bd = crearBdFalsa({ maximos: { BB01: [4] } });
+      const { servicio, emision } = crearMotor({ bd });
+      emision.modo.mockResolvedValue({ activo: true, ambiente: 'beta', resumen: true });
+
+      const respuesta = await servicio.generar(boleta(), 3);
+
+      expect(emision.registrarEnvio).toHaveBeenCalledWith(bd.manager, expect.anything(), 900, 3, { porResumir: true });
+      expect(emision.enviarRegistrado).not.toHaveBeenCalled();
+      expect(bd.registro).toContain('COMMIT');
+      expect(respuesta).toMatchObject({
+        id_comprobante: 900,
+        serie: 'BB01',
+        numero: 5,
+        estado: 'pendiente',
+        estado_sunat: 'POR_RESUMIR',
+        accion_sunat: 'RESUMIR',
+        aceptada_sunat: false,
+        id_envio_ultimo: 501,
+        cadena_qr: 'QR-LOCAL',
+        codigo_hash: 'HASH-LOCAL',
+        envio_diferido: true,
+        por_resumen: true,
+        sunat_description: 'Boleta registrada; se informa a SUNAT en el resumen diario.',
+      });
+      // No es un error: el mostrador no avisa «comprobante pendiente de revisar» y el PDF/QR siguen disponibles.
+      expect(respuesta.error).toBeUndefined();
+      expect(respuesta.archivos).toEqual(expect.arrayContaining(['xml_firmado', 'zip']));
+    });
+
+    it('una factura no se difiere con el modo «resumen» (solo las boletas se informan en el resumen): va a SUNAT al cobrar', async () => {
+      const bd = crearBdFalsa({ maximos: { F001: [0] } });
+      const { servicio, emision } = crearMotor({ bd, contexto: CONTEXTO_PRODUCCION });
+      emision.modo.mockResolvedValue({ activo: true, ambiente: 'produccion', resumen: true });
+
+      const respuesta = await servicio.generar(boleta({ id_tipo: 1, documento: '20123456789' }), 8);
+
+      expect(emision.registrarEnvio).toHaveBeenCalledWith(bd.manager, expect.anything(), 900, 8);
+      expect(emision.enviarRegistrado).toHaveBeenCalledTimes(1);
+      expect(respuesta.por_resumen).toBeUndefined();
+    });
+
+    it('con el modo individual (por defecto) la boleta va a SUNAT al cobrar, como siempre', async () => {
+      const bd = crearBdFalsa({ maximos: { BB01: [4] } });
+      const { servicio, emision } = crearMotor({ bd });
+      emision.modo.mockResolvedValue({ activo: true, ambiente: 'beta', diferido: false });
+
+      const respuesta = await servicio.generar(boleta());
+
+      expect(emision.registrarEnvio).toHaveBeenCalledWith(bd.manager, expect.anything(), 900, null);
+      expect(bd.registro).toContain('enviar:501');
+      expect(respuesta.por_resumen).toBeUndefined();
     });
   });
 
@@ -494,9 +572,10 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
       expect(emision.prepararDocumento).not.toHaveBeenCalled();
     });
 
-    it('código SUNAT: el del producto, si no el configurado por defecto, y si tampoco hay se omite (nunca 10000000)', async () => {
+    it('código SUNAT: el del producto, si no el configurado por defecto (nunca 10000000)', async () => {
       const conDefecto = crearMotor({ config: { fiscal_codigo_producto_defecto: '31162800' } });
-      await conDefecto.servicio.generar(boleta({
+      const categorias = jest.spyOn(conDefecto.repo, 'categoriasDeProductos');
+      const respuesta = await conDefecto.servicio.generar(boleta({
         id_venta: undefined,
         items: [
           { id_producto: 7, codigo: 'A', descripcion: 'CLAVO 2"', cantidad: 1, precio_unitario: 5, codigo_producto_sunat: '31161600' },
@@ -504,12 +583,36 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
         ],
       }));
       expect(documentoPreparado(conDefecto.emision).lineas.map((l) => l.codigoSunat)).toEqual(['31161600', '31162800']);
+      // Con código por defecto no hace falta mirar categorías ni avisar de códigos genéricos.
+      expect(categorias).not.toHaveBeenCalled();
+      expect(respuesta.aviso ?? '').not.toContain('genérico');
+    });
 
-      const sinDefecto = crearMotor();
-      await sinDefecto.servicio.generar(boleta({ id_venta: undefined }));
-      const linea = documentoPreparado(sinDefecto.emision).lineas[0];
-      expect(linea.codigoSunat).toBeUndefined();
-      expect(JSON.stringify(documentoPreparado(sinDefecto.emision))).not.toContain('10000000');
+    it('sin código propio ni por defecto sale el genérico de la categoría del producto, con aviso (nunca se bloquea la venta)', async () => {
+      const motor = crearMotor();
+      jest.spyOn(motor.repo, 'categoriasDeProductos').mockResolvedValue(new Map([[8, 'Pinturas y barnices']]));
+
+      const respuesta = await motor.servicio.generar(boleta({
+        id_venta: undefined,
+        items: [
+          { id_producto: 7, codigo: 'A', descripcion: 'CLAVO 2"', cantidad: 1, precio_unitario: 5, codigo_producto_sunat: '31161600' },
+          { id_producto: 8, codigo: 'B', descripcion: 'ESMALTE BLANCO', cantidad: 1, precio_unitario: 25 },
+        ],
+      }));
+
+      expect(documentoPreparado(motor.emision).lineas.map((l) => l.codigoSunat)).toEqual(['31161600', '31210000']);
+      expect(JSON.stringify(documentoPreparado(motor.emision))).not.toContain('10000000');
+      expect(respuesta.aviso).toContain('1 producto salió con el código genérico');
+    });
+
+    it('si no se puede leer la categoría igual sale el genérico de ferretería en general', async () => {
+      const motor = crearMotor();
+      jest.spyOn(motor.repo, 'categoriasDeProductos').mockRejectedValue(new Error('sin conexión'));
+
+      const respuesta = await motor.servicio.generar(boleta({ id_venta: undefined }));
+
+      expect(documentoPreparado(motor.emision).lineas[0].codigoSunat).toBe('31160000');
+      expect(respuesta.aviso).toContain('código genérico');
     });
 
     it('el consumidor final (00000000) no se busca como DNI', async () => {
@@ -553,7 +656,7 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
         accion_sunat: 'NINGUNA',
         archivos: ['xml_original', 'xml_firmado', 'zip', 'cdr_xml', 'cdr_zip'],
         codigo_hash: 'HASH-SUNAT',
-        aviso: CONTEXTO_BETA.aviso,
+        aviso: expect.stringContaining(String(CONTEXTO_BETA.aviso)),
         fecha_limite_envio: '2026-10-26',
         id_venta: 9,
       });

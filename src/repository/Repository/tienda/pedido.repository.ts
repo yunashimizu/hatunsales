@@ -297,4 +297,20 @@ export class PedidoRepository {
       order: { creado_en: 'DESC' },
     });
   }
+
+  /**
+   * Pedidos web por preparar (pendientes de pago y pagados) en una sola consulta.
+   * Misma consulta que `ReportesRepository.contarPedidosWeb` (resumen diario); se
+   * mantiene duplicada a propósito para no reorganizar el resumen diario.
+   */
+  async contarPorPreparar(): Promise<{ pendientes: number; pagados: number }> {
+    const filas = filasDe<{ estado: string; total: number | string }>(await this.pedidoRepo.manager.query(
+      `SELECT estado, COUNT(*)::int AS total
+         FROM pedidos
+        WHERE estado IN ('pendiente', 'pagado')
+        GROUP BY estado`,
+    ));
+    const de = (estado: string) => Number(filas.find((f) => f.estado === estado)?.total ?? 0);
+    return { pendientes: de('pendiente'), pagados: de('pagado') };
+  }
 }

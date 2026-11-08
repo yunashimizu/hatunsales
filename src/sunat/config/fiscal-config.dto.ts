@@ -19,6 +19,7 @@ import {
   CORRELATIVO_MAXIMO,
   MODOS_BOLETAS,
   MODOS_REGLAS_2027,
+  PATRON_HORA_RESUMEN,
   PATRON_SERIE_CPE,
   PROVEEDORES_FISCALES,
 } from './fiscal-config.tipos';
@@ -268,11 +269,22 @@ export class ActualizarConfigFiscalDto {
   @IsIn([...MODOS_BOLETAS], { message: 'El modo de boletas debe ser individual o resumen.' })
   boletas_modo?: ModoBoletas;
 
+  /** Hora (Lima, HH:mm) del resumen diario de boletas; solo se usa con boletas_modo = resumen. */
+  @IsOptional()
+  @Transform(recortar)
+  @Matches(PATRON_HORA_RESUMEN, { message: 'resumen_hora debe tener el formato HH:mm (24 horas), por ejemplo 23:30.' })
+  resumen_hora?: string;
+
+  /**
+   * @deprecated Clave antigua del interruptor «Envío en línea». Se acepta por compatibilidad y equivale a
+   * envio_diferido invertido (envio_en_linea: false = envio_diferido: true); si llegan las dos, manda envio_diferido.
+   */
   @IsOptional()
   @Transform(aBooleano)
   @IsBoolean({ message: 'envio_en_linea debe ser verdadero o falso.' })
   envio_en_linea?: boolean;
 
+  /** Un solo interruptor: true = la venta termina al instante y el comprobante se envía a SUNAT en segundo plano. */
   @IsOptional()
   @Transform(aBooleano)
   @IsBoolean({ message: 'envio_diferido debe ser verdadero o falso.' })

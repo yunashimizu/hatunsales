@@ -1,8 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { CertificadoFiscalService } from '../certificado/certificado-fiscal.service';
 import { CifradoFiscalService } from '../seguridad/cifrado-fiscal.service';
 import { CredencialesGreService } from '../seguridad/credenciales-gre.service';
 import { CredencialesSolService } from '../seguridad/credenciales-sol.service';
+import { RecifradoFiscalService } from '../seguridad/recifrado-fiscal.service';
 import { evaluarPreparacion, HechosPreparacion, ResultadoPreparacion } from './checklist-activacion';
 import { FiscalConfigService } from './fiscal-config.service';
 import { SnapshotConfigFiscal } from './fiscal-config.tipos';
@@ -32,6 +33,8 @@ export class PreparacionFiscalService implements EvaluadorPreparacionFiscal {
     private readonly credencialesGre: CredencialesGreService,
     private readonly reloj: RelojFiscal,
     private readonly productosSinCodigo: ProductosSinCodigoSunatRepository,
+    /** Estado de la rotación de la llave (aviso del checklist); sin él no hay aviso. */
+    @Optional() private readonly recifrado?: RecifradoFiscalService,
   ) {}
 
   async listoParaProduccion(): Promise<ResultadoPreparacion> {
@@ -45,12 +48,13 @@ export class PreparacionFiscalService implements EvaluadorPreparacionFiscal {
   }
 
   async hechos(snapshot: SnapshotConfigFiscal): Promise<HechosPreparacion> {
-    const [esquema, certificados, claveSol, credencialesGre, productosSinCodigoSunat] = await Promise.all([
+    const [esquema, certificados, claveSol, credencialesGre, productosSinCodigoSunat, llave] = await Promise.all([
       this.esquema.estado(),
       this.certificados.estadoParaChecklist(),
       this.credencialesSol.diagnosticoClave(),
       this.credencialesGre.diagnostico(),
       this.productosSinCodigo.contar(),
+      this.recifrado?.estadoLlave() ?? Promise.resolve(null),
     ]);
     return {
       snapshot,
@@ -61,6 +65,7 @@ export class PreparacionFiscalService implements EvaluadorPreparacionFiscal {
       claveSol,
       credencialesGre,
       productosSinCodigoSunat,
+      llave: llave ? { anteriorDefinida: llave.anterior_definida, secretosConLlaveAnterior: llave.secretos_con_llave_anterior } : null,
     };
   }
 }

@@ -45,7 +45,7 @@ export interface CambiosConfigFiscal {
   proveedor?: ProveedorFiscal;
   ambiente?: AmbienteFiscal;
   boletasModo?: ModoBoletas;
-  envioEnLinea?: boolean;
+  resumenHora?: string;
   envioDiferido?: boolean;
   tareasActivas?: boolean;
   reglas2027?: ModoReglas2027;
@@ -83,8 +83,10 @@ export function cambiosDesdeDto(dto: ActualizarConfigFiscalDto, rucEmisor: strin
   if (dto.proveedor !== undefined) cambios.proveedor = dto.proveedor;
   if (dto.ambiente !== undefined) cambios.ambiente = dto.ambiente;
   if (dto.boletas_modo !== undefined) cambios.boletasModo = dto.boletas_modo;
-  if (dto.envio_en_linea !== undefined) cambios.envioEnLinea = dto.envio_en_linea;
+  if (dto.resumen_hora !== undefined) cambios.resumenHora = dto.resumen_hora;
+  // Un solo interruptor: la clave antigua «envío en línea» (invertida) solo vale si no llega la nueva.
   if (dto.envio_diferido !== undefined) cambios.envioDiferido = dto.envio_diferido;
+  else if (dto.envio_en_linea !== undefined) cambios.envioDiferido = !dto.envio_en_linea;
   if (dto.tareas_activas !== undefined) cambios.tareasActivas = dto.tareas_activas;
   if (dto.aplicar_reglas_2027 !== undefined) cambios.reglas2027 = dto.aplicar_reglas_2027;
   if (dto.codigo_producto_defecto !== undefined) cambios.codigoProductoDefecto = vacioANull(dto.codigo_producto_defecto);
@@ -195,7 +197,7 @@ export function proyectarSnapshot(
     proveedor: cambios.proveedor ?? actual.proveedor,
     ambiente: cambios.ambiente ?? actual.ambiente,
     boletasModo: cambios.boletasModo ?? actual.boletasModo,
-    envioEnLinea: cambios.envioEnLinea ?? actual.envioEnLinea,
+    resumenHora: cambios.resumenHora ?? actual.resumenHora,
     envioDiferido: cambios.envioDiferido ?? actual.envioDiferido,
     tareasActivas: cambios.tareasActivas ?? actual.tareasActivas,
     series,
@@ -352,7 +354,7 @@ export function paresParaGuardar(cambios: CambiosConfigFiscal, futuro: SnapshotC
   if (cambios.proveedor !== undefined) pares[c.proveedor] = futuro.proveedor;
   if (cambios.ambiente !== undefined) pares[c.ambiente] = futuro.ambiente;
   if (cambios.boletasModo !== undefined) pares[c.boletasModo] = futuro.boletasModo;
-  if (cambios.envioEnLinea !== undefined) pares[c.envioEnLinea] = String(futuro.envioEnLinea);
+  if (cambios.resumenHora !== undefined) pares[c.resumenHora] = futuro.resumenHora;
   if (cambios.envioDiferido !== undefined) pares[c.envioDiferido] = String(futuro.envioDiferido);
   if (cambios.tareasActivas !== undefined) pares[c.tareasActivas] = String(futuro.tareasActivas);
   if (cambios.reglas2027 !== undefined) pares[c.reglas2027] = futuro.reglas2027;
@@ -425,7 +427,7 @@ export function eventosAuditoria(
 
   const operacion = diferencias([
     ['boletas_modo', actual.boletasModo, futuro.boletasModo],
-    ['envio_en_linea', actual.envioEnLinea, futuro.envioEnLinea],
+    ['resumen_hora', actual.resumenHora, futuro.resumenHora],
     ['envio_diferido', actual.envioDiferido, futuro.envioDiferido],
     ['tareas_activas', actual.tareasActivas, futuro.tareasActivas],
     ['aplicar_reglas_2027', actual.reglas2027, futuro.reglas2027],

@@ -5,6 +5,7 @@ import { EsquemaCajaService } from '../../caja/esquema/esquema-caja.service';
 import { Dinero } from '../../caja/dominio/dinero';
 import { filasDe } from '../../caja/bd/resultado-consulta';
 import { SQL_HOY_LIMA } from '../../util/fecha-lima';
+import { TIPO_BOLETA, TIPO_FACTURA } from '../../util/fiscal/tipos-comprobante';
 
 export interface LineaCredito {
   credito_activo: boolean;
@@ -42,6 +43,48 @@ const SQL_ESTADO_CXC = `CASE
 const COLUMNAS_CXC = `cxc.id_cxc, cxc.id_venta, cxc.id_cliente, cxc.id_empresa, cxc.monto_total, cxc.saldo,
        cxc.fecha_emision, to_char(cxc.fecha_vencimiento, 'YYYY-MM-DD') AS fecha_vencimiento,
        ${SQL_ESTADO_CXC} AS estado, cxc.creado_en`;
+
+/**
+ * Datos del deudor y del comprobante principal de la venta (Fase F0). `comprobante` es serie-número (F001-00000012) de la
+ * factura o boleta de la venta: primero la vigente (ni anulada ni con error), si no la más reciente; null si la venta no tiene.
+ * `telefono` es el del cliente o, si la deuda es de una empresa, el texto de sus teléfonos (puede traer varios).
+ */
+const SQL_DEUDOR_Y_COMPROBANTE = `COALESCE(c.nombre, e.razon_social, e.nombre_comercial, '—') AS deudor,
+                COALESCE(CAST(c.dni AS TEXT), e.ruc, '') AS documento,
+                COALESCE(NULLIF(TRIM(CAST(c.telefono AS TEXT)), ''), NULLIF(TRIM(CAST(e.telefonos AS TEXT)), '')) AS telefono,
+                comp.comprobante`;
+
+const SQL_JOIN_COMPROBANTE = `LEFT JOIN LATERAL (
+                  SELECT cp.serie || '-' || LPAD(cp.numero::text, 8, '0') AS comprobante
+                    FROM comprobantes cp
+                   WHERE cp.id_venta = cxc.id_venta
+                     AND cp.id_tipo IN (${TIPO_FACTURA}, ${TIPO_BOLETA})
+                   ORDER BY (COALESCE(cp.anulado, FALSE) OR LOWER(COALESCE(cp.estado, '')) = 'error') ASC, cp.id_comprobante DESC
+                   LIMIT 1
+                ) comp ON TRUE`;
+
+/** Tramo de antigüedad de una cuenta con saldo: días de atraso respecto de hoy en Lima. */
+const SQL_DIAS_ATRASO = `(${SQL_HOY_LIMA} - cxc.fecha_vencimiento::date)`;
+
+export interface TramoAntiguedad {
+  cuentas: number;
+  saldo: number;
+}
+
+/** Deuda por antigüedad (Fase F0): lo que no ha vencido y cuatro tramos de atraso. */
+export interface AntiguedadDeuda {
+  al_dia: TramoAntiguedad;
+  de_1_a_30: TramoAntiguedad;
+  de_31_a_60: TramoAntiguedad;
+  mas_de_60: TramoAntiguedad;
+}
+
+/** Deuda ya vencida para el resumen diario: cuántas cuentas, cuánto y las de mayor saldo. */
+export interface DeudaVencidaResumen {
+  cuentas: number;
+  total: number;
+  mayores: Array<{ deudor: string; saldo: number; dias: number; comprobante: string | null }>;
+}
 
 /**
  * Crédito y cuentas por cobrar. Sin DDL: si faltan las tablas (sql/fase11), las operaciones
@@ -224,11 +267,11 @@ export class CreditoRepository {
       ),
       this.dataSource.query(
         `SELECT ${COLUMNAS_CXC},
-                COALESCE(c.nombre, e.razon_social, e.nombre_comercial, '—') AS deudor,
-                COALESCE(CAST(c.dni AS TEXT), e.ruc, '') AS documento
+                ${SQL_DEUDOR_Y_COMPROBANTE}
            FROM cuentas_por_cobrar cxc
            LEFT JOIN clientes c ON c.id_cliente = cxc.id_cliente
            LEFT JOIN empresas e ON e.id_empresa = cxc.id_empresa
+           ${SQL_JOIN_COMPROBANTE}
           WHERE ${whereSql}
           ORDER BY cxc.fecha_vencimiento ASC, cxc.id_cxc DESC
           LIMIT $${paramsDatos.length - 1} OFFSET $${paramsDatos.length}`,
@@ -239,16 +282,104 @@ export class CreditoRepository {
     return { data, total: Number(totales[0]?.total ?? 0), pagina, limite };
   }
 
+  /**
+   * Deuda por antigüedad calculada en SQL con la fecha de Lima: sobre las cuentas con saldo (pendiente, parcial o vencida),
+   * «al día» es lo que aún no vence (hoy incluido) y los tramos cuentan los días pasados desde el vencimiento. Solo lectura.
+   */
+  async antiguedad(): Promise<AntiguedadDeuda> {
+    await this.exigirEsquema();
+    const filas = await this.dataSource.query(
+      `SELECT COUNT(*) FILTER (WHERE d <= 0)::int                   AS al_dia_n,
+              COALESCE(SUM(saldo) FILTER (WHERE d <= 0), 0)::text    AS al_dia_s,
+              COUNT(*) FILTER (WHERE d BETWEEN 1 AND 30)::int        AS t1_n,
+              COALESCE(SUM(saldo) FILTER (WHERE d BETWEEN 1 AND 30), 0)::text AS t1_s,
+              COUNT(*) FILTER (WHERE d BETWEEN 31 AND 60)::int       AS t2_n,
+              COALESCE(SUM(saldo) FILTER (WHERE d BETWEEN 31 AND 60), 0)::text AS t2_s,
+              COUNT(*) FILTER (WHERE d > 60)::int                    AS t3_n,
+              COALESCE(SUM(saldo) FILTER (WHERE d > 60), 0)::text    AS t3_s
+         FROM (SELECT cxc.saldo, ${SQL_DIAS_ATRASO} AS d
+                 FROM cuentas_por_cobrar cxc
+                WHERE cxc.estado IN ('pendiente', 'parcial', 'vencido')
+                  AND cxc.saldo > 0) t`,
+    );
+    const f = filas[0] ?? {};
+    const tramo = (n: unknown, saldo: unknown): TramoAntiguedad => ({
+      cuentas: Number(n ?? 0),
+      saldo: Dinero.desdeBd(saldo).aNumero(),
+    });
+    return {
+      al_dia: tramo(f.al_dia_n, f.al_dia_s),
+      de_1_a_30: tramo(f.t1_n, f.t1_s),
+      de_31_a_60: tramo(f.t2_n, f.t2_s),
+      mas_de_60: tramo(f.t3_n, f.t3_s),
+    };
+  }
+
+  /** COUNT + SUM de la deuda vencida (mismo criterio que el resumen diario). Devuelve la promesa cruda de filas. */
+  private consultarTotalVencido(): Promise<Array<{ cuentas: number | string; total: string | null }>> {
+    return this.dataSource.query(
+      `SELECT COUNT(*)::int AS cuentas, COALESCE(SUM(cxc.saldo), 0)::text AS total
+         FROM cuentas_por_cobrar cxc
+        WHERE cxc.estado IN ('pendiente', 'parcial', 'vencido')
+          AND cxc.saldo > 0
+          AND ${SQL_DIAS_ATRASO} > 0`,
+    );
+  }
+
+  /** Solo el total de la deuda vencida (cuentas y monto), para el Inicio y la campana. Solo lectura. */
+  async totalVencido(): Promise<{ cuentas: number; total: number }> {
+    await this.exigirEsquema();
+    const totales = await this.consultarTotalVencido();
+    return {
+      cuentas: Number(totales[0]?.cuentas ?? 0),
+      total: Dinero.desdeBd(totales[0]?.total).aNumero(),
+    };
+  }
+
+  /** Deuda vencida (fecha de vencimiento anterior a hoy en Lima, con saldo): total y las `limite` de mayor saldo. Solo lectura. */
+  async deudaVencida(limite = 5): Promise<DeudaVencidaResumen> {
+    await this.exigirEsquema();
+    const [totales, mayores] = await Promise.all([
+      this.consultarTotalVencido(),
+      this.dataSource.query(
+        `SELECT COALESCE(c.nombre, e.razon_social, e.nombre_comercial, '—') AS deudor,
+                cxc.saldo::text AS saldo,
+                ${SQL_DIAS_ATRASO}::int AS dias,
+                comp.comprobante
+           FROM cuentas_por_cobrar cxc
+           LEFT JOIN clientes c ON c.id_cliente = cxc.id_cliente
+           LEFT JOIN empresas e ON e.id_empresa = cxc.id_empresa
+           ${SQL_JOIN_COMPROBANTE}
+          WHERE cxc.estado IN ('pendiente', 'parcial', 'vencido')
+            AND cxc.saldo > 0
+            AND ${SQL_DIAS_ATRASO} > 0
+          ORDER BY cxc.saldo DESC, cxc.id_cxc ASC
+          LIMIT $1`,
+        [Math.max(1, Math.trunc(limite) || 5)],
+      ),
+    ]);
+    return {
+      cuentas: Number(totales[0]?.cuentas ?? 0),
+      total: Dinero.desdeBd(totales[0]?.total).aNumero(),
+      mayores: mayores.map((m: any) => ({
+        deudor: String(m.deudor ?? '—'),
+        saldo: Dinero.desdeBd(m.saldo).aNumero(),
+        dias: Number(m.dias ?? 0),
+        comprobante: m.comprobante ? String(m.comprobante) : null,
+      })),
+    };
+  }
+
   async obtener(idCxc: number) {
     await this.exigirEsquema();
     const [filas, abonos] = await Promise.all([
       this.dataSource.query(
         `SELECT ${COLUMNAS_CXC},
-                COALESCE(c.nombre, e.razon_social, e.nombre_comercial, '—') AS deudor,
-                COALESCE(CAST(c.dni AS TEXT), e.ruc, '') AS documento
+                ${SQL_DEUDOR_Y_COMPROBANTE}
            FROM cuentas_por_cobrar cxc
            LEFT JOIN clientes c ON c.id_cliente = cxc.id_cliente
            LEFT JOIN empresas e ON e.id_empresa = cxc.id_empresa
+           ${SQL_JOIN_COMPROBANTE}
           WHERE cxc.id_cxc = $1`,
         [idCxc],
       ),

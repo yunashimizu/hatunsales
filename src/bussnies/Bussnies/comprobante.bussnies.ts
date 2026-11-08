@@ -68,11 +68,12 @@ import type {
   TotalesCpe,
 } from '../../sunat/nucleo/documento-fiscal.types';
 import { DocumentoCpeInvalidoError } from '../../sunat/nucleo/errores-nucleo';
+import { MENSAJE_POR_RESUMIR } from '../../sunat/emision/emision.tipos';
 import { LotesFiscales } from '../../sunat/documentos/lotes.contrato';
-import type { LoteDeComprobante } from '../../sunat/documentos/lotes.contrato';
+import type { LoteDeComprobante, ResultadoResumenAdicion } from '../../sunat/documentos/lotes.contrato';
 import { fechaLima, horaLima } from '../../sunat/nucleo/fechas-fiscales';
 import { bajaDentroDePlazo } from '../../sunat/nucleo/ubl/constructor-comunicacion-baja';
-import { admiteGetStatusCdr, fechaLimiteEnvioIndividual } from '../../sunat/nucleo/reglas-envio';
+import { admiteGetStatusCdr, admiteResumenDiario, esDocumentoDeFactura, fechaLimiteEnvioIndividual } from '../../sunat/nucleo/reglas-envio';
 import {
   CATALOGO_10_MOTIVO_NOTA_DEBITO,
   ETIQUETA_MOTIVO_NOTA_CREDITO,
@@ -82,6 +83,7 @@ import {
   motivoNotaDebitoVigente,
 } from '../../sunat/catalogos/sunat.catalogos';
 import { CLAVES_SERIES_FISCALES, SERIES_FISCALES_POR_DEFECTO } from '../../sunat/config/fiscal-config.tipos';
+import type { ActorFiscal } from '../../sunat/config/fiscal-config.tipos';
 import { EmisionDirecta } from '../../sunat/emision/emision.contrato';
 import type {
   ArchivoEnvio,
@@ -105,6 +107,7 @@ import type { AnulacionDocumentoResponse, ConsultaAnulacionResponse } from '../.
 import { generarPdfComprobante } from '../../util/documentos/comprobante-pdf';
 import type { DatosPdfComprobante, FormatoPdfComprobante } from '../../util/documentos/comprobante-pdf';
 import { obtenerLogoEmisor } from '../../util/documentos/logo-emisor';
+import { codigoGenericoDeCategoria } from '../../sunat/catalogos/codigos-producto-genericos';
 
 const MONEDAS: Record<number, { nombre: string; simbolo: string }> = {
   1: { nombre: 'SOLES', simbolo: 'S/' },
@@ -136,12 +139,22 @@ export const FORMA_MOTIVO_NOTA_CREDITO: Readonly<Record<string, MotivoNotaRespon
 const ESTADOS_ACEPTADO: ReadonlySet<string> = new Set(['ACEPTADO', 'ACEPTADO_OBS']);
 /** Estados SUNAT de un envío que todavía puede terminar aceptado. */
 const ESTADOS_EN_CURSO: ReadonlySet<string> = new Set(['NO_ENVIADO', 'ENVIANDO', 'PENDIENTE_REENVIO']);
+/**
+ * Boleta que espera su resumen diario (POR_RESUMIR) o está en uno que SUNAT procesa (TICKET_PENDIENTE): no es un error
+ * ni «vencida» por el plazo del envío individual; el comprobante queda «pendiente» hasta que SUNAT acepte el resumen.
+ */
+const ESTADOS_EN_RESUMEN: ReadonlySet<string> = new Set(['POR_RESUMIR', 'TICKET_PENDIENTE']);
 const PATRON_ESTADO_SUNAT = /^[A-Z_]{2,30}$/;
 
 /** Opciones internas de emisión (no viajan en el DTO HTTP). */
 export interface OpcionesGenerar {
   /** Total que DEBE dar el comprobante (venta ya cobrada): si difiere, 400 sin reservar número. */
   totalExigido?: number;
+  /**
+   * Envía a SUNAT en segundo plano aunque el modo del negocio sea «al cobrar». Lo usa la confirmación del pago
+   * de un pedido web: confirmar no debe esperar a SUNAT. No cambia el modo «resumen» de boletas.
+   */
+  forzarDiferido?: boolean;
 }
 
 /** Resultado de preparar un comprobante, compartido entre vista previa y emisión. */
@@ -163,6 +176,8 @@ interface ComprobantePreparado {
   /** Forma de pago pedida; el monto al crédito se valida al armar el documento. */
   credito: { monto: number } | null;
   advertencias: string[];
+  /** Líneas que salieron con el código genérico de su categoría (sin código propio ni por defecto). */
+  codigosGenericos?: number;
 }
 
 /** Lo que el motor necesita para numerar, guardar y registrar el envío de un comprobante. */
@@ -175,6 +190,8 @@ interface PlanRegistro {
   idUsuario: number | null;
   /** Candados y verificaciones que van ANTES del candado de la serie, en la misma transacción. */
   antesDeNumerar?: (consultor: EntityManager) => Promise<void>;
+  /** Modo «resumen» de boletas: el envío nace POR_RESUMIR y no se manda a SUNAT al cobrar. */
+  porResumir?: boolean;
 }
 
 interface Registrado {
@@ -182,6 +199,7 @@ interface Registrado {
   idEnvio: number;
   numero: number;
   preparado: DocumentoPreparado;
+  porResumir: boolean;
 }
 
 /** Datos del comprobante guardado con los que se arma la respuesta de una emisión. */
@@ -200,12 +218,16 @@ interface BaseRespuesta {
 
 interface AccionesComprobante {
   puede_reintentar: boolean;
+  /** «Reintentar ahora» (solo administrador): el envío quedó en EXCEPCION sin plazo vencido y se puede volver a mandar. */
+  puede_reintentar_ahora: boolean;
   puede_recuperar_cdr: boolean;
   puede_confirmar_manual: boolean;
   puede_nota_credito: boolean;
   puede_anular: boolean;
   /** Anular dando de baja en SUNAT (RA o resumen), sin nota: aceptado, del ambiente vigente y dentro de los 7 días. */
   puede_anular_sin_nota: boolean;
+  /** «Informar por resumen»: boleta (o nota de boleta) que espera el resumen diario o venció su envío individual y aún está dentro de los 7 días. */
+  puede_informar_por_resumen: boolean;
   vencido: boolean;
 }
 
@@ -370,6 +392,8 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
             await this.exigirVentaSinComprobante(idVenta, tx);
           }
         : undefined,
+      // Modo «resumen»: solo las boletas se informan después en el resumen diario; la factura va al cobrar.
+      porResumir: modo.resumen === true && tipo === '03',
     });
 
     return this.enviarYResponder(registrado, {
@@ -381,7 +405,13 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       cadena_qr: registrado.preparado.preparado.cadenaQr,
       codigo_hash: registrado.preparado.preparado.digestValue,
       fecha_limite_envio: this.fechaLimite(tipo, serie, cuerpo.fechaEmision),
-    }, contexto.aviso, true);
+    }, this.avisoConCodigos(contexto.aviso, preparado.codigosGenericos), true, opciones.forzarDiferido === true);
+  }
+
+  /** ¿Se puede emitir ahora? Los flujos automáticos (pedidos web) lo miran antes de intentar y no tocan nada si no. */
+  async emisionDisponible(): Promise<{ activo: boolean; motivo?: string }> {
+    const modo = await this.emision.modo();
+    return modo.activo ? { activo: true } : { activo: false, motivo: modo.motivo };
   }
 
   // ── Emitir nota de crédito (contrato EmisorNotasCredito) ─────
@@ -446,7 +476,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     const saldo = Number(solicitud.saldo_maximo);
     if (!Number.isFinite(saldo) || redondear(preparado.resumen.total) > redondear(saldo)) {
       throw new BadRequestException({
-        message: `La nota de crédito suma ${this.monto(preparado.resumen.total)} y el saldo que todavía se puede acreditar de ${numeroOrigen} es ${this.monto(saldo)}. No se emitió.`,
+        message: `La nota de crédito suma ${this.monto(preparado.resumen.total)} y el saldo que todavía se puede acreditar de ${numeroOrigen} es ${this.monto(saldo)} (monto del documento menos las notas de crédito previas, ERR-3503). No se emitió.`,
         codigo: 'FISCAL_NOTA_EXCEDE_MONTO',
       });
     }
@@ -505,16 +535,16 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
   // ── Reintento, recuperación y confirmación manual ────────────
 
   /** Reenvío seguro del mismo ZIP (o recuperación del CDR primero, si el documento lo admite). */
-  async reintentar(id_comprobante: number): Promise<ComprobanteResponse> {
+  async reintentar(id_comprobante: number, opciones: { forzar?: boolean; actor?: ActorFiscal | null } = {}): Promise<ComprobanteResponse> {
     const guardado = await this.comprobanteConEnvio(id_comprobante, 'reintentar');
-    const resultado = await this.emision.reintentar(guardado.id_envio_ultimo as number);
+    const resultado = await this.emision.reintentar(guardado.id_envio_ultimo as number, opciones);
     return this.respuestaDeGuardado(guardado, resultado);
   }
 
   /** Pide a SUNAT la constancia (CDR) sin reenviar nada (getStatusCdr: producción, facturas y sus notas). */
-  async recuperarCdr(id_comprobante: number): Promise<ComprobanteResponse> {
+  async recuperarCdr(id_comprobante: number, actor: ActorFiscal | null = null): Promise<ComprobanteResponse> {
     const guardado = await this.comprobanteConEnvio(id_comprobante, 'consultar');
-    const resultado = await this.emision.recuperarCdr(guardado.id_envio_ultimo as number);
+    const resultado = await this.emision.recuperarCdr(guardado.id_envio_ultimo as number, { actor });
     return this.respuestaDeGuardado(guardado, resultado);
   }
 
@@ -527,6 +557,20 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     const guardado = await this.comprobanteConEnvio(id_comprobante, 'confirmar');
     const resultado = await this.emision.confirmarAceptadoManual(guardado.id_envio_ultimo as number, idUsuario, texto);
     return this.respuestaDeGuardado(guardado, resultado);
+  }
+
+  /**
+   * «Informar por resumen»: mete la boleta (o nota de boleta) en el resumen diario de su fecha de emisión, hasta el 7.º día.
+   * El resumen lleva solo este comprobante; la tarea o «Enviar resumen del día» agrupan varios.
+   */
+  async informarPorResumen(id_comprobante: number, actor: ActorFiscal | null): Promise<ResultadoResumenAdicion> {
+    if (!this.lotes) {
+      throw new ConflictException({
+        message: 'El resumen diario no está disponible en este momento.',
+        codigo: 'FISCAL_RESUMEN_NO_PERMITIDO',
+      });
+    }
+    return this.lotes.resumirComprobante({ id_comprobante, actor });
   }
 
   // ── Consultar ────────────────────────────────────────────────
@@ -793,11 +837,13 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       archivos: [...(envio?.archivos ?? [])],
       aviso: c.proveedor_fiscal === 'sunat_directo' && c.ambiente_fiscal === 'beta' ? AVISO_BETA : null,
       puede_reintentar: acciones.puede_reintentar,
+      puede_reintentar_ahora: acciones.puede_reintentar_ahora,
       puede_recuperar_cdr: acciones.puede_recuperar_cdr,
       puede_confirmar_manual: acciones.puede_confirmar_manual,
       puede_nota_credito: acciones.puede_nota_credito,
       puede_anular: acciones.puede_anular,
       puede_anular_sin_nota: acciones.puede_anular_sin_nota,
+      puede_informar_por_resumen: acciones.puede_informar_por_resumen,
       baja,
     };
   }
@@ -857,10 +903,10 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
         const guardado = await this.repo.transaccion(async (tx) => {
           if (plan.antesDeNumerar) await plan.antesDeNumerar(tx);
           const idComprobante = await this.repo.reservarCorrelativo(tx, { ...plan.fila, numero }, plan.items, plan.piso);
-          const idEnvio = await this.registrarEnvio(tx, preparado, idComprobante, plan.idUsuario);
+          const idEnvio = await this.registrarEnvio(tx, preparado, idComprobante, plan.idUsuario, plan.porResumir === true);
           return { idComprobante, idEnvio };
         });
-        return { ...guardado, numero, preparado };
+        return { ...guardado, numero, preparado, porResumir: plan.porResumir === true };
       } catch (error) {
         if (!(error instanceof NumeroOcupadoError)) throw error;
         if (intento >= MAXIMO_INTENTOS_NUMERO) {
@@ -887,9 +933,12 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     preparado: DocumentoPreparado,
     idComprobante: number,
     idUsuario: number | null,
+    porResumir = false,
   ): Promise<number> {
     try {
-      return await this.emision.registrarEnvio(consultor, preparado, idComprobante, idUsuario);
+      return porResumir
+        ? await this.emision.registrarEnvio(consultor, preparado, idComprobante, idUsuario, { porResumir: true })
+        : await this.emision.registrarEnvio(consultor, preparado, idComprobante, idUsuario);
     } catch (error) {
       if ((error as { codigo?: unknown })?.codigo === 'FISCAL_NUMERO_OCUPADO') {
         const { serie, numero } = preparado.documento;
@@ -924,12 +973,15 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     base: BaseRespuesta,
     aviso: string | null,
     diferible = false,
+    forzarDiferido = false,
   ): Promise<ComprobanteResponse> {
+    // Modo «resumen»: la boleta ya quedó firmada y guardada como POR_RESUMIR; no se manda a SUNAT, la informa el resumen diario.
+    if (registrado.porResumir) return this.responderPorResumen(registrado, base, aviso);
     // Envío diferido (fiscal_envio_diferido): la venta no espera a SUNAT. Solo facturas y boletas: una nota de
     // crédito anula la venta cuando SUNAT la acepta y su respuesta se necesita en el acto.
     if (diferible) {
       const modo = await this.emision.modo();
-      if (modo.activo && modo.diferido === true) return this.responderDiferido(registrado, base, aviso);
+      if (modo.activo && (modo.diferido === true || forzarDiferido)) return this.responderDiferido(registrado, base, aviso);
     }
     try {
       const resultado = await this.emision.enviarRegistrado(registrado.idEnvio, registrado.preparado);
@@ -988,6 +1040,38 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     );
     // No es un error: el mostrador no debe verlo como «comprobante pendiente de revisar».
     return { ...respuesta, error: undefined, envio_diferido: true };
+  }
+
+  /**
+   * Boleta en modo «resumen»: ya está firmada y guardada (POR_RESUMIR) y el cliente recibe su PDF con el QR igual que
+   * siempre. No es un error ni algo por revisar: el mostrador solo debe saber que SUNAT la recibe en el resumen diario.
+   */
+  private responderPorResumen(registrado: Registrado, base: BaseRespuesta, aviso: string | null): ComprobanteResponse {
+    const empaquetado = registrado.preparado.preparado;
+    const respuesta = this.respuestaEmision(
+      base,
+      {
+        ambiente: registrado.preparado.ambiente,
+        id_envio: registrado.idEnvio,
+        nombre_base: empaquetado.nombreBase,
+        estado: 'POR_RESUMIR',
+        aceptado: false,
+        codigo: null,
+        mensaje: MENSAJE_POR_RESUMIR,
+        observaciones: [],
+        digest: empaquetado.digestValue,
+        cadena_qr: empaquetado.cadenaQr,
+        accion: 'RESUMIR',
+        archivos: ['xml_original', 'xml_firmado', 'zip'],
+        id_comprobante: registrado.idComprobante,
+        serie: base.serie,
+        numero: base.numero,
+        fecha_limite_envio: base.fecha_limite_envio,
+      },
+      aviso,
+    );
+    // El mostrador no lo ve como «comprobante pendiente de revisar» (envio_diferido evita el aviso de la venta).
+    return { ...respuesta, error: undefined, envio_diferido: true, por_resumen: true };
   }
 
   private async exigirVentaSinComprobante(idVenta: number, consultor?: EntityManager): Promise<void> {
@@ -1070,6 +1154,8 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
 
     const porcentajeIgv = await this.config.obtenerNumero('tienda_igv_porcentaje', PORCENTAJE_IGV_POR_DEFECTO);
     const codigoDefecto = await this.codigoProductoDefecto();
+    const codigos = await this.codigosDeLineas(dto.items, codigoDefecto);
+    if (codigos.genericos > 0) advertencias.push(this.avisoCodigoGenerico(codigos.genericos));
     const resumen = calcularComprobante(
       dto.items.map((item) => this.aLineaFiscal(item, porcentajeIgv)),
       porcentajeIgv,
@@ -1099,7 +1185,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     return {
       receptor,
       resumen,
-      items: this.armarItems(dto.items, resumen, codigoDefecto),
+      items: this.armarItems(dto.items, resumen, codigoDefecto, codigos.porIndice),
       serie: opciones.serie,
       fechaEmision,
       horaEmision: horaLima(instante),
@@ -1111,6 +1197,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       correoCliente: dto.correo_cliente?.trim() || null,
       credito: this.esCredito(dto) ? { monto: Number(dto.monto_credito ?? 0) } : null,
       advertencias,
+      codigosGenericos: codigos.genericos,
     };
   }
 
@@ -1143,12 +1230,14 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       admite_factura: tipoDocumento === TIPO_DOC_RUC,
     };
 
+    const codigoDefectoNota = await this.codigoProductoDefecto();
+    const codigosNota = await this.codigosDeLineas(lineas, codigoDefectoNota);
     const instante = new Date();
     const fechaEmision = this.fechaGuardada(fechaLima(instante));
     return {
       receptor,
       resumen,
-      items: this.armarItems(lineas, resumen, await this.codigoProductoDefecto()),
+      items: this.armarItems(lineas, resumen, codigoDefectoNota, codigosNota.porIndice),
       serie,
       fechaEmision,
       horaEmision: horaLima(instante),
@@ -1287,13 +1376,18 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
   }
 
   /** Sin código SUNAT en el producto se usa el configurado por defecto; si tampoco hay, se omite del XML. */
-  private armarItems(entradas: ItemComprobanteRequest[], resumen: ResumenFiscal, codigoDefecto: string): ItemPreviewResponse[] {
+  private armarItems(
+    entradas: ItemComprobanteRequest[],
+    resumen: ResumenFiscal,
+    codigoDefecto: string,
+    genericos: ReadonlyMap<number, string> = new Map(),
+  ): ItemPreviewResponse[] {
     return entradas.map((entrada, indice) => {
       const linea = resumen.lineas[indice];
       return {
         id_producto: entrada.id_producto,
         codigo: entrada.codigo?.trim() || String(entrada.id_producto ?? indice + 1),
-        codigo_producto_sunat: (entrada.codigo_producto_sunat ?? '').replace(/\s+/g, '') || codigoDefecto,
+        codigo_producto_sunat: (entrada.codigo_producto_sunat ?? '').replace(/\s+/g, '') || codigoDefecto || genericos.get(indice) || '',
         unidad_de_medida: entrada.unidad_de_medida?.trim().toUpperCase() || 'NIU',
         descripcion: this.limpiarTexto(entrada.descripcion),
         cantidad: linea.cantidad,
@@ -1306,6 +1400,46 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
         tipo_de_igv: linea.tipo_de_igv,
       };
     });
+  }
+
+  /**
+   * Código genérico por línea sin código propio y sin código por defecto (S6): nunca se bloquea una venta por
+   * el código de producto. La categoría sale del producto; sin producto o sin categoría, el de ferretería en general.
+   */
+  private async codigosDeLineas(
+    entradas: ItemComprobanteRequest[],
+    codigoDefecto: string,
+  ): Promise<{ porIndice: Map<number, string>; genericos: number }> {
+    const porIndice = new Map<number, string>();
+    if (codigoDefecto) return { porIndice, genericos: 0 };
+    const sinCodigo = entradas
+      .map((entrada, indice) => ({ entrada, indice }))
+      .filter(({ entrada }) => !(entrada.codigo_producto_sunat ?? '').replace(/\s+/g, ''));
+    if (!sinCodigo.length) return { porIndice, genericos: 0 };
+
+    let categorias = new Map<number, string>();
+    try {
+      categorias = await this.repo.categoriasDeProductos(sinCodigo.map(({ entrada }) => Number(entrada.id_producto)));
+    } catch (error) {
+      // Sin categoría no se detiene nada: sale el genérico general.
+      this.logger.warn(`No se pudieron leer las categorías para el código genérico: ${this.mensajeDe(error)}`);
+    }
+    for (const { entrada, indice } of sinCodigo) {
+      porIndice.set(indice, codigoGenericoDeCategoria(categorias.get(Number(entrada.id_producto))).codigo);
+    }
+    return { porIndice, genericos: sinCodigo.length };
+  }
+
+  /** Une el aviso del ambiente con el de los códigos genéricos, para que quien cobra lo vea en la respuesta. */
+  private avisoConCodigos(aviso: string | null, genericos = 0): string | null {
+    if (genericos <= 0) return aviso;
+    return [aviso, this.avisoCodigoGenerico(genericos)].filter(Boolean).join(' ');
+  }
+
+  private avisoCodigoGenerico(n: number): string {
+    return n === 1
+      ? '1 producto salió con el código genérico de su categoría porque no tiene código de producto SUNAT: cargue el real en Productos.'
+      : `${n} productos salieron con el código genérico de su categoría porque no tienen código de producto SUNAT: cargue el real en Productos.`;
   }
 
   private async codigoProductoDefecto(): Promise<string> {
@@ -1432,7 +1566,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
   /** «emitido» solo si SUNAT aceptó; «pendiente» si el envío puede terminar aceptado; si no, «error». */
   private respuestaEmision(base: BaseRespuesta, resultado: ResultadoEmision, aviso: string | null): ComprobanteResponse {
     const aceptado = resultado.aceptado === true;
-    const estado = aceptado ? 'emitido' : ESTADOS_EN_CURSO.has(resultado.estado) ? 'pendiente' : 'error';
+    const estado = aceptado ? 'emitido' : ESTADOS_EN_CURSO.has(resultado.estado) || ESTADOS_EN_RESUMEN.has(resultado.estado) ? 'pendiente' : 'error';
     const archivos = [...(resultado.archivos ?? [])];
     return {
       ...this.respuestaBase(base),
@@ -1641,8 +1775,17 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     const pendienteReenvio = estadoSunat === 'PENDIENTE_REENVIO';
     const recuperar = datos.accion === 'RECUPERAR_CDR';
     const consultaCdr = c.ambiente_fiscal === 'produccion' && !!tipo && admiteGetStatusCdr(tipo, c.serie);
-    const vencido =
-      !c.anulado && !aceptado && !!datos.fechaLimite && datos.fechaLimite < hoy && ESTADOS_EN_CURSO.has(estadoSunat);
+    // EXCEPCION también: un envío que requiere revisión y ya pasó su plazo no se reenvía (se anula o se emite otro).
+    const excepcion = estadoSunat === 'EXCEPCION';
+    const porResumir = estadoSunat === 'POR_RESUMIR';
+    const fechaEmision = this.fechaIsoOpcional(c.fecha_de_emision);
+    // Boleta o nota de boleta que todavía puede informarse en un resumen diario (hasta el 7.º día desde la emisión).
+    const dentroDelResumen = !!tipo && !!fechaEmision && admiteResumenDiario(tipo, c.serie, fechaEmision, hoy);
+    const individualVencido = !c.anulado && !aceptado && !!datos.fechaLimite && datos.fechaLimite < hoy;
+    // Una boleta que espera su resumen no está «vencida» por los 5 días del envío individual: solo si ya pasaron los 7.
+    const vencido = porResumir
+      ? !c.anulado && !!tipo && !!fechaEmision && !dentroDelResumen && !esDocumentoDeFactura(tipo, c.serie)
+      : individualVencido && (ESTADOS_EN_CURSO.has(estadoSunat) || excepcion);
     // D8: origen que admite nota de crédito; si además le queda saldo, anularlo exige emitir una.
     const admiteNota =
       !c.anulado
@@ -1656,11 +1799,23 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     const bajaEnCurso = estadoSunat === 'BAJA_PENDIENTE';
     // La baja solo va sobre un comprobante sin notas vigentes.
     const sinNotasVigentes = resumen === null || resumen.saldo + 0.005 >= Number(c.total ?? 0);
+    // «Informar por resumen»: la boleta que espera su resumen, o la que falló en el envío individual y ya lo venció.
+    const puedeInformarPorResumen =
+      directo
+      && !!this.lotes
+      && !aceptado
+      && dentroDelResumen
+      && modo.activo
+      && c.ambiente_fiscal === modo.ambiente
+      && (porResumir || ((pendienteReenvio || excepcion) && individualVencido && !recuperar));
 
     return {
       puede_reintentar: directo && !aceptado && !vencido && ((pendienteReenvio && !recuperar) || incierto),
-      puede_recuperar_cdr: directo && !aceptado && consultaCdr && (pendienteReenvio || incierto || recuperar),
-      puede_confirmar_manual: directo && !aceptado && recuperar,
+      puede_reintentar_ahora: directo && !aceptado && excepcion && !vencido && datos.envioLibre !== false,
+      puede_recuperar_cdr: directo && !aceptado && consultaCdr && (pendienteReenvio || incierto || recuperar || excepcion),
+      // EXCEPCION: el sistema se rindió sin saber qué pasó en SUNAT; el administrador lo verifica en SOL y deja su nota.
+      puede_confirmar_manual: directo && !aceptado && (recuperar || excepcion),
+      puede_informar_por_resumen: puedeInformarPorResumen,
       // Se emite en el acto: hace falta la emisión activa, saldo por acreditar y ninguna otra nota en envío.
       puede_nota_credito: admiteNota && modo.activo && conSaldo && !notaEnCurso && !bajaEnCurso,
       // D9: también sin venta (nota de crédito o anulación en el sistema), salvo con una nota en envío (el saldo
@@ -1810,7 +1965,9 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     if (detalle.aceptada_sunat) return null;
     if (detalle.proveedor_fiscal !== 'sunat_directo') return 'COMPROBANTE NO CONFIRMADO POR SUNAT';
     if (detalle.estado_sunat === 'RECHAZADO') return 'RECHAZADO POR SUNAT - SIN VALIDEZ';
-    if (ESTADOS_EN_CURSO.has(detalle.estado_sunat ?? '')) return 'PENDIENTE DE CONFIRMACIÓN DE SUNAT';
+    // La boleta que espera su resumen diario es válida: SUNAT la recibe en el resumen, no por envío individual.
+    if (detalle.estado_sunat === 'POR_RESUMIR') return null;
+    if (ESTADOS_EN_CURSO.has(detalle.estado_sunat ?? '') || detalle.estado_sunat === 'TICKET_PENDIENTE') return 'PENDIENTE DE CONFIRMACIÓN DE SUNAT';
     return 'NO ACEPTADO POR SUNAT';
   }
 
@@ -1989,11 +2146,13 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       fecha_limite_envio: extra?.fecha_limite_envio ?? null,
       vencido: acciones.vencido,
       puede_reintentar: acciones.puede_reintentar,
+      puede_reintentar_ahora: acciones.puede_reintentar_ahora,
       puede_recuperar_cdr: acciones.puede_recuperar_cdr,
       puede_confirmar_manual: acciones.puede_confirmar_manual,
       puede_nota_credito: acciones.puede_nota_credito,
       puede_anular: acciones.puede_anular,
       puede_anular_sin_nota: acciones.puede_anular_sin_nota,
+      puede_informar_por_resumen: acciones.puede_informar_por_resumen,
     };
   }
 }

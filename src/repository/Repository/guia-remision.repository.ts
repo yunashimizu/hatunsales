@@ -18,6 +18,12 @@ export interface FormularioGuia {
   tarjeta_circulacion: string | null;
   conductor_nombres: string | null;
   conductor_apellidos: string | null;
+  /** Traslado en moto o auto particular (categoría M1 o L): sin vehículo ni conductor. */
+  traslado_vehiculo_m1l: boolean | null;
+  /** Compra (motivo 02): el proveedor. */
+  proveedor_tipo_doc: string | null;
+  proveedor_numero_doc: string | null;
+  proveedor_denominacion: string | null;
 }
 
 /** payload_sunat de la guía: lo que no tiene columna y la foto de lo que se firmó. */
@@ -46,6 +52,10 @@ export interface EnvioGuia {
   intento: number;
   consultas: number;
   revision_manual: boolean;
+  /** SUNAT no resolvió el ticket en 7 días (o faltan sus datos): el administrador puede «Liberar» la guía. */
+  liberable: boolean;
+  /** Ya se liberó: la guía volvió a «pendiente» y el mismo archivo se reenvía con «Emitir». */
+  liberado: boolean;
   /** Reclamado por otro proceso (bloqueado_hasta en el futuro). */
   en_curso: boolean;
   proximo_intento_en: string | null;
@@ -235,6 +245,8 @@ export interface EnvioParaConsulta {
   documento: Pick<DocumentoGre, 'serie' | 'numero'> & { remitente?: { ruc?: string } } | null;
   digest: string | null;
   consultas: number;
+  /** Cuándo se registró el envío: desde ahí se cuentan los 7 días de consultas del ticket. */
+  creado_en: string | null;
 }
 
 export interface CierreEnvioGuia {
@@ -332,7 +344,7 @@ const COLUMNAS_GUIA = `
   c.ambiente_fiscal AS comp_ambiente,
   e.id_envio AS env_id, e.estado AS env_estado, e.codigo_sunat AS env_codigo, e.mensaje_sunat AS env_mensaje,
   e.sunat_ticket AS env_ticket, e.intento AS env_intento, e.consultas AS env_consultas,
-  e.revision_manual AS env_revision_manual, e.en_curso AS env_en_curso,
+  e.revision_manual AS env_revision_manual, e.liberable AS env_liberable, e.liberado AS env_liberado, e.en_curso AS env_en_curso,
   e.proximo_intento_en AS env_proximo, e.actualizado_en AS env_actualizado, e.archivos AS env_archivos`;
 
 /** Comprobante relacionado y último envío de la guía (alias g). */
@@ -343,6 +355,8 @@ const UNIONES_GUIA = `
            CASE WHEN f.respuesta_json ->> 'consultas' ~ '^[0-9]{1,6}$'
                 THEN (f.respuesta_json ->> 'consultas')::int ELSE 0 END AS consultas,
            COALESCE(f.respuesta_json ->> 'revision_manual', '') = 'true' AS revision_manual,
+           COALESCE(f.respuesta_json ->> 'liberable', '') = 'true' AS liberable,
+           (f.respuesta_json -> 'liberado') IS NOT NULL AS liberado,
            (f.bloqueado_hasta IS NOT NULL AND f.bloqueado_hasta >= NOW()) AS en_curso,
            f.proximo_intento_en, f.actualizado_en,
            ARRAY(SELECT DISTINCT a.tipo_artifacto FROM fiscal_artifacts a
@@ -468,6 +482,8 @@ function aFila(f: Record<string, any>): FilaGuia {
             intento: Number(f.env_intento ?? 0),
             consultas: Number(f.env_consultas ?? 0),
             revision_manual: f.env_revision_manual === true,
+            liberable: f.env_liberable === true,
+            liberado: f.env_liberado === true,
             en_curso: f.env_en_curso === true,
             proximo_intento_en: iso(f.env_proximo),
             actualizado_en: iso(f.env_actualizado),
@@ -1089,7 +1105,7 @@ export class GuiaRemisionRepository {
             SET bloqueado_hasta = NOW() + $2::int * INTERVAL '1 second', actualizado_en = NOW()
            FROM objetivo o
           WHERE f.id_envio = o.id_envio
-         RETURNING f.id_envio, f.id_guia, f.sunat_ticket, f.identificador, f.respuesta_json`,
+         RETURNING f.id_envio, f.id_guia, f.sunat_ticket, f.identificador, f.respuesta_json, f.creado_en`,
         [idEnvio, SEGUNDOS_RECLAMO_CONSULTA_GUIA],
       ),
     );
@@ -1105,7 +1121,52 @@ export class GuiaRemisionRepository {
       documento: (objeto(datos.documento) as EnvioParaConsulta['documento']) ?? null,
       digest: texto(datos.digest),
       consultas: Number.isSafeInteger(consultas) && consultas > 0 ? consultas : 0,
+      creado_en: iso(f.creado_en),
     };
+  }
+
+  /**
+   * «Liberar» (S4): el ticket no se resolvió en 7 días y el administrador suelta la guía. El último envío vuelve a
+   * PENDIENTE_REENVIO y la guía a «pendiente» (con la explicación), para poder reenviar el MISMO archivo con
+   * «Emitir» después de revisar en SUNAT Operaciones en Línea. Todo en UNA transacción junto con la auditoría.
+   * false si ya no estaba liberable o alguien la está consultando ahora mismo.
+   */
+  async liberar(
+    idGuia: number,
+    mensaje: string,
+    json: Record<string, unknown>,
+    auditar: (tx: EjecutorSql, idEnvio: number, ticket: string | null) => Promise<void>,
+  ): Promise<boolean> {
+    return this.transaccion(async (tx) => {
+      const filas = filasDe<{ id_envio: number; sunat_ticket: string | null }>(
+        await tx.query(
+          `UPDATE fiscal_envios f
+              SET estado = 'PENDIENTE_REENVIO', ultimo_error = $3::text, mensaje_sunat = $3::text,
+                  respuesta_json = COALESCE(f.respuesta_json, '{}'::jsonb) || $2::jsonb,
+                  proximo_intento_en = NULL, bloqueado_hasta = NULL, actualizado_en = NOW()
+            WHERE f.id_envio = (SELECT x.id_envio FROM fiscal_envios x
+                                 WHERE x.id_guia = $1 AND x.operacion = 'emitir' AND x.tipo_documento = '09'
+                                   AND x.proveedor = 'sunat_directo'
+                                 ORDER BY x.id_envio DESC LIMIT 1)
+              AND f.estado = 'TICKET_PENDIENTE' AND COALESCE(f.respuesta_json ->> 'liberable', '') = 'true'
+              AND (f.bloqueado_hasta IS NULL OR f.bloqueado_hasta < NOW())
+            RETURNING f.id_envio, f.sunat_ticket`,
+          [idGuia, JSON.stringify(json), mensaje],
+        ),
+      );
+      const envio = filas[0];
+      if (!envio) return false;
+      const guia = filasDe<{ id_guia: number }>(
+        await tx.query(
+          `UPDATE guias_remision SET estado = 'pendiente', error_mensaje = $2::text
+            WHERE id_guia = $1 AND estado = 'enviado' RETURNING id_guia`,
+          [idGuia, mensaje],
+        ),
+      );
+      if (!guia[0]) throw new Error('La guía cambió de estado mientras se liberaba.');
+      await auditar(tx, Number(envio.id_envio), texto(envio.sunat_ticket));
+      return true;
+    });
   }
 
   /** Guarda el resultado de la consulta: solo si el envío sigue con el ticket pendiente y la guía 'enviado'. */

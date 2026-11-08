@@ -18,6 +18,10 @@ export type AmbienteFiscal = (typeof AMBIENTES_FISCALES)[number];
 export const MODOS_BOLETAS = ['individual', 'resumen'] as const;
 export type ModoBoletas = (typeof MODOS_BOLETAS)[number];
 
+/** Hora (Lima, HH:mm) a la que se envía el resumen diario cuando no se configuró otra. */
+export const HORA_RESUMEN_POR_DEFECTO = '23:30';
+export const PATRON_HORA_RESUMEN = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 export const MODOS_REGLAS_2027 = ['auto', 'true', 'false'] as const;
 export type ModoReglas2027 = (typeof MODOS_REGLAS_2027)[number];
 
@@ -113,9 +117,15 @@ export interface ConfirmacionesActivacion {
 export interface SnapshotConfigFiscal {
   readonly proveedor: ProveedorFiscal;
   readonly ambiente: AmbienteFiscal;
+  /** individual: cada boleta va a SUNAT al cobrar; resumen: las boletas del día se informan juntas en un resumen diario (RC, condición 1). */
   readonly boletasModo: ModoBoletas;
-  readonly envioEnLinea: boolean;
-  /** Con sunat_directo, la venta responde en cuanto el comprobante queda firmado y guardado; el envío a SUNAT sigue en segundo plano (por defecto apagado). */
+  /** HH:mm (Lima) a la que la tarea envía el resumen diario de las boletas del día en modo «resumen». */
+  readonly resumenHora: string;
+  /**
+   * Un solo interruptor «enviar al cobrar / en segundo plano». Con sunat_directo y true, la venta responde en
+   * cuanto el comprobante queda firmado y guardado y el envío a SUNAT sigue en segundo plano (por defecto apagado).
+   * Compatibilidad: si falta fiscal_envio_diferido y la clave vieja fiscal_envio_en_linea está en false, vale true.
+   */
   readonly envioDiferido: boolean;
   readonly tareasActivas: boolean;
   readonly series: Readonly<SeriesFiscales>;
@@ -150,6 +160,9 @@ export const CLAVES_CONFIG_FISCAL = {
   proveedor: 'fiscal_proveedor',
   ambiente: 'fiscal_ambiente',
   boletasModo: 'fiscal_boletas_modo',
+  /** HH:mm (Lima) del resumen diario de boletas (modo «resumen»). */
+  resumenHora: 'fiscal_resumen_hora',
+  /** Clave antigua del interruptor «Envío en línea»: ya no se escribe; solo se lee por compatibilidad (false = diferido). */
   envioEnLinea: 'fiscal_envio_en_linea',
   envioDiferido: 'fiscal_envio_diferido',
   tareasActivas: 'fiscal_tareas_activas',

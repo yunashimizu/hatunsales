@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { IsIn, IsInt, IsOptional, IsString, Length, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Length, Min } from 'class-validator';
 import { AMBIENTES_FISCALES } from '../config/fiscal-config.tipos';
 import type { AmbienteFiscal } from '../config/fiscal-config.tipos';
 import { ESTADOS_SUNAT, TIPOS_CPE_EMISION } from './emision.tipos';
@@ -51,4 +51,14 @@ export class ConfirmarAceptadoDto {
   @IsString({ message: 'Escriba en la nota qué verificó en SUNAT Operaciones en Línea.' })
   @Length(5, 300, { message: 'La nota debe tener entre 5 y 300 caracteres: indique qué verificó en SUNAT.' })
   nota!: string;
+}
+
+/**
+ * POST /fiscal/envios/:id/reintentar. `forzar` reintenta también un envío en EXCEPCION («Reintentar ahora»);
+ * solo administradores (todo este controlador lo es) y queda en la bitácora con el usuario.
+ */
+export class ReintentarEnvioDto {
+  @IsOptional()
+  @IsBoolean({ message: 'forzar debe ser verdadero o falso.' })
+  forzar?: boolean;
 }

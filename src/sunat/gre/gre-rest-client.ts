@@ -27,7 +27,7 @@ import type { GreEsperada, GrePreparada, ResultadoConsultaGre, ResultadoEnvioGre
  *   /v1/contribuyente/gem/comprobantes/{RUC-09-SERIE-NUMERO} con {archivo:{nomArchivo, arcGreZip, hashZip}}
  *   y GET /v1/contribuyente/gem/comprobantes/envios/{numTicket}.
  * - hashZip = SHA-256 del ZIP en hexadecimal (minúsculas), como lo envía Greenter. SUNAT no publica el
- *   formato: es un SUPUESTO que se confirma con el primer envío real (si SUNAT lo rechazara por el hash,
+ *   formato: [SUPUESTO: confirmar con la primera guía real] se confirma con el primer envío real (si SUNAT lo rechazara por el hash,
  *   respondería 422 antes de dar ticket y el número no se consume).
  *
  * Reintentos: el token y la consulta se reintentan ante red o 5xx (son idempotentes); el envío NO se

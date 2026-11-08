@@ -3,6 +3,8 @@ import { fabricarEnviador } from '../correo/correo.config';
 import { CorreoComprobanteService } from '../correo/correo-comprobante.service';
 import { CorreoComprobantesTarea } from '../correo/correo-comprobantes.tarea';
 import { EnviadorCorreo } from '../correo/enviador-correo.contrato';
+import { ResumenDiarioBussnies } from '../bussnies/Bussnies/resumen-diario.bussnies';
+import { ResumenDiarioTarea } from '../bussnies/tareas/resumen-diario.tarea';
 import { RegistroModulo } from './registro-modulo';
 
 /**
@@ -19,5 +21,8 @@ export const REGISTRO_CORREO: RegistroModulo = {
     CorreoComprobanteService,
     { provide: EnviadorCorreo, useFactory: () => fabricarEnviador() },
     CorreoComprobantesTarea,
+    // Resumen diario al dueño (F3): usa ReportesBussnies, CajaTurnosBussnies, ComprobanteBussnies, CreditoRepository e InventarioRepository.
+    ResumenDiarioBussnies,
+    ResumenDiarioTarea,
   ],
 };

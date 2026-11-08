@@ -1,7 +1,11 @@
-import { Body, Controller, Get, Headers, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Put, Query, Res, StreamableFile, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
 import { PedidoBussnies } from '../../../bussnies/Bussnies/tienda/pedido.bussnies';
 import { PagoBussnies } from '../../../bussnies/Bussnies/tienda/pago.bussnies';
 import { CuentaTiendaBussnies } from '../../../bussnies/Bussnies/tienda/cuenta.bussnies';
+import { PedidoComprobanteBussnies } from '../../../bussnies/Bussnies/tienda/pedido-comprobante.bussnies';
+import { PedidoRepository } from '../../../repository/Repository/tienda/pedido.repository';
+import { nombreDescarga } from '../comprobante.controller';
 import { JwtGuard } from '../../../guards/jwt.guard';
 import { RolesGuard } from '../../../guards/roles.guard';
 import { Roles } from '../../../guards/roles.decorator';
@@ -19,6 +23,8 @@ export class PedidoController {
     private readonly service: PedidoBussnies,
     private readonly pagos: PagoBussnies,
     private readonly cuenta: CuentaTiendaBussnies,
+    private readonly comprobantePedido: PedidoComprobanteBussnies,
+    private readonly pedidosRepo: PedidoRepository,
   ) {}
 
   @Post()
@@ -52,6 +58,29 @@ export class PedidoController {
   async detalle(@Param('id', IdEnteroPipe) id: number, @UsuarioActual() usuario: UsuarioToken) {
     const idCliente = await this.cuenta.resolverCliente(usuario);
     return this.service.obtener(id, idCliente);
+  }
+
+  /**
+   * PDF de la boleta o factura del pedido, solo para quien lo hizo (token del cliente). Se arma con los mismos
+   * datos guardados que el PDF del panel; un pedido ajeno responde 403 y uno sin comprobante, 404.
+   */
+  @Get(':id/comprobante/pdf')
+  async comprobantePdf(
+    @Param('id', IdEnteroPipe) id: number,
+    @UsuarioActual() usuario: UsuarioToken,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const idCliente = await this.cuenta.resolverCliente(usuario);
+    const pedido = await this.pedidosRepo.obtenerPorId(id);
+    const pdf = await this.comprobantePedido.pdfParaCliente(id, idCliente, pedido);
+    const nombre = nombreDescarga(pdf.nombre, `comprobante-pedido-${id}.pdf`);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${nombre}"`);
+    res.setHeader('Content-Length', String(pdf.contenido.length));
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    return new StreamableFile(pdf.contenido, { type: 'application/pdf', disposition: `attachment; filename="${nombre}"`, length: pdf.contenido.length });
   }
 
   /** Solo pedidos pendientes de pago; uno pagado se gestiona con la tienda. */
@@ -99,9 +128,15 @@ export class PedidoAdminController {
     return this.service.listarTodos(estado);
   }
 
+  /** Conteo de pedidos por preparar. Declarado antes de ':id' para que «resumen» no caiga en IdEnteroPipe. */
+  @Get('resumen')
+  resumen() {
+    return this.service.resumenPorPreparar();
+  }
+
   @Get(':id')
   detalle(@Param('id', IdEnteroPipe) id: number) {
-    return this.service.obtener(id);
+    return this.service.obtener(id, undefined, true);
   }
 
   @Put(':id/estado')

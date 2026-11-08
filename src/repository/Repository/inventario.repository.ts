@@ -18,6 +18,16 @@ export interface FiltroInventario {
 /** Máximo de la columna `inventario.stock` (integer de PostgreSQL). */
 export const STOCK_MAXIMO_BD = 2_147_483_647;
 
+/** Stock de un producto en un almacén (ficha de edición). Todos los almacenes salen, con o sin fila. */
+export interface StockPorAlmacen {
+  id_almacen: number;
+  almacen: string;
+  sucursal: string;
+  stock: number;
+  /** false = el producto todavía no tiene fila de inventario en ese almacén. */
+  registrado: boolean;
+}
+
 export interface FilaInventario {
   id_inventario: number;
   id_producto: number;
@@ -268,6 +278,30 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     );
   }
 
+  /**
+   * Stock del producto en cada almacén, en una consulta. La ficha de edición lo pide una vez y
+   * cambia de almacén sin volver a la red (antes usaba `listarDetallado`: conteo + filas con
+   * cinco JOIN para traer una fila, y otra petición por cada cambio de almacén).
+   */
+  async stockPorProducto(idProducto: number): Promise<StockPorAlmacen[]> {
+    const filas = await this.dataSource.query(
+      `SELECT a.id_almacen, a.nombre AS almacen, COALESCE(s.nombre, '') AS sucursal,
+              COALESCE(i.stock, 0)::int AS stock, (i.id_inventario IS NOT NULL) AS registrado
+         FROM almacenes a
+         LEFT JOIN sucursales s ON s.id_sucursal = a.id_sucursal
+         LEFT JOIN inventario i ON i.id_almacen = a.id_almacen AND i.id_producto = $1
+        ORDER BY a.nombre`,
+      [idProducto],
+    );
+    return filas.map((f: any) => ({
+      id_almacen: Number(f.id_almacen),
+      almacen: f.almacen ?? '',
+      sucursal: f.sucursal ?? '',
+      stock: Number(f.stock ?? 0),
+      registrado: f.registrado === true || f.registrado === 't',
+    }));
+  }
+
   /** Últimos movimientos, para la pestaña de historial. */
   async movimientos(idProducto?: number, limite = 50): Promise<any[]> {
     const condicion = idProducto ? 'WHERE m.id_producto = $1' : '';
@@ -294,6 +328,10 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
   /**
    * Suma o resta unidades dejando constancia del motivo en el kardex.
    * Crea la fila de inventario si el producto todavía no está en ese almacén.
+   *
+   * `stockEsperado`: el stock que vio quien pide el ajuste (la ficha de edición). Si el real,
+   * ya bloqueado con FOR UPDATE, es otro, lanza `STOCK_DESACTUALIZADO:<actual>` sin escribir
+   * nada: así una venta entre medio o un reintento no terminan en un doble ajuste.
    */
   async ajustar(
     idProducto: number,
@@ -301,12 +339,13 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     cantidad: number,
     descripcion: string,
     manager?: EntityManager,
+    stockEsperado?: number,
   ): Promise<number> {
     // Con `manager` el ajuste entra en la transacción de quien llama (alta de
     // producto con stock inicial); sin él abre la suya.
-    if (manager) return this.ajustarCon(manager, idProducto, idAlmacen, cantidad, descripcion);
+    if (manager) return this.ajustarCon(manager, idProducto, idAlmacen, cantidad, descripcion, stockEsperado);
     return this.dataSource.transaction((m) =>
-      this.ajustarCon(m, idProducto, idAlmacen, cantidad, descripcion),
+      this.ajustarCon(m, idProducto, idAlmacen, cantidad, descripcion, stockEsperado),
     );
   }
 
@@ -316,11 +355,17 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     idAlmacen: number,
     cantidad: number,
     descripcion: string,
+    stockEsperado?: number,
   ): Promise<number> {
     const filas = await manager.query(
       'SELECT id_inventario, stock FROM inventario WHERE id_producto = $1 AND id_almacen = $2 FOR UPDATE',
       [idProducto, idAlmacen],
     );
+
+    if (stockEsperado !== undefined && stockEsperado !== null) {
+      const actual = filas.length ? Number(filas[0].stock ?? 0) : 0;
+      if (actual !== Number(stockEsperado)) throw new Error(`STOCK_DESACTUALIZADO:${actual}`);
+    }
 
     let stockFinal: number;
 
@@ -356,13 +401,12 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     return stockFinal;
   }
 
-  /** Crea la fila del producto en el almacén con stock 0 (sin movimiento en el kardex). */
-  async crearFilaVacia(manager: EntityManager, idProducto: number, idAlmacen: number): Promise<void> {
-    const existe = await manager.query(
-      'SELECT 1 FROM inventario WHERE id_producto = $1 AND id_almacen = $2 LIMIT 1',
-      [idProducto, idAlmacen],
-    );
-    if (existe.length) return;
+  /**
+   * Fila del producto en el almacén con stock 0 (sin movimiento en el kardex). Solo el INSERT:
+   * la usa el alta, donde el producto nació en esta misma transacción y no puede tener fila
+   * todavía (antes se consultaba primero si existía: un viaje de más).
+   */
+  async insertarFilaVacia(manager: EntityManager, idProducto: number, idAlmacen: number): Promise<void> {
     await manager.query(
       'INSERT INTO inventario (id_producto, id_almacen, stock, stock_minimo) VALUES ($1, $2, 0, 0)',
       [idProducto, idAlmacen],

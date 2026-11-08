@@ -21,6 +21,8 @@ import { ENLACE_QR_PRUEBA } from '../../sunat/gre/pruebas/respuestas-gre-prueba-
 import {
   campoFormularioGuia,
   ESPERA_CONSULTA_INMEDIATA_MS,
+  DIAS_CONSULTA_TICKET,
+  ESPERA_CONSULTA_LENTA_SEG,
   ESPERAS_CONSULTA_SEG,
   GuiaRemisionBussnies,
   MAXIMO_CONSULTAS_AUTOMATICAS,
@@ -85,7 +87,7 @@ function fila(cambios: Partial<FilaGuia> = {}): FilaGuia {
   };
 }
 
-function envio(estado: string, revisionManual = false): EnvioGuia {
+function envio(estado: string, revisionManual = false, extra: Partial<EnvioGuia> = {}): EnvioGuia {
   return {
     id_envio: 99,
     estado,
@@ -95,10 +97,13 @@ function envio(estado: string, revisionManual = false): EnvioGuia {
     intento: 1,
     consultas: 0,
     revision_manual: revisionManual,
+    liberable: false,
+    liberado: false,
     en_curso: false,
     proximo_intento_en: null,
     actualizado_en: null,
     archivos: [],
+    ...extra,
   };
 }
 
@@ -165,6 +170,7 @@ const RECLAMADO = {
   documento: { remitente: { ruc: '20610206337' }, serie: 'T001', numero: 100 },
   digest: 'DIGEST==',
   consultas: 0,
+  creado_en: '2026-10-22T14:00:00.000Z',
 };
 
 const ACEPTADA: ResultadoConsultaGre = {
@@ -208,6 +214,10 @@ function montar() {
     candidatosConsulta: jest.fn(async () => []),
     archivo: jest.fn(async () => null),
     listar: jest.fn(async () => ({ filas: [], total: 0 })),
+    liberar: jest.fn(async (_idGuia: number, _mensaje: string, _json: Record<string, unknown>, auditar: (tx: unknown, idEnvio: number, ticket: string | null) => Promise<void>) => {
+      await auditar(tx, 99, 'T-1');
+      return true;
+    }),
   };
   const emisionGre = {
     modo: jest.fn(async () => ({ activo: true })),
@@ -233,8 +243,9 @@ function montar() {
     tareasActivas: jest.fn(async () => true),
   };
   const config = { obtener: jest.fn(async () => null) };
-  const servicio = new GuiaRemisionBussnies(repo as any, config as any, emisionGre as any, fiscal as any, new RelojPrueba(), new UbigeoService());
-  return { servicio, repo, emisionGre, fiscal, tx };
+  const auditoria = { registrar: jest.fn(async () => undefined) };
+  const servicio = new GuiaRemisionBussnies(repo as any, config as any, emisionGre as any, fiscal as any, new RelojPrueba(), new UbigeoService(), auditoria as any);
+  return { servicio, repo, emisionGre, fiscal, tx, auditoria };
 }
 
 /**
@@ -337,7 +348,7 @@ describe('GuiaRemisionBussnies', () => {
         { id_producto: 5, id_venta_detalle: 20, codigo: 'CEM-001', descripcion: 'CEMENTO SOL TIPO I', unidad_medida: 'BG', cantidad: 25 },
       ]);
       expect(guia.estado).toBe('borrador');
-      expect(guia.acciones).toEqual({ puede_editar: true, puede_validar: true, puede_emitir: true, puede_consultar: false, puede_anular: true });
+      expect(guia.acciones).toEqual({ puede_editar: true, puede_validar: true, puede_emitir: true, puede_consultar: false, puede_anular: true, puede_liberar: false });
     });
 
     it('rechaza productos ajenos a la venta (400) y lo que supera lo pendiente, con el detalle (409)', async () => {
@@ -383,6 +394,75 @@ describe('GuiaRemisionBussnies', () => {
       });
       expect(datos.items[0]).toMatchObject({ id_producto: 9, unidad_medida: 'NIU', descripcion: 'TALADRO BOSCH' });
       expect(repo.productosVendidos).not.toHaveBeenCalled();
+    });
+
+    it('el motivo 14 sale de una venta; el 02 y el 18 no (400), y con venta el 04/13/18 tampoco', async () => {
+      const { servicio, repo } = montar();
+      expect(await servicio.crear(cuerpo({ motivo_traslado: '14' }), 1)).toBeDefined();
+      for (const motivo of ['02', '18']) {
+        const conVenta = await rechazo(servicio.crear(cuerpo({ motivo_traslado: motivo }), 1));
+        expect(conVenta).toMatchObject({ estado: 400, cuerpo: { codigo: 'GRE_MOTIVO_NO_VALIDO' } });
+      }
+      const sinVenta14 = await rechazo(servicio.crear(cuerpo({ id_venta: undefined, motivo_traslado: '14' }), 1));
+      expect(sinVenta14.cuerpo.message).toContain('indique la venta');
+      expect(repo.insertar).toHaveBeenCalledTimes(1);
+    });
+
+    it('compra (02): el destinatario es el propio emisor y el proveedor y el indicador M1/L se guardan en el formulario', async () => {
+      const { servicio, repo } = montar();
+      await servicio.crear(
+        cuerpo({
+          id_venta: undefined,
+          motivo_traslado: '02',
+          traslado_vehiculo_m1l: true,
+          proveedor: { tipo_documento: '6', numero_documento: '20100066603', denominacion: 'FERRETERIA EL SOL S.A.C.' },
+          items: [{ id_producto: 9, cantidad: 2 }],
+        }),
+        1,
+      );
+      const [, datos] = repo.insertar.mock.calls[0] as any[];
+      expect(datos).toMatchObject({
+        destinatario_numero_doc: '20610206337',
+        formulario: {
+          traslado_vehiculo_m1l: true,
+          proveedor_tipo_doc: '6',
+          proveedor_numero_doc: '20100066603',
+          proveedor_denominacion: 'FERRETERIA EL SOL S.A.C.',
+        },
+      });
+    });
+
+    it('el indicador M1/L solo se guarda con transporte privado y el proveedor solo con la compra', async () => {
+      const { servicio, repo } = montar();
+      await servicio.crear(
+        cuerpo({ modalidad_traslado: '01', traslado_vehiculo_m1l: true, proveedor: { tipo_documento: '6', numero_documento: '20100066603', denominacion: 'X' } }),
+        1,
+      );
+      const [, datos] = repo.insertar.mock.calls[0] as any[];
+      expect(datos.formulario).toMatchObject({ traslado_vehiculo_m1l: null, proveedor_tipo_doc: null, proveedor_numero_doc: null });
+    });
+
+    it('anular un borrador queda auditado (FISCAL_GRE_ANULADA) con el usuario y el motivo, en la misma transacción', async () => {
+      const { servicio, repo, auditoria, tx } = montar();
+      await servicio.anular(7, { motivo: 'Cliente canceló el pedido' }, 4);
+      expect(repo.anular).toHaveBeenCalled();
+      expect(auditoria.registrar).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accion: 'FISCAL_GRE_ANULADA',
+          id_usuario: 4,
+          entidad: 'guias_remision',
+          id_entidad: 7,
+          detalle: expect.objectContaining({ motivo: 'Cliente canceló el pedido' }),
+        }),
+        tx,
+      );
+    });
+
+    it('si la guía cambió de estado mientras se anulaba no se audita nada', async () => {
+      const { servicio, repo, auditoria } = montar();
+      repo.anular.mockResolvedValue(false);
+      await rechazo(servicio.anular(7, {}, 4));
+      expect(auditoria.registrar).not.toHaveBeenCalled();
     });
 
     it('una guía aceptada no se edita ni se anula: la baja se hace en SUNAT Operaciones en Línea (409)', async () => {
@@ -445,6 +525,30 @@ describe('GuiaRemisionBussnies', () => {
         proximoIntentoSeg: ESPERAS_CONSULTA_SEG[0],
       }));
       expect(operacion.resultado).toMatchObject({ estado: 'TICKET_PENDIENTE', ticket: 'T-1' });
+    });
+
+    it('al emitir queda auditada (FISCAL_GRE_EMITIDA) con el usuario, dentro de la misma transacción que reserva el número', async () => {
+      const { servicio, repo, auditoria, tx } = montar();
+      repo.siguienteNumero.mockResolvedValue(100);
+      await conTemporizadores(() => servicio.emitir(7, 3));
+      expect(auditoria.registrar).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accion: 'FISCAL_GRE_EMITIDA',
+          id_usuario: 3,
+          entidad: 'guias_remision',
+          id_entidad: 7,
+          detalle: expect.objectContaining({ guia: 'T001-00000100', id_envio: 99, reenvio: false }),
+        }),
+        tx,
+      );
+      expect(repo.registrarEmision.mock.invocationCallOrder[0]).toBeLessThan(auditoria.registrar.mock.invocationCallOrder[0]);
+    });
+
+    it('si la guía no pasa la validación no se audita ninguna emisión', async () => {
+      const { servicio, repo, auditoria } = montar();
+      repo.obtener.mockResolvedValue(fila({ destino_ubigeo: '150199' }));
+      await rechazo(servicio.emitir(7, 1));
+      expect(auditoria.registrar).not.toHaveBeenCalled();
     });
 
     it('una guía rechazada se reenvía con el MISMO número (no pide otro)', async () => {
@@ -708,7 +812,7 @@ describe('GuiaRemisionBussnies', () => {
       }));
     });
 
-    it('pendiente: espera creciente; tras el tope o si la constancia no corresponde, revisión manual', async () => {
+    it('pendiente: espera creciente; tras el tope sigue cada 2 horas (no se detiene); si la constancia no corresponde, revisión manual', async () => {
       const { servicio, repo, emisionGre } = enviada();
       emisionGre.consultarTicket.mockResolvedValue(EN_PROCESO);
       await servicio.consultar(7);
@@ -716,14 +820,15 @@ describe('GuiaRemisionBussnies', () => {
         estadoGuia: 'enviado',
         errorGuia: null,
         proximoIntentoSeg: ESPERAS_CONSULTA_SEG[1],
-        respuestaEnvio: expect.objectContaining({ consultas: 1, revision_manual: false }),
+        respuestaEnvio: expect.objectContaining({ consultas: 1, revision_manual: false, liberable: false }),
       }));
 
       repo.reclamarConsulta.mockResolvedValue({ ...RECLAMADO, consultas: MAXIMO_CONSULTAS_AUTOMATICAS - 1 });
       await servicio.consultar(7);
-      const agotada = repo.cerrarConsulta.mock.calls.at(-1)![2];
-      expect(agotada).toMatchObject({ proximoIntentoSeg: null, respuestaEnvio: { revision_manual: true } });
-      expect(agotada.errorGuia).toContain('la consulta automática se detuvo');
+      const lenta = repo.cerrarConsulta.mock.calls.at(-1)![2];
+      expect(lenta).toMatchObject({ proximoIntentoSeg: ESPERA_CONSULTA_LENTA_SEG, respuestaEnvio: { revision_manual: false, liberable: false } });
+      expect(lenta.errorGuia).toContain(`SUNAT no entregó la constancia tras ${MAXIMO_CONSULTAS_AUTOMATICAS} consultas: se sigue consultando cada 2 horas hasta el 29/10`);
+      expect(lenta.errorGuia).toContain('«Consultar ahora»');
 
       repo.reclamarConsulta.mockResolvedValue({ ...RECLAMADO });
       emisionGre.consultarTicket.mockResolvedValue({ ...EN_PROCESO, cdrNoCorresponde: 'La constancia es de otra guía.', mensaje: 'La constancia es de otra guía. No se da por aceptada ni rechazada.' });
@@ -732,8 +837,37 @@ describe('GuiaRemisionBussnies', () => {
         estadoGuia: 'enviado',
         errorGuia: 'La constancia es de otra guía. No se da por aceptada ni rechazada.',
         proximoIntentoSeg: null,
-        respuestaEnvio: { revision_manual: true },
+        respuestaEnvio: { revision_manual: true, liberable: false },
       });
+    });
+
+    it(`cumplidos ${DIAS_CONSULTA_TICKET} días sin respuesta la consulta automática se detiene y la guía queda liberable`, async () => {
+      const { servicio, repo, emisionGre } = enviada();
+      emisionGre.consultarTicket.mockResolvedValue(EN_PROCESO);
+      // Registrada exactamente 7 días antes de AHORA.
+      repo.reclamarConsulta.mockResolvedValue({ ...RECLAMADO, consultas: 40, creado_en: '2026-10-15T15:00:00.000Z' });
+
+      await servicio.consultar(7);
+
+      const vencida = repo.cerrarConsulta.mock.calls.at(-1)![2];
+      expect(vencida).toMatchObject({ estadoGuia: 'enviado', proximoIntentoSeg: null, respuestaEnvio: { consultas: 41, revision_manual: true, liberable: true } });
+      expect(vencida.errorGuia).toContain(`SUNAT no entregó la constancia en ${DIAS_CONSULTA_TICKET} días`);
+      expect(vencida.errorGuia).toContain('«Liberar»');
+
+      // Un día antes todavía es consulta lenta.
+      repo.reclamarConsulta.mockResolvedValue({ ...RECLAMADO, consultas: 40, creado_en: '2026-10-15T15:00:01.000Z' });
+      await servicio.consultar(7);
+      expect(repo.cerrarConsulta.mock.calls.at(-1)![2]).toMatchObject({ proximoIntentoSeg: ESPERA_CONSULTA_LENTA_SEG, respuestaEnvio: { revision_manual: false, liberable: false } });
+    });
+
+    it('sin los datos del envío no se puede consultar nunca: queda en revisión manual y liberable', async () => {
+      const { servicio, repo, emisionGre } = enviada();
+      repo.reclamarConsulta.mockResolvedValue({ ...RECLAMADO, ticket: null });
+
+      await servicio.consultar(7);
+
+      expect(emisionGre.consultarTicket).not.toHaveBeenCalled();
+      expect(repo.cerrarConsulta.mock.calls.at(-1)![2]).toMatchObject({ proximoIntentoSeg: null, respuestaEnvio: { revision_manual: true, liberable: true } });
     });
 
     it('credenciales rechazadas: detiene la consulta automática (no bloquear el usuario SOL) y «Consultar» la reanuda', async () => {
@@ -754,12 +888,82 @@ describe('GuiaRemisionBussnies', () => {
       expect(repo.cerrarConsulta.mock.calls.at(-1)![2]).toMatchObject({ errorGuia: null, proximoIntentoSeg: ESPERAS_CONSULTA_SEG[1], respuestaEnvio: { revision_manual: false } });
     });
 
+    it('los avisos y las acciones de la guía dicen la verdad: consulta lenta, liberable y liberada', async () => {
+      const { servicio, repo } = montar();
+      repo.obtener.mockResolvedValue(fila({ estado: 'enviado', serie: 'T001', numero: 100, sunat_ticket: 'T-1', envio: envio('TICKET_PENDIENTE', false, { consultas: MAXIMO_CONSULTAS_AUTOMATICAS }) }));
+      const lenta = await servicio.obtener(7);
+      expect(lenta.avisos).toContain('SUNAT todavía no entrega la constancia: el sistema la consulta cada 2 horas hasta por 7 días. Puede usar «Consultar ahora».');
+      expect(lenta.acciones).toMatchObject({ puede_consultar: true, puede_liberar: false });
+
+      repo.obtener.mockResolvedValue(fila({ estado: 'enviado', serie: 'T001', numero: 100, sunat_ticket: 'T-1', envio: envio('TICKET_PENDIENTE', true, { liberable: true }) }));
+      const vencida = await servicio.obtener(7);
+      expect(vencida.avisos.join(' ')).toContain('«Liberar»');
+      expect(vencida.acciones).toMatchObject({ puede_consultar: true, puede_liberar: true });
+
+      repo.obtener.mockResolvedValue(fila({ estado: 'pendiente', serie: 'T001', numero: 100, envio: envio('PENDIENTE_REENVIO', true, { liberado: true }) }));
+      const liberada = await servicio.obtener(7);
+      expect(liberada.avisos.join(' ')).toContain('La guía se liberó tras 7 días sin respuesta de SUNAT');
+      expect(liberada.acciones).toMatchObject({ puede_emitir: true, puede_liberar: false });
+    });
+
     it('consultar exige una guía enviada con ticket (409) y avisa si otro proceso ya la consulta', async () => {
       const { servicio, repo } = montar();
       expect(await rechazo(servicio.consultar(7))).toMatchObject({ estado: 409, cuerpo: { codigo: 'GRE_SIN_TICKET' } });
       repo.obtener.mockResolvedValue(fila({ estado: 'enviado', envio: envio('TICKET_PENDIENTE') }));
       repo.reclamarConsulta.mockResolvedValue(null);
       expect(await rechazo(servicio.consultar(7))).toMatchObject({ estado: 409, cuerpo: { codigo: 'GRE_CONSULTA_EN_CURSO' } });
+    });
+  });
+
+  describe('liberar una guía sin respuesta (S4)', () => {
+    const ADMIN = { id_usuario: 7, nombre: 'Moisés', ip: '10.0.0.5' };
+    const liberable = () => fila({ estado: 'enviado', serie: 'T001', numero: 100, sunat_ticket: 'T-1', envio: envio('TICKET_PENDIENTE', true, { liberable: true, consultas: 41 }) });
+
+    it('la deja «pendiente» para reenviar el mismo archivo, con la explicación y la auditoría del usuario en la misma transacción', async () => {
+      const { servicio, repo, auditoria, tx } = montar();
+      repo.obtener.mockResolvedValue(liberable());
+
+      await servicio.liberar(7, ADMIN);
+
+      expect(repo.liberar).toHaveBeenCalledTimes(1);
+      const [idGuia, mensaje, json] = repo.liberar.mock.calls[0];
+      expect(idGuia).toBe(7);
+      expect(mensaje).toContain('La guía T001-00000100 se liberó');
+      expect(mensaje).toContain('revise en SUNAT Operaciones en Línea');
+      expect(json).toMatchObject({ liberado: { id_usuario: 7, ticket: 'T-1', consultas: 41 }, revision_manual: true, liberable: false });
+      expect(auditoria.registrar).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accion: 'FISCAL_GRE_LIBERADA',
+          id_usuario: 7,
+          entidad: 'guias_remision',
+          id_entidad: 7,
+          ip: '10.0.0.5',
+          detalle: expect.objectContaining({ usuario: 'Moisés', guia: 'T001-00000100', id_envio: 99, ticket: 'T-1' }),
+        }),
+        tx,
+      );
+    });
+
+    it('solo si SUNAT no resolvió el ticket en 7 días: una guía recién enviada, aceptada o sin ticket pendiente es 409', async () => {
+      const { servicio, repo } = montar();
+      repo.obtener.mockResolvedValue(fila({ estado: 'enviado', serie: 'T001', numero: 100, envio: envio('TICKET_PENDIENTE', false) }));
+      expect(await rechazo(servicio.liberar(7, ADMIN))).toMatchObject({ estado: 409, cuerpo: { codigo: 'GRE_LIBERAR_NO_PERMITIDO' } });
+      repo.obtener.mockResolvedValue(fila({ estado: 'aceptado', serie: 'T001', numero: 100, envio: envio('ACEPTADO', false, { liberable: true }) }));
+      expect(await rechazo(servicio.liberar(7, ADMIN))).toMatchObject({ estado: 409, cuerpo: { codigo: 'GRE_LIBERAR_NO_PERMITIDO' } });
+      repo.obtener.mockResolvedValue(fila());
+      expect(await rechazo(servicio.liberar(7, ADMIN))).toMatchObject({ estado: 409 });
+      expect(repo.liberar).not.toHaveBeenCalled();
+    });
+
+    it('exige conocer al administrador y avisa si la guía se estaba consultando en ese instante', async () => {
+      const { servicio, repo, auditoria } = montar();
+      repo.obtener.mockResolvedValue(liberable());
+      expect(await rechazo(servicio.liberar(7, { id_usuario: null, nombre: null, ip: null }))).toMatchObject({ estado: 409, cuerpo: { codigo: 'GRE_LIBERAR_NO_PERMITIDO' } });
+      expect(repo.liberar).not.toHaveBeenCalled();
+
+      repo.liberar.mockResolvedValueOnce(false);
+      expect(await rechazo(servicio.liberar(7, ADMIN))).toMatchObject({ estado: 409, cuerpo: { codigo: 'GRE_CONSULTA_EN_CURSO' } });
+      expect(auditoria.registrar).not.toHaveBeenCalled();
     });
   });
 
@@ -779,6 +983,15 @@ describe('GuiaRemisionBussnies', () => {
       expect(repo.registrarEmision).not.toHaveBeenCalled();
     });
 
+    it('con el indicador M1/L una guía privada sin vehículo ni conductor es válida', async () => {
+      const { servicio, repo } = montar();
+      repo.obtener.mockResolvedValue(
+        fila({ placa_principal: null, conductor_tipo_doc: null, conductor_numero_doc: null, conductor_nombre: null, conductor_licencia: null, payload: { formulario: { traslado_vehiculo_m1l: true } } as any }),
+      );
+      const resultado = await servicio.validar(7);
+      expect(resultado.por_campo.filter((o) => o.nivel === 'error' && /vehiculo|conductor/.test(o.campo))).toEqual([]);
+    });
+
     it('una guía completa y dentro del tope es válida', async () => {
       const { servicio } = montar();
       expect(await servicio.validar(7)).toMatchObject({ valido: true, errores: [] });
@@ -786,6 +999,8 @@ describe('GuiaRemisionBussnies', () => {
   });
 
   it('campoFormularioGuia traduce las rutas del motor a los campos del formulario', () => {
+    expect(campoFormularioGuia('envio.trasladoVehiculoM1L')).toBe('traslado_vehiculo_m1l');
+    expect(campoFormularioGuia('proveedor.numDoc')).toBe('proveedor.numero_documento');
     expect(campoFormularioGuia('envio.partida.codigoEstablecimiento')).toBe('partida.codigo_establecimiento');
     expect(campoFormularioGuia('envio.llegada')).toBe('llegada');
     expect(campoFormularioGuia('destinatario.numDoc')).toBe('destinatario.numero_documento');

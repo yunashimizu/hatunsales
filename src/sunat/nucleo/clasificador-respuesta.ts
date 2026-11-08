@@ -288,7 +288,7 @@ export class ClasificadorRespuestaSunat {
       return decision('RECHAZADO', 'EMITIR_NUEVO', `SUNAT ya tiene este comprobante como anulado o rechazado (${descripcion}): emita uno nuevo.`);
     }
     if (CODIGOS_SOLO_RESUMEN_DIARIO.has(codigo)) {
-      return decision('EXCEPCION', 'NINGUNA', `Fuera del plazo de envío individual: la boleta solo puede informarse en un resumen diario (${descripcion}).`);
+      return decision('EXCEPCION', 'NINGUNA', `Fuera del plazo de envío individual: la boleta solo puede informarse en un resumen diario (${descripcion}). Use «Informar por resumen» en el detalle del comprobante: se puede hasta 7 días después de la emisión.`);
     }
     return null;
   }
@@ -330,7 +330,7 @@ export class ClasificadorRespuestaSunat {
     }
     const regimen = this.regimenDelDocumento(contexto);
     if (regimen === 'boleta') {
-      return decision('EXCEPCION', 'NINGUNA', `Fuera del plazo de envío individual: informe la boleta por resumen diario en SUNAT (${descripcion}).`);
+      return decision('EXCEPCION', 'NINGUNA', `Fuera del plazo de envío individual: informe la boleta por resumen diario en SUNAT (${descripcion}). Use «Informar por resumen» en el detalle del comprobante: se puede hasta 7 días después de la emisión.`);
     }
     if (regimen === 'factura') {
       return decision('EXCEPCION', 'NINGUNA', `Fuera de plazo: SUNAT ya no recibe este comprobante (${descripcion}). Emita un comprobante nuevo.`);

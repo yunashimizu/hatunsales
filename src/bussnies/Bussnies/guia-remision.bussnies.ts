@@ -59,6 +59,8 @@ import {
 } from '../../repository/Repository/guia-remision.repository';
 import type { EjecutorSql } from '../../sunat/config/transacciones-fiscales';
 import { normalizarUnidad, UNIDADES_CATALOGO_03 } from '../../sunat/catalogos/sunat.catalogos';
+import { ACCIONES_AUDITORIA_FISCAL, FiscalAuditoriaRepository } from '../../sunat/auditoria/fiscal-auditoria.repository';
+import type { ActorFiscal } from '../../sunat/config/fiscal-config.tipos';
 import { FiscalConfigService } from '../../sunat/config/fiscal-config.service';
 import { aHttp } from '../../sunat/config/fiscal-errores';
 import { RelojFiscal } from '../../sunat/config/reloj-fiscal';
@@ -68,6 +70,8 @@ import {
   CATALOGO_61_DOCUMENTOS_RELACIONADOS,
   EmisionGre,
   GreInvalidaError,
+  MOTIVOS_GRE_CON_VENTA,
+  MOTIVOS_GRE_DESTINATARIO_PROPIO,
   normalizarPlacaGre,
   redactarSecretosGre,
   UNIDADES_PESO_GRE,
@@ -84,7 +88,7 @@ import type {
   ResultadoValidacionGre,
 } from '../../sunat/gre';
 import type { EmisorCpe } from '../../sunat/nucleo/documento-fiscal.types';
-import { esFechaIso, fechaLima, horaLima } from '../../sunat/nucleo/fechas-fiscales';
+import { esFechaIso, fechaLima, horaLima, sumarDias } from '../../sunat/nucleo/fechas-fiscales';
 import { generarGuiaRemisionPdf, DatosGuiaRemisionPdf } from '../../util/documentos/guia-remision-pdf';
 import { obtenerLogoEmisor } from '../../util/documentos/logo-emisor';
 import { TIPO_BOLETA, TIPO_FACTURA } from '../../util/fiscal/tipos-comprobante';
@@ -102,8 +106,11 @@ export const ESTADO_GUIA_TEXTO: Readonly<Record<EstadoGuia, string>> = {
 
 const DESCRIPCION_MOTIVO: Readonly<Record<string, string>> = {
   '01': 'Entrega al comprador de lo vendido: la guía sale desde una venta.',
+  '02': 'Mercadería que usted compró y traslada: indique a quién se la compró; el destinatario es la propia empresa.',
   '04': 'Mercadería que va a otro local de la empresa: el destinatario es la propia empresa.',
   '13': 'Cualquier otro traslado (reparación, préstamo…): describa el motivo.',
+  '14': 'Venta que el comprador todavía debe confirmar: la guía sale desde una venta.',
+  '18': 'Traslado por emisor itinerante de comprobantes de pago (sin venta).',
 };
 
 const DESCRIPCION_MODALIDAD: Readonly<Record<string, string>> = {
@@ -120,8 +127,12 @@ const NOMBRE_TIPO_DOCUMENTO: Readonly<Record<string, string>> = {
 
 /** Espera entre consultas automáticas del ticket: 30 s, 1, 2 y 5 min, y luego cada 15 min. */
 export const ESPERAS_CONSULTA_SEG: readonly number[] = [30, 60, 120, 300, 900];
-/** Tope de consultas automáticas: después la consulta queda manual (con aviso en la guía). */
+/** Consultas con la espera creciente: después pasan a la consulta lenta (ESPERA_CONSULTA_LENTA_SEG). */
 export const MAXIMO_CONSULTAS_AUTOMATICAS = 12;
+/** Consulta lenta tras el tope: cada 2 horas, hasta DIAS_CONSULTA_TICKET días desde que se registró el envío (S4). */
+export const ESPERA_CONSULTA_LENTA_SEG = 7_200;
+/** Pasados estos días sin respuesta la consulta automática se detiene y el administrador puede «Liberar» la guía. */
+export const DIAS_CONSULTA_TICKET = 7;
 /** «Directo a SUNAT»: con el ticket recibido, una consulta a los 2,5 s (SUNAT suele procesar la guía en segundos). */
 export const ESPERA_CONSULTA_INMEDIATA_MS = 2_500;
 /** Tope de esa consulta: con la espera, emitir no queda bloqueado más de ~8 s por ella. */
@@ -158,6 +169,10 @@ const CAMPOS_FORMULARIO: ReadonlyArray<readonly [RegExp, string]> = [
   [/^destinatario\.tipoDoc$/, 'destinatario.tipo_documento'],
   [/^destinatario\.numDoc$/, 'destinatario.numero_documento'],
   [/^destinatario\.nombre$/, 'destinatario.denominacion'],
+  [/^proveedor\.tipoDoc$/, 'proveedor.tipo_documento'],
+  [/^proveedor\.numDoc$/, 'proveedor.numero_documento'],
+  [/^proveedor\.nombre$/, 'proveedor.denominacion'],
+  [/^envio\.trasladoVehiculoM1L$/, 'traslado_vehiculo_m1l'],
   [/^transportista\.(?:tipoDoc|numDoc)$/, 'transportista.ruc'],
   [/^transportista\.razonSocial$/, 'transportista.razon_social'],
   [/^transportista\.registroMtc$/, 'transportista.registro_mtc'],
@@ -275,6 +290,7 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
     private readonly fiscal: FiscalConfigService,
     private readonly reloj: RelojFiscal,
     private readonly ubigeos: UbigeoService,
+    private readonly auditoria: FiscalAuditoriaRepository,
   ) {}
 
   // ── Lectura ────────────────────────────────────────────────────────────────
@@ -318,8 +334,10 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
       motivos: MOTIVOS_GUIA_HABILITADOS.map((codigo) => ({
         ...opcion(codigo, CATALOGO_20_MOTIVOS_TRASLADO[codigo]),
         descripcion: DESCRIPCION_MOTIVO[codigo],
-        requiere_venta: codigo === '01',
+        requiere_venta: MOTIVOS_GRE_CON_VENTA.includes(codigo),
         requiere_descripcion: codigo === '13',
+        requiere_proveedor: codigo === '02',
+        destinatario_propio: MOTIVOS_GRE_DESTINATARIO_PROPIO.includes(codigo),
         requiere_establecimiento: codigo === '04',
       })),
       modalidades: MODALIDADES_GUIA.map((codigo) => ({ ...opcion(codigo, CATALOGO_18_MODALIDAD_TRASLADO[codigo]), descripcion: DESCRIPCION_MODALIDAD[codigo] })),
@@ -482,6 +500,21 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
       if (!anulada) {
         throw new ConflictException({ message: 'La guía cambió de estado mientras se anulaba: actualice la pantalla.', codigo: 'GRE_ESTADO_CAMBIO' });
       }
+      // Misma transacción: la guía no queda anulada sin su registro de quién y por qué.
+      await this.auditoria.registrar(
+        {
+          accion: ACCIONES_AUDITORIA_FISCAL.GRE_ANULADA,
+          id_usuario: idUsuario,
+          entidad: 'guias_remision',
+          id_entidad: idGuia,
+          detalle: {
+            guia: actual.numero !== null ? numeroFormateado(actual.serie, actual.numero) : `borrador ${idGuia}`,
+            estado_previo: actual.estado,
+            motivo: dto.motivo ?? null,
+          },
+        },
+        tx,
+      );
     });
     return this.obtener(idGuia);
   }
@@ -574,6 +607,55 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
       });
     }
     return operacion;
+  }
+
+  /**
+   * «Liberar» (administrador): SUNAT no resolvió el ticket en 7 días y la guía quedó sin salida. Vuelve a
+   * «pendiente» con su explicación para reenviar el MISMO archivo con «Emitir» (si SUNAT ya la tenía, lo dirá
+   * como «ya registrada»). Auditado con el usuario. No llama a SUNAT.
+   */
+  async liberar(idGuia: number, actor: ActorFiscal): Promise<GuiaRemisionResponse> {
+    if (!actor?.id_usuario) {
+      throw new ConflictException({ message: 'No se pudo identificar al administrador que libera la guía: vuelva a iniciar sesión.', codigo: 'GRE_LIBERAR_NO_PERMITIDO' });
+    }
+    const fila = await this.filaOError(idGuia);
+    const envio = fila.envio;
+    if (estadoDe(fila.estado) !== 'enviado' || envio?.estado !== 'TICKET_PENDIENTE' || !envio.liberable) {
+      throw new ConflictException({
+        message: 'Solo se libera una guía enviada cuyo ticket SUNAT no resolvió en 7 días. Use «Consultar ahora» mientras SUNAT pueda responder.',
+        codigo: 'GRE_LIBERAR_NO_PERMITIDO',
+      });
+    }
+    const numero = numeroFormateado(fila.serie, fila.numero);
+    const mensaje =
+      `La guía ${numero} se liberó: SUNAT no respondió el ticket ${envio.ticket ?? fila.sunat_ticket ?? ''} en ${DIAS_CONSULTA_TICKET} días. `
+      + 'Antes de reenviarla, revise en SUNAT Operaciones en Línea si ya figura registrada; si no está, use «Emitir» para reenviar el mismo archivo.';
+    const fecha = this.reloj.ahora().toISOString();
+    const liberada = await this.repo.liberar(
+      idGuia,
+      mensaje,
+      { liberado: { id_usuario: actor.id_usuario, fecha, ticket: envio.ticket, consultas: envio.consultas }, revision_manual: true, liberable: false },
+      async (tx, idEnvio, ticket) => {
+        await this.auditoria.registrar(
+          {
+            accion: ACCIONES_AUDITORIA_FISCAL.GRE_LIBERADA,
+            id_usuario: actor.id_usuario,
+            entidad: 'guias_remision',
+            id_entidad: idGuia,
+            detalle: { usuario: actor.nombre, guia: numero, id_envio: idEnvio, ticket, consultas: envio.consultas },
+            ip: actor.ip,
+          },
+          tx,
+        );
+      },
+    );
+    if (!liberada) {
+      throw new ConflictException({
+        message: 'La guía se está consultando ahora mismo o cambió de estado: actualice la pantalla y revísela de nuevo.',
+        codigo: 'GRE_CONSULTA_EN_CURSO',
+      });
+    }
+    return this.obtener(idGuia);
   }
 
   /** Envíos con el ticket pendiente cuyo turno llegó (para GreTicketsTarea). */
@@ -702,13 +784,31 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
       const siguiente = await this.repo.siguienteNumero(serie, piso, tx);
       if (numero < siguiente) throw new NumeroGuiaOcupadoError(serie, numero, siguiente);
     }
-    return this.repo.registrarEmision(tx, {
+    const idEnvio = await this.repo.registrarEmision(tx, {
       idGuia: fila.id_guia,
       numeroAnterior: fila.numero,
       idComprobante: relacionado?.id_comprobante ?? null,
       idUsuario,
       preparada,
     });
+    // Misma transacción: el número reservado y su registro de quién emitió la guía van juntos.
+    await this.auditoria.registrar(
+      {
+        accion: ACCIONES_AUDITORIA_FISCAL.GRE_EMITIDA,
+        id_usuario: idUsuario,
+        entidad: 'guias_remision',
+        id_entidad: fila.id_guia,
+        detalle: {
+          guia: numeroFormateado(serie, numero),
+          id_envio: idEnvio,
+          motivo_traslado: fila.motivo_traslado_codigo,
+          id_venta: fila.id_venta,
+          reenvio: fila.numero !== null,
+        },
+      },
+      tx,
+    );
+    return idEnvio;
   }
 
   private async preparar(documento: DocumentoGre): Promise<GrePreparada> {
@@ -928,16 +1028,23 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
     // Sigue en proceso (98, sin respuesta, credenciales) o la constancia no corresponde: la guía queda 'enviado'.
     // La consulta automática se detiene cuando hace falta una persona; con credenciales rechazadas, además,
     // porque repetir una clave mala puede bloquear el usuario SOL. Se decide en cada consulta: tras corregir
-    // la causa, «Consultar» la reanuda.
+    // la causa, «Consultar» la reanuda. Si solo falta la respuesta de SUNAT, tras el tope de consultas rápidas
+    // sigue la consulta lenta (cada 2 h) hasta DIAS_CONSULTA_TICKET días; recién entonces se detiene y la guía
+    // queda liberable (S4).
     const noCorresponde = Boolean(r.cdrNoCorresponde);
     const errorConfig = r.estado === 'ERROR_CONFIG';
-    const agotado = consultas >= MAXIMO_CONSULTAS_AUTOMATICAS;
-    const revisionManual = sinDatos || noCorresponde || errorConfig || agotado;
-    const errorGuia = sinDatos || noCorresponde || errorConfig
-      ? mensaje
-      : agotado
-        ? `${mensaje} SUNAT no entregó la constancia tras ${consultas} consultas: la consulta automática se detuvo; use «Consultar» más tarde o revise la guía en SUNAT Operaciones en Línea.`
-        : null;
+    const lenta = consultas >= MAXIMO_CONSULTAS_AUTOMATICAS && !sinDatos && !noCorresponde && !errorConfig;
+    const vencido = lenta && this.venceElPlazoDeConsulta(reclamado);
+    const liberable = vencido || sinDatos;
+    const revisionManual = sinDatos || noCorresponde || errorConfig || vencido;
+    let errorGuia: string | null = null;
+    if (sinDatos || noCorresponde || errorConfig) {
+      errorGuia = mensaje;
+    } else if (vencido) {
+      errorGuia = `${mensaje} SUNAT no entregó la constancia en ${DIAS_CONSULTA_TICKET} días: la consulta automática se detuvo. Use «Consultar ahora» o, tras revisar la guía en SUNAT Operaciones en Línea, «Liberar».`;
+    } else if (lenta) {
+      errorGuia = `${mensaje} SUNAT no entregó la constancia tras ${consultas} consultas: se sigue consultando cada 2 horas hasta el ${this.fechaLimiteConsulta(reclamado)}. También puede usar «Consultar ahora».`;
+    }
     return {
       ...sinArchivos,
       estadoEnvio: 'TICKET_PENDIENTE',
@@ -945,10 +1052,25 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
       codigo: r.codigo,
       mensaje,
       errorGuia,
-      respuestaEnvio: { consultas, revision_manual: revisionManual, ultima_consulta: ultima },
+      respuestaEnvio: { consultas, revision_manual: revisionManual, liberable, ultima_consulta: ultima },
       respuestaGuia,
-      proximoIntentoSeg: revisionManual ? null : ESPERAS_CONSULTA_SEG[Math.min(consultas, ESPERAS_CONSULTA_SEG.length - 1)],
+      proximoIntentoSeg: revisionManual ? null : lenta ? ESPERA_CONSULTA_LENTA_SEG : ESPERAS_CONSULTA_SEG[Math.min(consultas, ESPERAS_CONSULTA_SEG.length - 1)],
     };
+  }
+
+  /** ¿Ya pasaron los 7 días de consulta desde que se registró el envío? (sin la fecha de registro, no.) */
+  private venceElPlazoDeConsulta(reclamado: EnvioParaConsulta): boolean {
+    const creado = reclamado.creado_en ? new Date(reclamado.creado_en).getTime() : Number.NaN;
+    if (Number.isNaN(creado)) return false;
+    return this.reloj.ahora().getTime() >= creado + DIAS_CONSULTA_TICKET * 24 * 60 * 60 * 1000;
+  }
+
+  /** dd/mm del último día de consulta automática, para el mensaje. */
+  private fechaLimiteConsulta(reclamado: EnvioParaConsulta): string {
+    const creado = reclamado.creado_en ? new Date(reclamado.creado_en) : this.reloj.ahora();
+    const limite = sumarDias(fechaLima(Number.isNaN(creado.getTime()) ? this.reloj.ahora() : creado), DIAS_CONSULTA_TICKET);
+    const [, mes, dia] = /^\d{4}-(\d{2})-(\d{2})/.exec(limite) ?? [];
+    return mes && dia ? `${dia}/${mes}` : limite;
   }
 
   private consultaSinDatos(mensaje: string): ResultadoConsultaGre {
@@ -992,7 +1114,7 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
       remitente: c.emisor,
       // Con el motivo 04 el destinatario es el propio remitente (anexo N.° 12, campos 8 y 9).
       destinatario:
-        motivo === '04'
+        MOTIVOS_GRE_DESTINATARIO_PROPIO.includes(motivo)
           ? { tipoDoc: '6', numDoc: c.emisor.ruc, nombre: c.emisor.razonSocial }
           : { tipoDoc: fila.destinatario_tipo_doc ?? '', numDoc: fila.destinatario_numero_doc ?? '', nombre: fila.destinatario_denominacion ?? '' },
       envio: {
@@ -1001,6 +1123,7 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
         modalidad,
         fechaInicioTraslado: fila.fecha_inicio_traslado ?? '',
         fechaEntregaTransportista: modalidad === '01' ? form.fecha_entrega_transportista ?? undefined : undefined,
+        trasladoVehiculoM1L: modalidad === '02' && form.traslado_vehiculo_m1l === true ? true : undefined,
         pesoBrutoTotal: fila.peso_bruto_total ?? 0,
         unidadPeso: fila.unidad_peso ?? 'KGM',
         numeroBultos: fila.numero_bultos ?? undefined,
@@ -1024,7 +1147,15 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
         registroMtc: form.registro_mtc ?? undefined,
       };
     }
-    if (modalidad === '02') {
+    if (motivo === '02' && (form.proveedor_numero_doc || form.proveedor_denominacion || form.proveedor_tipo_doc)) {
+      documento.proveedor = {
+        tipoDoc: form.proveedor_tipo_doc ?? '',
+        numDoc: form.proveedor_numero_doc ?? '',
+        nombre: form.proveedor_denominacion ?? '',
+      };
+    }
+    // Moto o auto particular (M1/L): no se consignan vehículo ni conductores.
+    if (modalidad === '02' && form.traslado_vehiculo_m1l !== true) {
       documento.vehiculo = { placa: normalizarPlacaGre(fila.placa_principal), tarjetaCirculacion: form.tarjeta_circulacion ?? undefined };
       const conductor = {
         tipoDoc: fila.conductor_tipo_doc ?? '',
@@ -1096,17 +1227,18 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
 
   // ── Guardado (interno) ─────────────────────────────────────────────────────
 
-  /** Con venta: solo 01. Sin venta: solo 04 y 13 (D10). */
+  /** Con venta: solo 01 o 14. Sin venta: 02, 04, 13 y 18 (D10). */
   private exigirMotivoSegunVenta(motivo: string, idVenta: number | null): void {
-    if (idVenta && motivo !== '01') {
+    const conVenta = MOTIVOS_GRE_CON_VENTA.includes(motivo);
+    if (idVenta && !conVenta) {
       throw new BadRequestException({
-        message: 'Una guía de una venta usa el motivo 01 (venta). Para los motivos 04 y 13 cree la guía sin venta.',
+        message: 'Una guía de una venta usa el motivo 01 (venta) o el 14 (venta sujeta a confirmación del comprador). Para los demás motivos cree la guía sin venta.',
         codigo: 'GRE_MOTIVO_NO_VALIDO',
       });
     }
-    if (!idVenta && motivo === '01') {
+    if (!idVenta && conVenta) {
       throw new BadRequestException({
-        message: 'Con el motivo 01 (venta) indique la venta que sustenta el traslado (id_venta).',
+        message: `Con el motivo ${motivo} (${motivo === '01' ? 'venta' : 'venta sujeta a confirmación del comprador'}) indique la venta que sustenta el traslado (id_venta).`,
         codigo: 'GRE_MOTIVO_NO_VALIDO',
       });
     }
@@ -1122,7 +1254,7 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
       }
     }
     const [emisor, partida] = await Promise.all([
-      dto.motivo_traslado === '04' ? this.fiscal.emisor() : Promise.resolve(null),
+      MOTIVOS_GRE_DESTINATARIO_PROPIO.includes(dto.motivo_traslado) ? this.fiscal.emisor() : Promise.resolve(null),
       dto.partida ? Promise.resolve(null) : this.fiscal.gre().then((gre) => gre.partida),
     ]);
     return { emisor, partida };
@@ -1175,7 +1307,7 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
 
     const motivo = dto.motivo_traslado;
     const destinatario: DestinatarioGuiaResponse =
-      motivo === '04' && defectos.emisor
+      MOTIVOS_GRE_DESTINATARIO_PROPIO.includes(motivo) && defectos.emisor
         ? { tipo_documento: '6', numero_documento: defectos.emisor.ruc, denominacion: defectos.emisor.razonSocial, direccion: dto.llegada?.direccion ?? null }
         : dto.destinatario
           ? {
@@ -1235,6 +1367,10 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
         tarjeta_circulacion: dto.vehiculo?.tarjeta_circulacion ?? null,
         conductor_nombres: conductor?.nombres ?? null,
         conductor_apellidos: conductor?.apellidos ?? null,
+        traslado_vehiculo_m1l: dto.modalidad_traslado === '02' && dto.traslado_vehiculo_m1l === true ? true : null,
+        proveedor_tipo_doc: motivo === '02' ? dto.proveedor?.tipo_documento ?? null : null,
+        proveedor_numero_doc: motivo === '02' ? dto.proveedor?.numero_documento ?? null : null,
+        proveedor_denominacion: motivo === '02' ? dto.proveedor?.denominacion ?? null : null,
       },
       items,
     };
@@ -1377,17 +1513,17 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
   }
 
   private acciones(estado: EstadoGuia, envio: EnvioGuia | null): AccionesGuiaResponse {
-    const ninguna: AccionesGuiaResponse = { puede_editar: false, puede_validar: false, puede_emitir: false, puede_consultar: false, puede_anular: false };
+    const ninguna: AccionesGuiaResponse = { puede_editar: false, puede_validar: false, puede_emitir: false, puede_consultar: false, puede_anular: false, puede_liberar: false };
     switch (estado) {
       case 'borrador':
       case 'rechazado':
-        return { puede_editar: true, puede_validar: true, puede_emitir: true, puede_consultar: false, puede_anular: true };
+        return { puede_editar: true, puede_validar: true, puede_emitir: true, puede_consultar: false, puede_anular: true, puede_liberar: false };
       case 'pendiente': {
         const disponible = !envio?.en_curso && envio?.estado !== 'TICKET_PENDIENTE';
         return { ...ninguna, puede_validar: disponible, puede_emitir: disponible };
       }
       case 'enviado':
-        return { ...ninguna, puede_consultar: true };
+        return { ...ninguna, puede_consultar: true, puede_liberar: envio?.estado === 'TICKET_PENDIENTE' && envio.liberable };
       default:
         return ninguna;
     }
@@ -1531,6 +1667,11 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
             licencia: f.conductor_licencia,
           }
         : null,
+      traslado_vehiculo_m1l: form.traslado_vehiculo_m1l === true,
+      proveedor:
+        form.proveedor_tipo_doc || form.proveedor_numero_doc || form.proveedor_denominacion
+          ? { tipo_documento: form.proveedor_tipo_doc ?? null, numero_documento: form.proveedor_numero_doc ?? null, denominacion: form.proveedor_denominacion ?? null }
+          : null,
       items: items.map((i) => ({
         id_item: i.id_item,
         id_producto: i.id_producto,
@@ -1553,6 +1694,8 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
             consultas: f.envio.consultas,
             en_curso: f.envio.en_curso,
             revision_manual: f.envio.revision_manual,
+            liberable: f.envio.liberable,
+            liberado: f.envio.liberado,
             proximo_intento_en: f.envio.proximo_intento_en,
             actualizado_en: f.envio.actualizado_en,
           }
@@ -1579,7 +1722,16 @@ export class GuiaRemisionBussnies implements IGuiaRemisionBussniees {
       }
     }
     if (estado === 'enviado' && f.envio?.revision_manual) {
-      avisos.push('La consulta automática del ticket se detuvo: use «Consultar» o revise la guía en SUNAT Operaciones en Línea.');
+      avisos.push(
+        f.envio.liberable
+          ? 'SUNAT no resolvió el ticket en 7 días y la consulta automática se detuvo: use «Consultar ahora» o, tras revisar la guía en SUNAT Operaciones en Línea, «Liberar».'
+          : 'La consulta automática del ticket se detuvo: use «Consultar ahora» o revise la guía en SUNAT Operaciones en Línea.',
+      );
+    } else if (estado === 'enviado' && f.envio && f.envio.consultas >= MAXIMO_CONSULTAS_AUTOMATICAS) {
+      avisos.push('SUNAT todavía no entrega la constancia: el sistema la consulta cada 2 horas hasta por 7 días. Puede usar «Consultar ahora».');
+    }
+    if (estado === 'pendiente' && f.envio?.liberado && !f.envio.en_curso) {
+      avisos.push('La guía se liberó tras 7 días sin respuesta de SUNAT: revise en SUNAT Operaciones en Línea si ya figura registrada antes de reenviarla con «Emitir».');
     }
     if (estado === 'aceptado' && !f.cadena_qr) {
       avisos.push('SUNAT no entregó el enlace del código QR en la constancia: la representación impresa sale sin QR.');

@@ -378,6 +378,43 @@ describe('CertificadoFiscalService', () => {
     expect((await soloNueva.infoTodos()).produccion?.legible).toBe(true);
   });
 
+  it('revisarLlaves: cuenta el certificado que aún depende de la llave anterior y, con aplicar, lo re-cifra sin que nadie firme', async () => {
+    const repo = new RepositorioCertificadosMemoria();
+    await crear({ repo, llave: { actual: OTRA_LLAVE_PRUEBA } }).servicio.subir(
+      { buffer: pfxConCadena(CLAVE).contenido, originalname: 'x.pfx' },
+      CLAVE,
+      {},
+      ACTOR,
+    );
+    const rotado = crear({ repo, llave: { actual: LLAVE_PRUEBA, anterior: OTRA_LLAVE_PRUEBA } }).servicio;
+
+    expect(await rotado.revisarLlaves(false)).toEqual([
+      { ambiente: 'beta', estado: 'falta' },
+      { ambiente: 'produccion', estado: 'con_llave_anterior' },
+    ]);
+    expect(repo.recifrados).toEqual([]);
+
+    expect((await rotado.revisarLlaves(true))[1]).toEqual({ ambiente: 'produccion', estado: 'recifrado' });
+    expect(repo.recifrados).toEqual([1]);
+    const soloNueva = crear({ repo, llave: { actual: LLAVE_PRUEBA } }).servicio;
+    expect((await soloNueva.revisarLlaves(true))[1].estado).toBe('al_dia');
+    expect((await soloNueva.obtenerMaterialFirma('produccion')).ruc).toBe(RUC_PRUEBA);
+  });
+
+  it('revisarLlaves: un certificado cifrado con una llave perdida se informa como ilegible y no se toca', async () => {
+    const repo = new RepositorioCertificadosMemoria();
+    await crear({ repo, llave: { actual: OTRA_LLAVE_PRUEBA } }).servicio.subir(
+      { buffer: pfxConCadena(CLAVE).contenido, originalname: 'x.pfx' },
+      CLAVE,
+      {},
+      ACTOR,
+    );
+    const sinAnterior = crear({ repo, llave: { actual: LLAVE_PRUEBA } }).servicio;
+
+    expect((await sinAnterior.revisarLlaves(true))[1].estado).toBe('ilegible');
+    expect(repo.recifrados).toEqual([]);
+  });
+
   it('un certificado nuevo reanuda la emisión detenida de SU ambiente y retira la confirmación del RUC del anterior', async () => {
     const bloqueo = JSON.stringify({ codigo: '2325', motivo: 'El certificado no está registrado en SOL.', fecha: '2026-10-20T10:00:00.000Z' });
     const { servicio, valoresConfig, auditoria, notificador } = crear({

@@ -18,6 +18,20 @@ import { RepositorioSecretosFiscales } from './secretos-fiscales.repository';
  */
 export type DiagnosticoSecreto = 'ok' | 'falta' | 'ilegible' | 'sin_cifrado' | 'sin_esquema';
 
+/** Resultado de revisar un secreto frente a la llave vigente (re-cifrado completo). */
+export type EstadoLlaveSecreto =
+  | 'al_dia' // abre con la llave vigente
+  | 'con_llave_anterior' // abre solo con la anterior (pendiente de re-cifrar)
+  | 'recifrado' // abría con la anterior y se volvió a cifrar con la vigente
+  | 'falta' // no existe
+  | 'ilegible' // no abre con ninguna de las dos llaves
+  | 'sin_cifrado'; // no hay llave vigente válida
+
+export interface RevisionLlaveSecreto {
+  nombre: NombreSecretoFiscal;
+  estado: EstadoLlaveSecreto;
+}
+
 export interface MetadatosSecreto {
   actualizado_en: Date;
   actualizado_por: number | null;
@@ -106,6 +120,45 @@ export class BovedaSecretosFiscales {
     const borrado = await this.secretos.eliminar(nombre, ejecutor);
     this.invalidar(nombre);
     return borrado;
+  }
+
+  /**
+   * Revisa TODOS los secretos (clave SOL y credenciales GRE) contra la llave vigente. Con `aplicar` vuelve a
+   * cifrar con la vigente los que solo abren con FISCAL_SECRET_KEY_ANTERIOR, sin esperar a que alguien los lea
+   * (la rotación perezosa dejaba ilegible un secreto no leído al quitar la llave anterior). Nunca expone valores.
+   */
+  async revisarLlaves(aplicar: boolean): Promise<RevisionLlaveSecreto[]> {
+    await this.esquema.exigir('secretos');
+    const resultado: RevisionLlaveSecreto[] = [];
+    for (const nombre of Object.values(SECRETOS_FISCALES)) {
+      resultado.push({ nombre, estado: await this.revisarUno(nombre, aplicar) });
+    }
+    return resultado;
+  }
+
+  private async revisarUno(nombre: NombreSecretoFiscal, aplicar: boolean): Promise<EstadoLlaveSecreto> {
+    const guardado = await this.secretos.leer(nombre);
+    if (!guardado?.valor_cifrado?.length) return 'falta';
+    if (!this.cifrado.disponible()) return 'sin_cifrado';
+
+    let abierto: { plano: Buffer; conLlaveAnterior: boolean };
+    try {
+      abierto = this.cifrado.descifrarDetallado(guardado.valor_cifrado, BovedaSecretosFiscales.contexto(nombre));
+    } catch (error) {
+      if (FiscalConfigError.es(error, 'FISCAL_SECRETO_ILEGIBLE')) return 'ilegible';
+      throw error;
+    }
+    try {
+      if (!abierto.conLlaveAnterior) return 'al_dia';
+      if (!aplicar) return 'con_llave_anterior';
+      const nuevo = this.cifrado.cifrar(abierto.plano, BovedaSecretosFiscales.contexto(nombre));
+      await this.secretos.guardar(nombre, nuevo, guardado.actualizado_por);
+      this.invalidar(nombre);
+      this.logger.log(`Secreto fiscal «${nombre}» re-cifrado con la FISCAL_SECRET_KEY actual.`);
+      return 'recifrado';
+    } finally {
+      abierto.plano.fill(0);
+    }
   }
 
   invalidar(nombre?: NombreSecretoFiscal): void {

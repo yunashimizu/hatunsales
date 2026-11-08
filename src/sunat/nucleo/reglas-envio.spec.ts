@@ -1,7 +1,10 @@
 import {
   admiteGetStatusCdr,
+  admiteResumenDiario,
   esDocumentoDeFactura,
   fechaLimiteEnvioIndividual,
+  fechaLimiteResumen,
+  pasoDelEnvioIndividual,
   rucDeUsuarioSol,
   usuarioSolCorrespondeAlEmisor,
 } from './reglas-envio';
@@ -124,6 +127,33 @@ describe('reglas de envío', () => {
       expect(usuarioSolCorrespondeAlEmisor('MODDATOS', '20610206337')).toBe(false);
       expect(usuarioSolCorrespondeAlEmisor('20610206337HATUN01', '')).toBe(false);
       expect(usuarioSolCorrespondeAlEmisor(undefined as unknown as string, undefined as unknown as string)).toBe(false);
+    });
+  });
+
+  describe('resumen diario de boletas (RS 114-2019): 5 días el envío individual, hasta el 7.º el resumen', () => {
+    it('fechaLimiteResumen: 7 días desde la emisión', () => {
+      expect(fechaLimiteResumen('2026-11-03')).toBe('2026-11-10');
+      expect(fechaLimiteResumen('2026-12-28')).toBe('2027-01-04');
+    });
+
+    it.each([
+      ['03', 'B001', '2026-11-03', '2026-11-03', true],
+      ['03', 'B001', '2026-11-03', '2026-11-10', true],
+      ['03', 'B001', '2026-11-03', '2026-11-11', false],
+      ['07', 'BC01', '2026-11-03', '2026-11-08', true],
+      ['08', 'BD01', '2026-11-03', '2026-11-12', false],
+      ['03', 'B001', '2026-11-05', '2026-11-03', false],
+      ['01', 'F001', '2026-11-03', '2026-11-04', false],
+      ['07', 'FC01', '2026-11-03', '2026-11-04', false],
+    ])('admiteResumenDiario(%s %s emitida %s, hoy %s) → %s', (tipo, serie, emision, hoy, esperado) => {
+      expect(admiteResumenDiario(tipo, serie, emision, hoy)).toBe(esperado);
+    });
+
+    it('pasoDelEnvioIndividual: más de 5 días y hasta 7 (la ventana en que el barrido de la tarea toma la boleta)', () => {
+      expect(pasoDelEnvioIndividual('2026-11-03', '2026-11-08')).toBe(false); // 5 días: todavía se envía solo
+      expect(pasoDelEnvioIndividual('2026-11-03', '2026-11-09')).toBe(true);
+      expect(pasoDelEnvioIndividual('2026-11-03', '2026-11-10')).toBe(true);
+      expect(pasoDelEnvioIndividual('2026-11-03', '2026-11-11')).toBe(false); // ya no hay resumen que valga
     });
   });
 });

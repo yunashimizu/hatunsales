@@ -66,10 +66,15 @@ export class ProductoRepository extends CrudRepository<Producto> {
   async buscarPorCodigoBarras(codigo_barras: string): Promise<Producto | null> {
     const codigo = String(codigo_barras ?? '').trim();
     if (!codigo) return null;
+    // Sin COALESCE en el WHERE para que el planificador use `uq_productos_codigo_barras`
+    // (sobre btrim(codigo_barras)) e `idx_productos_sku_lower` (sobre lower(sku)). Con un
+    // código no vacío el resultado es el mismo: NULL nunca es igual a nada. En el ORDER BY
+    // sí se queda el COALESCE: ahí `NULL = :codigo` daría NULL y DESC pone los NULL primero,
+    // con lo que un producto hallado por SKU y sin barras le ganaría al que coincide por barras.
     return this.productoRepo
       .createQueryBuilder('p')
-      .where("btrim(COALESCE(p.codigo_barras, '')) = :codigo", { codigo })
-      .orWhere("LOWER(COALESCE(p.sku, '')) = LOWER(:codigo)", { codigo })
+      .where('btrim(p.codigo_barras) = :codigo', { codigo })
+      .orWhere('LOWER(p.sku) = LOWER(:codigo)', { codigo })
       .orderBy("(btrim(COALESCE(p.codigo_barras, '')) = :codigo)", 'DESC')
       .addOrderBy('p.id_producto', 'ASC')
       .getOne();
@@ -92,9 +97,35 @@ export class ProductoRepository extends CrudRepository<Producto> {
     return this.productoRepo.findOne({ where: { sku } });
   }
 
-  async actualizar(id: number, data: Partial<Producto>): Promise<Producto> {
-    await this.productoRepo.update(id, data as any);
-    return this.getById(id) as Promise<Producto>;
+  /**
+   * Productos que ya usan alguno de estos códigos como barras (exacto tras `btrim`) o como SKU
+   * (sin distinguir mayúsculas), en UNA consulta. La unicidad del alta y la edición decide en
+   * memoria qué choque reportar. `codigos` llega ya recortado y sin vacíos; vacío → no consulta.
+   */
+  async buscarChoquesDeCodigos(
+    codigos: string[],
+  ): Promise<Array<{ id_producto: number; nombre: string | null; codigo_barras: string | null; sku: string | null }>> {
+    const lista = [...new Set((codigos ?? []).map((c) => String(c ?? '').trim()).filter(Boolean))];
+    if (!lista.length) return [];
+    // `btrim(p.codigo_barras) <> ''` es el predicado del índice parcial `uq_productos_codigo_barras`:
+    // escrito así el planificador puede usarlo; `lower(p.sku)` usa `idx_productos_sku_lower`.
+    return this.productoRepo.query(
+      `SELECT p.id_producto, p.nombre, p.codigo_barras, p.sku
+         FROM productos p
+        WHERE (btrim(p.codigo_barras) <> '' AND btrim(p.codigo_barras) = ANY($1::text[]))
+           OR lower(p.sku) = ANY($2::text[])
+        ORDER BY p.id_producto ASC`,
+      [lista, lista.map((c) => c.toLowerCase())],
+    );
+  }
+
+  /**
+   * UPDATE parcial sin leer antes ni después: `true` si el producto existía. Quien llama lee el
+   * detalle completo una sola vez al final (antes se leía la entidad dos veces de más).
+   */
+  async actualizarSiExiste(id: number, cambios: Partial<Producto>): Promise<boolean> {
+    const resultado = await this.productoRepo.update(id, cambios as any);
+    return (resultado.affected ?? 0) > 0;
   }
 
   /**
