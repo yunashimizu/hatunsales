@@ -14,6 +14,7 @@ import {
   COLUMNAS_NOTA,
   DatosFiscalesComprobante,
   DatosListadoComprobante,
+  ExtrasImpresion,
   FiltroComprobantes,
   FilaComprobanteNueva,
   FilaItemNueva,
@@ -104,7 +105,8 @@ import type {
 } from './nota-credito.contrato';
 import type { AnularDocumentoRequest } from '../../models/model/c-electronico/nota-credito.request';
 import type { AnulacionDocumentoResponse, ConsultaAnulacionResponse } from '../../models/model/c-electronico/nota-credito.response';
-import { generarPdfComprobante } from '../../util/documentos/comprobante-pdf';
+import { describirMedioPago, generarPdfComprobante } from '../../util/documentos/comprobante-pdf';
+import { formatearFechaHora } from '../../util/documentos/proforma-documento';
 import type { DatosPdfComprobante, FormatoPdfComprobante } from '../../util/documentos/comprobante-pdf';
 import { obtenerLogoEmisor } from '../../util/documentos/logo-emisor';
 import { codigoGenericoDeCategoria } from '../../sunat/catalogos/codigos-producto-genericos';
@@ -708,7 +710,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     const c = await this.repo.buscarPorId(id_comprobante);
     if (!c) throw new NotFoundException('Comprobante no encontrado');
 
-    const [fiscal, envio, notas, guias, configurado, modo, resumenes, baja] = await Promise.all([
+    const [fiscal, envio, notas, guias, configurado, modo, resumenes, baja, extras] = await Promise.all([
       this.repo.datosFiscales(id_comprobante),
       this.envioDe(c),
       this.opcional(() => this.repo.notasDe(id_comprobante), `notas de ${c.serie}-${c.numero}`, []),
@@ -717,6 +719,11 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       this.emision.modo(),
       this.resumenesNotas(esComprobantePrincipal(c.tipo?.id_tipo) ? [id_comprobante] : []),
       this.bajaDe(c),
+      this.opcional(
+        () => this.repo.extrasImpresion(id_comprobante),
+        `datos de impresión de ${c.serie}-${c.numero}`,
+        null as ExtrasImpresion | null,
+      ),
     ]);
     const emisor = await this.emisorDelDocumento(c, fiscal, configurado);
     const hoy = fechaLima();
@@ -845,6 +852,10 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       puede_anular_sin_nota: acciones.puede_anular_sin_nota,
       puede_informar_por_resumen: acciones.puede_informar_por_resumen,
       baja,
+      atendido_por: extras?.atendido_por ?? null,
+      sucursal: extras?.sucursal ?? null,
+      pagos_detalle: extras?.pagos ?? [],
+      aceptado_en: extras?.aceptado_en ?? null,
     };
   }
 
@@ -1891,6 +1902,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
         numDoc: detalle.receptor.numero_documento ?? '',
         nombre: detalle.receptor.denominacion ?? '',
         direccion: detalle.receptor.direccion || null,
+        email: detalle.receptor.email || null,
       },
       referencia: detalle.referencia
         ? {
@@ -1949,7 +1961,14 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
           }
         : null,
       observaciones: detalle.observaciones || null,
-      medioPago: null,
+      medioPago: describirMedioPago(detalle.pagos_detalle, detalle.moneda.id_moneda === 2 ? 'US$' : 'S/') || null,
+      guiaRemision: this.guiaImpresa(detalle.guias),
+      atendidoPor: detalle.atendido_por ?? null,
+      sucursal: detalle.sucursal ?? null,
+      aceptadoSunat:
+        detalle.aceptada_sunat && !detalle.anulado
+          ? { fecha: detalle.aceptado_en ? formatearFechaHora(detalle.aceptado_en) || null : null }
+          : null,
       cadenaQr: detalle.cadena_qr,
       codigoHash: detalle.codigo_hash,
       ambiente:
@@ -1958,6 +1977,14 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
           : null,
       avisoEstado: this.avisoEstadoImpreso(detalle),
     };
+  }
+
+  /** Guía de remisión relacionada que se imprime: la primera no anulada ni rechazada con número. */
+  private guiaImpresa(guias: ComprobanteDetalleResponse['guias'] | null | undefined): string | null {
+    const guia = (guias ?? []).find(
+      (g) => g.numero_formateado && !/anulad|rechazad|baja/i.test(String(g.estado ?? '')),
+    );
+    return guia?.numero_formateado ?? null;
   }
 
   private avisoEstadoImpreso(detalle: ComprobanteDetalleResponse): string | null {

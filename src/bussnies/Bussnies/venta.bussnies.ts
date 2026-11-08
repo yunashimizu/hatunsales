@@ -148,11 +148,19 @@ export class VentaBussnies {
    * con tarjeta, ya trae el recargo como línea y dentro del total: lo que ve el
    * cajero es lo que se cobra, se registra y se envía a SUNAT.
    */
-  async previsualizar(dto: CrearVentaRequest): Promise<PreviewComprobanteResponse> {
+  async previsualizar(dto: CrearVentaRequest, usuario?: UsuarioToken): Promise<PreviewComprobanteResponse> {
     const { items, itemsRecargo, recargo, totalSinRecargo } = await this.armarLineas(dto);
     const base = await this.comprobantes.previsualizar(this.aSolicitudComprobante(dto, items, itemsRecargo));
     const formaPago = await this.formaPagoDeVistaPrevia(dto);
-    const preview = formaPago ? { ...base, forma_pago: formaPago } : base;
+    const conForma = formaPago ? { ...base, forma_pago: formaPago } : base;
+    // Plan DO §2 (M4, M6): quien atiende y los pagos elegidos, solo si hay dato.
+    const atendido = String(usuario?.nombre ?? '').trim();
+    const pagos = await this.pagosDeVistaPrevia(dto);
+    const preview: PreviewComprobanteResponse = {
+      ...conForma,
+      ...(atendido ? { atendido_por: atendido } : {}),
+      ...(pagos.length ? { pagos_detalle: pagos } : {}),
+    };
     if (!recargo.aplica) return preview;
     return {
       ...preview,
@@ -163,6 +171,26 @@ export class VentaBussnies {
         total_sin_recargo: totalSinRecargo,
       },
     };
+  }
+
+  /** Pagos elegidos con su nombre y monto (y lo recibido/vuelto si vinieran). Nunca falla: es informativo. */
+  private async pagosDeVistaPrevia(dto: CrearVentaRequest): Promise<NonNullable<PreviewComprobanteResponse['pagos_detalle']>> {
+    const pagos = (dto.pagos ?? []).filter((p) => p.id_metodo != null);
+    if (!pagos.length) return [];
+    try {
+      const metodos = await this.creditoRepo.metodosConTipo();
+      return pagos
+        .map((p) => ({
+          metodo: String(metodos.find((m) => Number(m.id_metodo) === Number(p.id_metodo))?.nombre ?? '').trim(),
+          monto: Number(p.monto) || 0,
+          monto_recibido: p.monto_recibido != null ? Number(p.monto_recibido) : null,
+          vuelto: p.vuelto != null ? Number(p.vuelto) : null,
+        }))
+        .filter((p) => p.metodo);
+    } catch (error) {
+      this.logger.warn(`No se pudieron leer los medios de pago de la vista previa: ${(error as Error)?.message ?? error}`);
+      return [];
+    }
   }
 
   /**

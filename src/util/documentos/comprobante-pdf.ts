@@ -1,6 +1,6 @@
 import { esConsumidorFinal } from '../../sunat/catalogos/sunat.catalogos';
 import { imagenSoportada } from './logo-emisor';
-import { PALETA, dibujarFranjaMarca } from './proforma-documento';
+import { MENSAJE_PIE_DOCUMENTO, PALETA, dibujarFranjaMarca } from './proforma-documento';
 import { textoPdf } from './proforma-pdf';
 import { generarQrPng } from './qr';
 
@@ -36,6 +36,17 @@ export interface ClientePdfComprobante {
   numDoc: string;
   nombre: string;
   direccion?: string | null;
+  /** Correo del cliente (fila CORREO de la caja del cliente). */
+  email?: string | null;
+}
+
+/** Un pago de la venta, para el texto de MEDIO DE PAGO con montos (`describirMedioPago`). */
+export interface PagoImpreso {
+  metodo: string;
+  monto: number;
+  /** Solo efectivo: lo que entregó el cliente. */
+  monto_recibido?: number | null;
+  vuelto?: number | null;
 }
 
 export interface ReferenciaPdfComprobante {
@@ -105,8 +116,16 @@ export interface DatosPdfComprobante {
     cuotas?: CuotaPdfComprobante[];
   } | null;
   observaciones?: string | null;
-  /** Nombres de los medios de pago de la venta (efectivo, tarjeta…), informativo. */
+  /** Medios de pago de la venta, informativo («Efectivo S/ 100.00 · Yape S/ 40.00 · Recibido … · Vuelto …»). */
   medioPago?: string | null;
+  /** «T001-00000012»: guía de remisión relacionada (fila GUÍA DE REMISIÓN). */
+  guiaRemision?: string | null;
+  /** Nombre de quien registró la venta (fila ATENDIDO POR). */
+  atendidoPor?: string | null;
+  /** Sucursal o almacén de la venta (fila SUCURSAL). */
+  sucursal?: string | null;
+  /** Presente solo si SUNAT aceptó el comprobante; `fecha` = fecha y hora de la constancia si se guardó. */
+  aceptadoSunat?: { fecha?: string | null } | null;
   /** Cadena exacta que codifica el QR (nucleo/cadena-qr.ts): no se recalcula aquí. */
   cadenaQr: string | null;
   /** DigestValue del XML firmado (valor resumen). */
@@ -124,6 +143,32 @@ export interface OpcionesPdfComprobante {
 
 /** Texto de la marca de las pruebas en BETA (mismo texto en A4 y ticket). */
 export const AVISO_BETA_PDF = 'PRUEBA SUNAT BETA - SIN VALIDEZ TRIBUTARIA';
+
+/** Texto de la línea del estado aceptado (junto a la leyenda del QR). */
+export const TEXTO_ACEPTADO_SUNAT = 'Aceptado por SUNAT';
+
+/** «1 ítem» / «7 ítems» (línea bajo la tabla). */
+export function textoCantidadItems(cantidadItems: number): string {
+  const n = Math.max(0, Math.trunc(Number(cantidadItems) || 0));
+  return `${n} ${n === 1 ? 'ítem' : 'ítems'}`;
+}
+
+/**
+ * Medio de pago con montos: «Efectivo S/ 100.00 · Yape S/ 40.00 · Recibido S/ 150.00 · Vuelto S/ 10.00».
+ * Recibido y vuelto solo si se registraron (efectivo). Sin pagos con nombre devuelve ''.
+ */
+export function describirMedioPago(pagos: PagoImpreso[] | null | undefined, simbolo = 'S/'): string {
+  const validos = (pagos ?? []).filter((p) => textoPdf(p?.metodo));
+  if (!validos.length) return '';
+  const partes = validos.map((p) =>
+    Number(p.monto) > 0 ? `${textoPdf(p.metodo)} ${simbolo} ${monto(Number(p.monto))}` : textoPdf(p.metodo),
+  );
+  const recibido = validos.reduce((s, p) => s + (Number(p.monto_recibido) || 0), 0);
+  const vuelto = validos.reduce((s, p) => s + (Number(p.vuelto) || 0), 0);
+  if (recibido > 0) partes.push(`Recibido ${simbolo} ${monto(recibido)}`);
+  if (vuelto > 0) partes.push(`Vuelto ${simbolo} ${monto(vuelto)}`);
+  return partes.join(' · ');
+}
 
 const TITULOS: Record<DatosPdfComprobante['tipo'], string> = {
   '01': 'FACTURA ELECTRÓNICA',
@@ -178,6 +223,8 @@ const ETIQUETAS_TICKET: Record<string, string> = {
   'Fecha de emisión': 'Emisión',
   'Fecha de vencimiento': 'Vencimiento',
   'Documento que modifica': 'Modifica a',
+  'Guía de remisión': 'Guía',
+  'Atendido por': 'Atendió',
   'Carné de extranjería': 'C. extranjería',
   'Doc. país de residencia': 'Doc. extranjero',
 };
@@ -208,6 +255,7 @@ const COLOR = {
   acento: PALETA.dorado,
   acentoClaro: PALETA.doradoClaro,
   acentoTexto: PALETA.doradoOscuro,
+  acentoSuave: PALETA.doradoSuave,
   peligro: PALETA.peligro,
   aviso: PALETA.aviso,
   blanco: PALETA.blanco,
@@ -699,12 +747,6 @@ class DibujoComprobante {
     return `Representación impresa de la ${NOMBRES_LEYENDA[this.d.tipo]}. Consulte su validez en www.sunat.gob.pe`;
   }
 
-  private fechaEmision(): string {
-    const fecha = textoPdf(this.d.fechaEmision);
-    const hora = textoPdf(this.d.horaEmision);
-    return hora ? `${fecha} ${hora}` : fecha;
-  }
-
   private filasCliente(): Fila[] {
     const c = this.d.cliente ?? ({} as ClientePdfComprobante);
     const tipo = String(c.tipoDoc ?? '').trim();
@@ -719,11 +761,14 @@ class DibujoComprobante {
       filas.push(['Documento', 'Sin documento']);
     else filas.push([TIPOS_DOCUMENTO[tipo] ?? 'Documento', numero]);
     if (textoPdf(c.direccion)) filas.push(['Dirección', textoPdf(c.direccion)]);
+    if (textoPdf(c.email)) filas.push(['Correo', textoPdf(c.email)]);
     return filas;
   }
 
   private filasDocumento(): Fila[] {
-    const filas: Fila[] = [['Fecha de emisión', this.fechaEmision()]];
+    const filas: Fila[] = [['Fecha de emisión', textoPdf(this.d.fechaEmision)]];
+    if (textoPdf(this.d.horaEmision))
+      filas.push(['Hora', textoPdf(this.d.horaEmision)]);
     if (textoPdf(this.d.fechaVencimiento))
       filas.push(['Fecha de vencimiento', textoPdf(this.d.fechaVencimiento)]);
     filas.push([
@@ -735,7 +780,20 @@ class DibujoComprobante {
         'Forma de pago',
         this.d.formaPago.tipo === 'Credito' ? 'Crédito' : 'Contado',
       ]);
+    if (textoPdf(this.d.guiaRemision))
+      filas.push(['Guía de remisión', textoPdf(this.d.guiaRemision)]);
+    if (textoPdf(this.d.atendidoPor))
+      filas.push(['Atendido por', textoPdf(this.d.atendidoPor)]);
+    if (textoPdf(this.d.sucursal))
+      filas.push(['Sucursal', textoPdf(this.d.sucursal)]);
     return filas;
+  }
+
+  /** «Aceptado por SUNAT · 21/10/2026 14:36» si SUNAT lo aceptó; '' si no. */
+  private get textoAceptado(): string {
+    if (!this.d.aceptadoSunat) return '';
+    const fecha = textoPdf(this.d.aceptadoSunat.fecha);
+    return fecha ? `${TEXTO_ACEPTADO_SUNAT} · ${fecha}` : TEXTO_ACEPTADO_SUNAT;
   }
 
   private filasReferencia(): Fila[] {
@@ -808,13 +866,19 @@ class DibujoComprobante {
     this.pieA4();
   }
 
+  /**
+   * Encabezado (estilo B «oro presente»): logo de hasta 110 × 76 pt, barra vertical dorada de 3 pt,
+   * textos del emisor y el recuadro del documento con marco dorado y serie-número en doradoOscuro.
+   */
   private cabeceraA4(): void {
     const e = this.d.emisor ?? ({} as EmisorPdfComprobante);
     const anchoCaja = 200;
     const xCaja = this.x + this.ancho - anchoCaja;
-    const logo = this.medidaLogo(86, 70);
-    const xTexto = this.logo ? this.x + logo.ancho + 12 : this.x;
+    const logo = this.medidaLogo(110, 76);
+    const xBarra = this.logo ? this.x + logo.ancho + 10 : this.x;
+    const xTexto = xBarra + 3 + 10;
     const anchoTexto = xCaja - 14 - xTexto;
+    const tamSerie = this.tam.serie + 1;
 
     // Bloque del emisor (se mide primero para centrar ambas columnas).
     const razon = this.lineasDe(
@@ -846,7 +910,7 @@ class DibujoComprobante {
       'Helvetica',
       8,
       anchoTexto,
-      3,
+      4,
     );
     const altoEmisor =
       razon.length * this.alto(this.tam.razon) +
@@ -865,8 +929,8 @@ class DibujoComprobante {
       this.alto(11) +
       6 +
       tituloLineas.length * this.alto(this.tam.titulo) +
-      10 +
-      this.alto(this.tam.serie) +
+      11 +
+      this.alto(tamSerie) +
       8;
     const alto = Math.max(altoEmisor, altoCaja, logo.alto);
 
@@ -878,6 +942,13 @@ class DibujoComprobante {
         logo.ancho,
         logo.alto,
       );
+    // Barra vertical dorada entre el logo y los textos.
+    const altoBarra = Math.max(altoEmisor, logo.alto);
+    this.doc
+      .save()
+      .rect(xBarra, this.y + (alto - altoBarra) / 2, 3, altoBarra)
+      .fill(COLOR.acento)
+      .restore();
     let yy = this.y + Math.max(0, (alto - altoEmisor) / 2);
     this.estilo('Helvetica-Bold', this.tam.razon, COLOR.marca);
     for (const l of razon) {
@@ -896,13 +967,13 @@ class DibujoComprobante {
       yy += this.alto(8);
     }
 
-    // Recuadro del documento: RUC, tipo y serie-número.
+    // Recuadro del documento: RUC, tipo y serie-número, con marco dorado.
     const yCaja = this.y + (alto - altoCaja) / 2;
     this.doc
       .save()
       .roundedRect(xCaja, yCaja, anchoCaja, altoCaja, 5)
-      .lineWidth(1.4)
-      .strokeColor(COLOR.marca)
+      .lineWidth(1.6)
+      .strokeColor(COLOR.acento)
       .stroke()
       .restore();
     let yc = yCaja + 12;
@@ -912,9 +983,9 @@ class DibujoComprobante {
     const altoBanda = tituloLineas.length * this.alto(this.tam.titulo) + 6;
     this.doc
       .save()
-      .rect(xCaja + 1, yc - 2, anchoCaja - 2, altoBanda)
+      .rect(xCaja + 0.8, yc - 2, anchoCaja - 1.6, altoBanda)
       .fill(COLOR.marca)
-      .rect(xCaja + 1, yc - 2 + altoBanda, anchoCaja - 2, 1.6)
+      .rect(xCaja + 0.8, yc - 2 + altoBanda, anchoCaja - 1.6, 2.2)
       .fill(COLOR.acento)
       .restore();
     this.estilo('Helvetica-Bold', this.tam.titulo, COLOR.blanco);
@@ -922,11 +993,24 @@ class DibujoComprobante {
       this.linea(l, xCaja + 10, yc + 3.5, anchoCaja - 20, 'center');
       yc += this.alto(this.tam.titulo);
     }
-    yc += 10;
-    this.estilo('Helvetica-Bold', this.tam.serie, COLOR.marca);
+    yc += 11;
+    this.estilo('Helvetica-Bold', tamSerie, COLOR.acentoTexto);
     this.linea(this.codigo, xCaja, yc, anchoCaja, 'center');
 
     this.y += alto + 12;
+  }
+
+  /** Título de sección único (estilo B): barrita dorada de 4 pt y texto doradoOscuro en negrita, en mayúsculas. */
+  private tituloSeccion(texto: string, x: number = this.x, ancho: number = this.ancho): void {
+    const tam = this.tam.normal;
+    this.doc
+      .save()
+      .rect(x, this.y - 0.5, 4, this.alto(tam) - 1)
+      .fill(COLOR.acento)
+      .restore();
+    this.estilo('Helvetica-Bold', tam, COLOR.acentoTexto);
+    this.linea(texto.toUpperCase(), x + 9, this.y, ancho - 9);
+    this.y += this.alto(tam) + 2;
   }
 
   /** Recuadro con filas «etiqueta: valor» en una o dos columnas (no se parte entre páginas). */
@@ -974,34 +1058,46 @@ class DibujoComprobante {
       2;
     this.asegurar(alto + 8);
 
+    // Estilo B: fondo doradoSuave con borde doradoClaro de 1 pt.
     this.doc
       .save()
       .roundedRect(this.x, this.y, this.ancho, alto, 4)
-      .lineWidth(0.7)
-      .strokeColor(COLOR.linea)
+      .fill(COLOR.acentoSuave)
+      .restore();
+    this.doc
+      .save()
+      .roundedRect(this.x, this.y, this.ancho, alto, 4)
+      .lineWidth(1)
+      .strokeColor(COLOR.acentoClaro)
       .stroke()
       .restore();
     if (titulo) {
       this.doc
         .save()
-        .rect(this.x + 0.5, this.y + 0.5, this.ancho - 1, altoTitulo - 2)
-        .fill(COLOR.fondo)
-        .rect(this.x + 0.5, this.y + 0.5, 3, altoTitulo - 2)
+        .rect(this.x + relleno, this.y + 5.5, 4, 9)
         .fill(COLOR.acento)
         .restore();
-      this.estilo('Helvetica-Bold', 7.8, COLOR.marca);
+      this.estilo('Helvetica-Bold', 7.8, COLOR.acentoTexto);
       this.linea(
         titulo,
-        this.x + relleno,
-        this.y + 5,
-        this.ancho - relleno * 2,
+        this.x + relleno + 9,
+        this.y + 6.5,
+        this.ancho - relleno * 2 - 9,
       );
+      this.doc
+        .save()
+        .lineWidth(0.6)
+        .strokeColor(COLOR.acentoClaro)
+        .moveTo(this.x + relleno, this.y + altoTitulo)
+        .lineTo(this.x + this.ancho - relleno, this.y + altoTitulo)
+        .stroke()
+        .restore();
     }
     columnas.forEach((filas, i) => {
       const xCol = this.x + relleno + i * (anchoColumna + separacion);
       let yy = this.y + altoTitulo + relleno;
       filas.forEach(([etiqueta], j) => {
-        this.estilo('Helvetica-Bold', tam - 0.8, COLOR.gris);
+        this.estilo('Helvetica-Bold', tam - 0.8, COLOR.marca);
         this.linea(etiqueta.toUpperCase(), xCol, yy + 0.8, anchoEtiqueta - 6);
         this.estilo('Helvetica', tam, COLOR.texto);
         for (const l of medidas[i][j]) {
@@ -1046,11 +1142,8 @@ class DibujoComprobante {
       .restore();
     this.doc
       .save()
-      .lineWidth(1.6)
-      .strokeColor(COLOR.acento)
-      .moveTo(this.x, this.y + alto)
-      .lineTo(this.x + this.ancho, this.y + alto)
-      .stroke()
+      .rect(this.x, this.y + alto - 0.2, this.ancho, 2.4)
+      .fill(COLOR.acento)
       .restore();
     this.estilo('Helvetica-Bold', 7.4, COLOR.blanco);
     let cx = this.x;
@@ -1058,7 +1151,7 @@ class DibujoComprobante {
       this.linea(c.titulo, cx + 4, this.y + 6, c.ancho - 8, c.alinear);
       cx += c.ancho;
     }
-    this.y += alto;
+    this.y += alto + 2.2;
   }
 
   private tablaA4(): void {
@@ -1069,7 +1162,7 @@ class DibujoComprobante {
     const filas = items.map((item) => {
       const descripcion = this.lineasDe(
         parrafos(item.descripcion).length ? parrafos(item.descripcion) : ['—'],
-        'Helvetica',
+        'Helvetica-Bold',
         tam,
         anchoDescripcion,
         MAXIMO_LINEAS_DESCRIPCION,
@@ -1086,7 +1179,7 @@ class DibujoComprobante {
       };
     });
     // Encabezado + primera fila juntos: un encabezado huérfano al pie de página no sirve.
-    this.asegurar(18 + (filas[0]?.alto ?? 16));
+    this.asegurar(20.2 + (filas[0]?.alto ?? 16));
     this.encabezadoTabla();
     filas.forEach((fila, indice) => {
       if (this.asegurar(fila.alto)) this.encabezadoTabla();
@@ -1109,7 +1202,7 @@ class DibujoComprobante {
       let cx = this.x;
       columnas.forEach((c, i) => {
         if (i === 2) {
-          this.estilo('Helvetica', tam, COLOR.texto);
+          this.estilo('Helvetica-Bold', tam, COLOR.texto);
           let yy = yTexto;
           for (const l of fila.descripcion) {
             this.linea(l, cx + 4, yy, c.ancho - 8);
@@ -1121,7 +1214,7 @@ class DibujoComprobante {
           }
         } else {
           this.estilo(
-            i === columnas.length - 1 ? 'Helvetica-Bold' : 'Helvetica',
+            i === 0 || i === columnas.length - 1 ? 'Helvetica-Bold' : 'Helvetica',
             tam,
             COLOR.texto,
           );
@@ -1149,7 +1242,20 @@ class DibujoComprobante {
       );
       this.y += 18;
     }
-    this.y += 10;
+    // Cierre de la tabla: línea dorada de 1,2 pt bajo la última fila.
+    this.doc
+      .save()
+      .rect(this.x, this.y - 0.4, this.ancho, 1.2)
+      .fill(COLOR.acento)
+      .restore();
+    this.y += 4;
+    // M7: cantidad de ítems, pequeña y a la izquierda.
+    if (filas.length) {
+      this.estilo('Helvetica-Bold', 7, COLOR.gris);
+      this.linea(textoCantidadItems(filas.length), this.x + 4, this.y, 120);
+      this.y += this.alto(7);
+    }
+    this.y += 6;
   }
 
   /** Importe en letras a la izquierda y totales a la derecha: un solo bloque que no se parte. */
@@ -1159,7 +1265,8 @@ class DibujoComprobante {
     const filas = this.filasTotales();
     const tam = this.tam.normal;
     const altoFilas = filas.length * (this.alto(tam) + 2);
-    const altoTotal = this.alto(this.tam.total) + 10;
+    const tamTotal = this.tam.total + 1;
+    const altoTotal = this.alto(tamTotal) + 10;
     const altoDerecha = altoFilas + altoTotal + 4;
     const letras = this.lineasDe(
       [conSon(this.d.importeEnLetras)],
@@ -1174,15 +1281,18 @@ class DibujoComprobante {
     this.asegurar(alto + 10);
 
     if (letras.length) {
+      // «SON»: caja doradoSuave con barra izquierda dorada de 3 pt.
       this.doc
         .save()
-        .roundedRect(this.x, this.y, anchoLetras, altoIzquierda, 4)
-        .fill(COLOR.fondo)
+        .roundedRect(this.x, this.y, anchoLetras, altoIzquierda, 3)
+        .fill(COLOR.acentoSuave)
+        .rect(this.x, this.y, 3, altoIzquierda)
+        .fill(COLOR.acento)
         .restore();
       this.estilo('Helvetica-Bold', tam, COLOR.texto);
       let yy = this.y + 7;
       for (const l of letras) {
-        this.linea(l, this.x + 8, yy, anchoLetras - 16);
+        this.linea(l, this.x + 10, yy, anchoLetras - 18);
         yy += this.alto(tam);
       }
     }
@@ -1190,29 +1300,38 @@ class DibujoComprobante {
     const xT = this.x + this.ancho - anchoTotales;
     let yy = this.y;
     for (const [etiqueta, valor] of filas) {
-      this.estilo('Helvetica', tam, COLOR.gris);
+      const color = etiqueta === 'Descuentos' ? COLOR.aviso : COLOR.texto;
+      this.estilo('Helvetica', tam, color);
       this.linea(etiqueta, xT + 6, yy, anchoTotales - 120);
-      this.estilo('Helvetica', tam, COLOR.texto);
+      this.estilo('Helvetica-Bold', tam, color);
       this.linea(valor, xT + anchoTotales - 112, yy, 106, 'right');
       yy += this.alto(tam) + 2;
     }
     yy += 2;
+    // IMPORTE TOTAL: banda grafito con marco dorado de 1,2 pt.
     this.doc
       .save()
       .roundedRect(xT, yy, anchoTotales, altoTotal, 4)
       .fill(COLOR.marca)
       .restore();
+    this.doc
+      .save()
+      .roundedRect(xT + 0.6, yy + 0.6, anchoTotales - 1.2, altoTotal - 1.2, 3.6)
+      .lineWidth(1.2)
+      .strokeColor(COLOR.acento)
+      .stroke()
+      .restore();
     this.estilo('Helvetica-Bold', this.tam.total, COLOR.blanco);
-    this.linea('IMPORTE TOTAL', xT + 8, yy + 5.5, anchoTotales - 120);
-    this.estilo('Helvetica-Bold', this.tam.total, COLOR.acentoClaro);
+    this.linea('IMPORTE TOTAL', xT + 9, yy + (altoTotal - this.alto(this.tam.total)) / 2 + 1.5, anchoTotales - 120);
+    this.estilo('Helvetica-Bold', tamTotal, COLOR.acentoClaro);
     this.linea(
       `${this.simbolo} ${monto(this.d.totales?.total)}`,
-      xT + anchoTotales - 118,
-      yy + 5.5,
+      xT + anchoTotales - 119,
+      yy + (altoTotal - this.alto(tamTotal)) / 2 + 1.5,
       110,
       'right',
     );
-    this.y += alto + 12;
+    this.y += alto + 10;
   }
 
   private creditoA4(): void {
@@ -1225,14 +1344,7 @@ class DibujoComprobante {
     this.asegurar(
       this.alto(tam) * 2 + 8 + filaAlto * Math.min(cuotas.length + 1, 4),
     );
-    this.doc
-      .save()
-      .rect(this.x, this.y - 0.5, 3, this.alto(tam) - 1)
-      .fill(COLOR.acento)
-      .restore();
-    this.estilo('Helvetica-Bold', tam, COLOR.marca);
-    this.linea('FORMA DE PAGO: CRÉDITO', this.x + 8, this.y, this.ancho - 8);
-    this.y += this.alto(tam) + 2;
+    this.tituloSeccion('FORMA DE PAGO: CRÉDITO');
     this.estilo('Helvetica', tam, COLOR.texto);
     this.linea(
       `Monto neto pendiente de pago: ${this.simbolo} ${monto(this.pendienteCredito())}`,
@@ -1252,7 +1364,7 @@ class DibujoComprobante {
         .save()
         .rect(this.x, this.y, anchoTabla, filaAlto)
         .fill(COLOR.marca)
-        .rect(this.x, this.y + filaAlto - 1.2, anchoTabla, 1.2)
+        .rect(this.x, this.y + filaAlto - 0.2, anchoTabla, 2.4)
         .fill(COLOR.acento)
         .restore();
       this.estilo('Helvetica-Bold', tam - 1, COLOR.blanco);
@@ -1267,7 +1379,7 @@ class DibujoComprobante {
         );
         cx += c.w;
       });
-      this.y += filaAlto;
+      this.y += filaAlto + 2.2;
     };
     encabezado();
     for (const cuota of cuotas) {
@@ -1299,7 +1411,7 @@ class DibujoComprobante {
         .stroke()
         .restore();
     }
-    this.y += 10;
+    this.y += 8;
   }
 
   private notasA4(): void {
@@ -1310,19 +1422,17 @@ class DibujoComprobante {
     ] as const) {
       const textos = parrafos(valor);
       if (!textos.length) continue;
-      this.asegurar(this.alto(tam) * 2 + 2);
-      this.estilo('Helvetica-Bold', tam - 0.6, COLOR.gris);
-      this.linea(etiqueta, this.x, this.y, this.ancho);
-      this.y += this.alto(tam);
+      this.asegurar(this.alto(tam) * 2 + 4);
+      this.tituloSeccion(etiqueta);
       this.parrafo(textos, { tam });
-      this.y += 6;
+      this.y += 4;
     }
   }
 
   /** QR + valor resumen + leyenda en un recuadro que no se parte. */
   private qrA4(): void {
     const lado = LADO_QR.a4;
-    const relleno = 8;
+    const relleno = 6;
     const xTexto = this.x + relleno + lado + 14;
     const anchoTexto = this.ancho - (xTexto - this.x) - relleno;
     const tam = this.tam.chico + 0.4;
@@ -1351,16 +1461,21 @@ class DibujoComprobante {
           tam,
           lado - 12,
         );
+    const aceptado = this.textoAceptado
+      ? this.lineasDe([this.textoAceptado], 'Helvetica-Bold', tam + 0.6, anchoTexto)
+      : [];
     const altoTexto =
-      (lineasHash.length + lineasLeyenda.length) * this.alto(tam) + 8;
+      (lineasHash.length + lineasLeyenda.length) * this.alto(tam) +
+      8 +
+      (aceptado.length ? aceptado.length * this.alto(tam + 0.6) + 6 : 0);
     const alto = Math.max(lado, altoTexto) + relleno * 2;
-    this.asegurar(alto + 4);
+    this.asegurar(alto + 2);
 
     this.doc
       .save()
       .roundedRect(this.x, this.y, this.ancho, alto, 4)
-      .lineWidth(0.7)
-      .strokeColor(COLOR.linea)
+      .lineWidth(1)
+      .strokeColor(COLOR.acentoClaro)
       .stroke()
       .restore();
     const xQr = this.x + relleno;
@@ -1385,6 +1500,15 @@ class DibujoComprobante {
       }
     }
     let yy = this.y + (alto - altoTexto) / 2 + 2;
+    if (aceptado.length) {
+      // M8: estado aceptado por SUNAT (y fecha de la constancia si se guardó).
+      this.estilo('Helvetica-Bold', tam + 0.6, COLOR.acentoTexto);
+      for (const l of aceptado) {
+        this.linea(l, xTexto, yy, anchoTexto);
+        yy += this.alto(tam + 0.6);
+      }
+      yy += 6;
+    }
     this.estilo('Helvetica-Bold', tam, COLOR.texto);
     for (const l of lineasHash) {
       this.linea(l, xTexto, yy, anchoTexto);
@@ -1405,28 +1529,34 @@ class DibujoComprobante {
     for (let i = rango.start; i < rango.start + rango.count; i++) {
       this.doc.switchToPage(i);
       const yPie = this.doc.page.height - this.margen - 8;
+      // Hilo dorado de 0,8 pt; documento a la izquierda, agradecimiento al centro, página a la derecha.
       this.doc
         .save()
-        .lineWidth(0.4)
-        .strokeColor(COLOR.linea)
-        .moveTo(this.x, yPie - 4)
-        .lineTo(this.x + this.ancho, yPie - 4)
-        .stroke()
+        .rect(this.x, yPie - 4.4, this.ancho, 0.8)
+        .fill(COLOR.acento)
         .restore();
+      // Anchos medidos: el agradecimiento va centrado en el hueco entre el documento y la página.
+      const izquierda = `${this.titulo} ${this.codigo} · ${textoPdf(this.d.emisor?.razonSocial)}`;
+      const pagina = `Página ${i - rango.start + 1} de ${rango.count}`;
+      this.estilo('Helvetica-Bold', 7.4, COLOR.acentoTexto);
+      const anchoMensaje = this.doc.widthOfString(MENSAJE_PIE_DOCUMENTO);
       this.estilo('Helvetica', 7, COLOR.grisClaro);
-      this.linea(
-        `${this.titulo} ${this.codigo} · ${textoPdf(this.d.emisor?.razonSocial)}`,
-        this.x,
-        yPie,
-        this.ancho * 0.75,
+      const anchoPagina = this.doc.widthOfString(pagina);
+      const anchoIzquierda = Math.min(
+        this.doc.widthOfString(izquierda),
+        this.ancho - anchoPagina - anchoMensaje - 36,
       );
-      this.linea(
-        `Página ${i - rango.start + 1} de ${rango.count}`,
-        this.x + this.ancho * 0.75,
-        yPie,
-        this.ancho * 0.25,
-        'right',
+      this.linea(izquierda, this.x, yPie, anchoIzquierda + 0.5);
+      this.linea(pagina, this.x, yPie, this.ancho, 'right');
+      const xHueco = this.x + anchoIzquierda + 12;
+      const anchoHueco = this.ancho - anchoIzquierda - anchoPagina - 24;
+      // Centrado en la hoja si cabe; si no, en el hueco.
+      const xMensaje = Math.min(
+        Math.max(this.x + (this.ancho - anchoMensaje) / 2, xHueco),
+        xHueco + anchoHueco - anchoMensaje,
       );
+      this.estilo('Helvetica-Bold', 7.4, COLOR.acentoTexto);
+      this.linea(MENSAJE_PIE_DOCUMENTO, xMensaje, yPie - 0.2, anchoMensaje + 0.5);
     }
   }
 
@@ -1453,6 +1583,8 @@ class DibujoComprobante {
     this.separador();
     this.qrTicket();
     if (this.d.ambiente === 'beta') this.banner(AVISO_BETA_PDF, COLOR.peligro);
+    this.y += 2;
+    this.centrado([MENSAJE_PIE_DOCUMENTO], 'Helvetica-Bold', this.tam.normal + 0.4);
   }
 
   private centrado(
@@ -1596,14 +1728,14 @@ class DibujoComprobante {
             ? `${codigo} - ${String(item.descripcion ?? '')}`
             : String(item.descripcion ?? ''),
         ],
-        'Helvetica',
+        'Helvetica-Bold',
         tam,
         this.ancho,
         MAXIMO_LINEAS_DESCRIPCION,
       );
       // Un ítem completo no se parte entre páginas (solo aplica a tickets larguísimos).
       this.asegurar((descripcion.length + 1) * this.alto(tam) + 2);
-      this.estilo('Helvetica', tam, COLOR.texto);
+      this.estilo('Helvetica-Bold', tam, COLOR.texto);
       for (const l of descripcion) {
         this.linea(l, this.x, this.y, this.ancho);
         this.y += this.alto(tam);
@@ -1635,6 +1767,12 @@ class DibujoComprobante {
         tam,
         COLOR.gris,
       );
+    else {
+      this.asegurar(this.alto(tam - 0.6));
+      this.estilo('Helvetica-Bold', tam - 0.6, COLOR.gris);
+      this.linea(textoCantidadItems(items.length), this.x, this.y, this.ancho);
+      this.y += this.alto(tam - 0.6);
+    }
   }
 
   private totalesTicket(): void {
@@ -1786,6 +1924,10 @@ class DibujoComprobante {
       }
     }
     this.y += altoQr;
+    if (this.textoAceptado) {
+      this.centrado([this.textoAceptado], 'Helvetica-Bold', tam + 0.6);
+      this.y += 2;
+    }
     this.estilo('Helvetica', tam, COLOR.texto);
     for (const l of hash) {
       this.linea(l, this.x, this.y, this.ancho, 'center');

@@ -23,6 +23,7 @@ import {
   textoPlano,
   textoValidaHasta,
   dibujarFranjaMarca,
+  MENSAJE_PIE_DOCUMENTO,
 } from './proforma-documento';
 
 // pdfkit no trae tipos en este proyecto (mismo uso que en reportes).
@@ -288,24 +289,27 @@ class DibujoProforma {
     const cajaX = this.izquierda + this.ancho - cajaAncho;
     const anchoIzquierda = this.ancho - cajaAncho - 18;
 
-    let xTexto = this.izquierda;
+    // Estilo B: logo de hasta 110 × 76 pt y barra vertical dorada de 3 pt antes de los textos.
+    let xBarra = this.izquierda;
     let altoLogo = 0;
     if (this.d.emisor?.logo) {
       try {
-        const anchoLogo = 118;
-        const altoLogoMaximo = 79;
-        const logoY = top + (cajaAlto - altoLogoMaximo) / 2;
-        doc.image(this.d.emisor.logo, this.izquierda, logoY, {
-          fit: [anchoLogo, altoLogoMaximo],
-          valign: 'center',
-        });
-        xTexto = this.izquierda + anchoLogo + 14;
-        altoLogo = altoLogoMaximo;
+        const imagen = doc.openImage(this.d.emisor.logo);
+        const escala = Math.min(110 / imagen.width, 76 / imagen.height);
+        const anchoLogo = imagen.width * escala;
+        altoLogo = imagen.height * escala;
+        doc.image(imagen, this.izquierda, top + (cajaAlto - altoLogo) / 2, { width: anchoLogo, height: altoLogo });
+        xBarra = this.izquierda + anchoLogo + 10;
       } catch {
         // Logo ilegible: el documento sigue sin logo.
+        altoLogo = 0;
       }
     }
+    const xTexto = xBarra + 3 + 10;
     const anchoTexto = anchoIzquierda - (xTexto - this.izquierda);
+    doc.save();
+    doc.rect(xBarra, top + 4, 3, cajaAlto - 8).fill(COLOR.acento);
+    doc.restore();
 
     let y = top + 6;
     this.estilo('Helvetica-Bold', 14, COLOR.marca);
@@ -331,14 +335,14 @@ class DibujoProforma {
 
     // Recuadro "R.U.C. / PROFORMA / código" al estilo de los documentos peruanos.
     doc.save();
-    doc.rect(cajaX, top + 30, cajaAncho, 23).fill(COLOR.marca);
-    doc.rect(cajaX, top + 53, cajaAncho, 2.5).fill(COLOR.acento);
+    doc.rect(cajaX + 0.8, top + 30, cajaAncho - 1.6, 23).fill(COLOR.marca);
+    doc.rect(cajaX + 0.8, top + 53, cajaAncho - 1.6, 2.2).fill(COLOR.acento);
     doc.restore();
     doc.save();
-    doc.lineWidth(1.3).strokeColor(COLOR.marca).roundedRect(cajaX, top, cajaAncho, cajaAlto, 5).stroke();
+    doc.lineWidth(1.6).strokeColor(COLOR.acento).roundedRect(cajaX, top, cajaAncho, cajaAlto, 5).stroke();
     doc.restore();
 
-    this.estilo('Helvetica-Bold', 11, COLOR.texto);
+    this.estilo('Helvetica-Bold', 11, COLOR.marca);
     this.linea(`R.U.C. ${textoPdf(this.d.emisor?.ruc) || '—'}`, cajaX, top + 11, cajaAncho, 'center');
     // Centrado manual incluyendo el espaciado entre letras.
     this.estilo('Helvetica-Bold', 12.5, COLOR.blanco);
@@ -348,7 +352,7 @@ class DibujoProforma {
       characterSpacing: 2,
     });
 
-    this.estilo('Helvetica-Bold', 15, COLOR.marca);
+    this.estilo('Helvetica-Bold', 16, COLOR.acentoTexto);
     const codigo = this.recortar(this.codigo, cajaAncho - 12);
     this.linea(codigo, cajaX, top + 63, cajaAncho, 'center');
 
@@ -434,14 +438,14 @@ class DibujoProforma {
     const top = this.y;
 
     doc.save();
-    doc.lineWidth(0.8).fillColor(COLOR.fondo).strokeColor(COLOR.linea)
+    doc.lineWidth(1).fillColor(COLOR.acentoSuave).strokeColor(COLOR.acentoClaro)
       .roundedRect(this.izquierda, top, this.ancho, alto, 5).fillAndStroke();
     doc.restore();
     const xDerecha = this.izquierda + pad + colAncho + separacion;
     doc.save();
     doc.moveTo(xDerecha - separacion / 2, top + pad)
       .lineTo(xDerecha - separacion / 2, top + alto - pad)
-      .lineWidth(0.6).strokeColor(COLOR.linea).stroke();
+      .lineWidth(0.6).strokeColor(COLOR.acentoClaro).stroke();
     doc.restore();
 
     const dibujarColumna = (
@@ -452,13 +456,13 @@ class DibujoProforma {
     ) => {
       let y = top + pad;
       doc.save();
-      doc.rect(x, y + 0.5, 3, 7).fill(COLOR.acento);
+      doc.rect(x, y + 0.5, 4, 7.5).fill(COLOR.acento);
       doc.restore();
-      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(COLOR.marca);
-      doc.text(titulo, x + 8, y, { lineBreak: false, characterSpacing: 0.8 });
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(COLOR.acentoTexto);
+      doc.text(titulo, x + 9, y, { lineBreak: false, characterSpacing: 0.8 });
       y += altoTitulo;
       for (const fila of bloque) {
-        this.estilo('Helvetica-Bold', 8, COLOR.gris);
+        this.estilo('Helvetica-Bold', 8, COLOR.marca);
         this.linea(`${fila.etiqueta}:`, x, y + 0.5);
         const esAviso = fila.etiqueta === 'Estado' && aviso;
         this.estilo(
@@ -489,7 +493,7 @@ class DibujoProforma {
     const alto = 20;
     doc.save();
     doc.rect(this.izquierda, this.y, this.ancho, alto).fill(COLOR.marca);
-    doc.rect(this.izquierda, this.y + alto, this.ancho, 1.6).fill(COLOR.acento);
+    doc.rect(this.izquierda, this.y + alto, this.ancho, 2.4).fill(COLOR.acento);
     doc.restore();
     this.estilo('Helvetica-Bold', 8, COLOR.blanco);
     let x = this.izquierda;
@@ -497,7 +501,7 @@ class DibujoProforma {
       this.linea(col.titulo, x + 5, this.y + 6.5, col.ancho - 10, col.alinear);
       x += col.ancho;
     }
-    this.y += alto + 1.6;
+    this.y += alto + 2.4;
   }
 
   /** Las columnas de importes son angostas: un monto muy grande se achica en vez de pisar a su vecina. */
@@ -533,7 +537,7 @@ class DibujoProforma {
     }
 
     items.forEach((item, indice) => {
-      this.estilo('Helvetica', tam, COLOR.texto);
+      this.estilo('Helvetica-Bold', tam, COLOR.texto);
       const lineasDesc = this.envolver(item.descripcion || 'Producto', anchoDescripcion);
       this.estilo('Helvetica', 8, COLOR.gris);
       const lineasSku = this.envolver(item.sku || '—', anchoCodigo);
@@ -570,7 +574,8 @@ class DibujoProforma {
 
       let x = this.izquierda;
       for (const col of this.columnas) {
-        if (col.clave === 'importe') this.estilo('Helvetica-Bold', tam, COLOR.texto);
+        if (col.clave === 'importe' || col.clave === 'descripcion' || col.clave === 'cantidad')
+          this.estilo('Helvetica-Bold', tam, COLOR.texto);
         else if (col.clave === 'codigo') this.estilo('Helvetica', 8, COLOR.gris);
         else if (col.clave === 'descuento' && descuentoLinea >= 0.005) this.estilo('Helvetica', tam, COLOR.aviso);
         else this.estilo('Helvetica', tam, COLOR.texto);
@@ -583,10 +588,9 @@ class DibujoProforma {
       this.y = top + alto;
     });
 
-    // Cierre de la tabla con una línea del color de marca.
+    // Cierre de la tabla con una línea dorada de 1,2 pt.
     doc.save();
-    doc.moveTo(this.izquierda, this.y).lineTo(this.izquierda + this.ancho, this.y)
-      .lineWidth(1).strokeColor(COLOR.marca).stroke();
+    doc.rect(this.izquierda, this.y - 0.4, this.ancho, 1.2).fill(COLOR.acento);
     doc.restore();
     this.y += 8;
   }
@@ -650,16 +654,18 @@ class DibujoProforma {
         doc.restore();
       }
       const esAhorro = etiqueta === 'Descuento aplicado';
-      this.estilo('Helvetica', 8.5, esAhorro ? COLOR.aviso : COLOR.gris);
+      this.estilo('Helvetica', 8.5, esAhorro ? COLOR.aviso : COLOR.texto);
       this.linea(etiqueta, xTot + 10, y + 5.5);
-      this.estilo('Helvetica', 9, esAhorro ? COLOR.aviso : COLOR.texto);
+      this.estilo('Helvetica-Bold', 9, esAhorro ? COLOR.aviso : COLOR.texto);
       this.linea(formatearSoles(valor), xTot, y + 5, anchoTot - 10, 'right');
     });
 
     const yTotal = top + altoFilas;
     doc.save();
     doc.rect(xTot, yTotal, anchoTot, altoTotal).fill(COLOR.marca);
-    doc.rect(xTot, yTotal, 3.5, altoTotal).fill(COLOR.acento);
+    doc.restore();
+    doc.save();
+    doc.lineWidth(1.2).strokeColor(COLOR.acento).rect(xTot + 0.6, yTotal + 0.6, anchoTot - 1.2, altoTotal - 1.2).stroke();
     doc.restore();
     this.estilo('Helvetica-Bold', 10.5, COLOR.blanco);
     this.linea('TOTAL', xTot + 14, yTotal + 8.5);
@@ -669,9 +675,9 @@ class DibujoProforma {
     // Monto en letras.
     const ySon = yTotal + altoTotal + 8;
     doc.save();
-    doc.lineWidth(0.6).fillColor(COLOR.acentoSuave).strokeColor(COLOR.linea)
+    doc.lineWidth(0.6).fillColor(COLOR.acentoSuave).strokeColor(COLOR.acentoClaro)
       .roundedRect(this.izquierda, ySon, this.ancho, altoSon, 4).fillAndStroke();
-    doc.rect(this.izquierda, ySon + 0.6, 3.5, altoSon - 1.2).fill(COLOR.acento);
+    doc.rect(this.izquierda, ySon, 3, altoSon).fill(COLOR.acento);
     doc.restore();
     this.estilo('Helvetica-Bold', 8.5, COLOR.texto);
     lineasSon.forEach((l, i) => this.linea(l, this.izquierda + 14, ySon + 6.5 + i * this.interlineado(8.5)));
@@ -758,15 +764,16 @@ class DibujoProforma {
 
   // ── Observaciones y condiciones ─────────────────────────────────
 
+  /** Título de sección único (estilo B): barrita dorada de 4 pt y texto doradoOscuro en negrita. */
   private tituloSeccion(titulo: string): void {
     this.doc.save();
-    this.doc.rect(this.izquierda, this.y + 0.5, 3, 8).fill(COLOR.acento);
+    this.doc.rect(this.izquierda, this.y + 0.5, 4, 8).fill(COLOR.acento);
     this.doc.restore();
-    this.estilo('Helvetica-Bold', 9, COLOR.marca);
-    this.linea(titulo.toUpperCase(), this.izquierda + 9, this.y);
+    this.estilo('Helvetica-Bold', 9, COLOR.acentoTexto);
+    this.linea(titulo.toUpperCase(), this.izquierda + 10, this.y);
     this.doc.save();
     this.doc.moveTo(this.izquierda, this.y + 14).lineTo(this.izquierda + this.ancho, this.y + 14)
-      .lineWidth(0.6).strokeColor(COLOR.linea).stroke();
+      .lineWidth(0.6).strokeColor(COLOR.acentoClaro).stroke();
     this.doc.restore();
     this.y += 19;
   }
@@ -849,8 +856,8 @@ class DibujoProforma {
       this.y = top + altoCaja + 8;
     }
 
-    this.estilo('Helvetica-Oblique', 8.5, COLOR.gris);
-    this.linea('Gracias por su preferencia.', this.izquierda, this.y, this.ancho, 'center');
+    this.estilo('Helvetica-Bold', 9, COLOR.acentoTexto);
+    this.linea(MENSAJE_PIE_DOCUMENTO, this.izquierda, this.y, this.ancho, 'center');
     this.y += this.interlineado(8.5);
   }
 
@@ -884,8 +891,7 @@ class DibujoProforma {
 
       const yLinea = doc.page.height - MARGEN - ALTO_PIE + 10;
       doc.save();
-      doc.moveTo(this.izquierda, yLinea).lineTo(this.izquierda + this.ancho, yLinea)
-        .lineWidth(0.6).strokeColor(COLOR.linea).stroke();
+      doc.rect(this.izquierda, yLinea - 0.4, this.ancho, 0.8).fill(COLOR.acento);
       doc.restore();
 
       const pagina = `Página ${i + 1} de ${rango.count}`;

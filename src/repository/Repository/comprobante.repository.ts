@@ -154,6 +154,17 @@ export interface GuiaEnlazada {
   fecha_emision: string | null;
 }
 
+/** Datos de la representación impresa que no están en el comprobante (plan DO §2: M4, M5, M6, M8). */
+export interface ExtrasImpresion {
+  /** «Nombre Apellido» del usuario que registró el comprobante (o la venta). */
+  atendido_por: string | null;
+  /** Sucursal (o, si no hay, almacén) de la venta. */
+  sucursal: string | null;
+  /** Fecha de la respuesta de SUNAT del último envío, solo si el comprobante está aceptado (ISO). */
+  aceptado_en: string | null;
+  pagos: { metodo: string; monto: number; monto_recibido: number | null; vuelto: number | null }[];
+}
+
 /** Columnas que la entidad no mapea y que el código usa solo si existen (fase 9, 12 y 14). */
 const COLUMNAS_OPCIONALES: Readonly<Record<string, readonly string[]>> = {
   comprobantes: [
@@ -453,6 +464,62 @@ export class ComprobanteRepository {
       aceptada_sunat: f.aceptada_sunat === true || f.aceptada_sunat === 't',
       motivo: textoONulo(f.motivo),
     }));
+  }
+
+  /**
+   * Extras de la representación impresa (sin DDL): usuario, sucursal/almacén, pagos de la venta y fecha de
+   * aceptación. Las columnas que pueden no existir en instalaciones viejas se leen por `to_jsonb`.
+   */
+  async extrasImpresion(id_comprobante: number): Promise<ExtrasImpresion> {
+    const conRespuesta = await this.tieneColumnas('fiscal_envios.fecha_respuesta');
+    const filas: any[] = await this.dataSource.query(
+      `SELECT NULLIF(TRIM(CONCAT_WS(' ', u.nombre, u.apellido_paterno)), '') AS atendido_por,
+              COALESCE(NULLIF(TRIM(s.nombre), ''), NULLIF(TRIM(a.nombre), '')) AS sucursal,
+              ${conRespuesta
+                ? `CASE WHEN COALESCE(c.aceptada_sunat, FALSE) THEN e.fecha_respuesta END AS aceptado_en`
+                : 'NULL::timestamptz AS aceptado_en'}
+         FROM comprobantes c
+        CROSS JOIN LATERAL (SELECT to_jsonb(c) AS j) xc
+         LEFT JOIN ventas v ON v.id_venta = c.id_venta
+         LEFT JOIN LATERAL (SELECT to_jsonb(v) AS j) xv ON TRUE
+         LEFT JOIN cajas cj ON cj.id_caja = NULLIF(xv.j ->> 'id_caja', '')::int
+         LEFT JOIN LATERAL (SELECT to_jsonb(cj) AS j) xcj ON TRUE
+         LEFT JOIN usuarios u
+           ON u.id_usuario = COALESCE(NULLIF(xc.j ->> 'id_usuario', '')::int, NULLIF(xv.j ->> 'id_usuario', '')::int)
+         LEFT JOIN almacenes a
+           ON a.id_almacen = COALESCE(NULLIF(xv.j ->> 'id_almacen', '')::int, NULLIF(xcj.j ->> 'id_almacen', '')::int)
+         LEFT JOIN sucursales s
+           ON s.id_sucursal = COALESCE(NULLIF(xc.j ->> 'id_sucursal', '')::int,
+                                       NULLIF(xcj.j ->> 'id_sucursal', '')::int,
+                                       NULLIF(to_jsonb(a) ->> 'id_sucursal', '')::int)
+         ${conRespuesta ? 'LEFT JOIN fiscal_envios e ON e.id_envio = c.id_envio_ultimo' : ''}
+        WHERE c.id_comprobante = $1`,
+      [id_comprobante],
+    );
+    const pagos: any[] = await this.dataSource.query(
+      `SELECT COALESCE(mp.nombre, '') AS metodo, vp.monto,
+              to_jsonb(vp) ->> 'monto_recibido' AS monto_recibido,
+              to_jsonb(vp) ->> 'vuelto'         AS vuelto
+         FROM comprobantes c
+         JOIN venta_pago vp ON vp.id_venta = c.id_venta
+         LEFT JOIN metodos_pago mp ON mp.id_metodo = vp.id_metodo
+        WHERE c.id_comprobante = $1
+        ORDER BY vp.id_metodo`,
+      [id_comprobante],
+    );
+    const f = filas[0] ?? {};
+    const aceptado = f.aceptado_en instanceof Date ? f.aceptado_en.toISOString() : textoONulo(f.aceptado_en);
+    return {
+      atendido_por: textoONulo(f.atendido_por),
+      sucursal: textoONulo(f.sucursal),
+      aceptado_en: aceptado,
+      pagos: pagos.map((p) => ({
+        metodo: String(p.metodo ?? ''),
+        monto: Number(p.monto ?? 0),
+        monto_recibido: numeroONulo(p.monto_recibido),
+        vuelto: numeroONulo(p.vuelto),
+      })),
+    };
   }
 
   /** Guías de remisión que llevan a este comprobante como documento relacionado. */

@@ -32,6 +32,21 @@ export const ROTULOS_PDF_A4 = {
   codigoProducto: ['Cód.'],
   pie: ['Página 1 de 1'],
   beta: ['PRUEBA SUNAT BETA - SIN VALIDEZ TRIBUTARIA'],
+  /**
+   * Plan «Documentos oro y detalle» §2 (M1–M5, M7–M9): filas que salen solo si hay dato, cantidad de ítems,
+   * estado aceptado y pie. MISMA lista literal que `ROTULOS_DETALLE` del spec de la hoja (allá se compara sin
+   * distinguir mayúsculas: la hoja pone las etiquetas en mayúsculas con CSS).
+   */
+  detalle: [
+    'HORA',
+    'CORREO',
+    'GUÍA DE REMISIÓN',
+    'ATENDIDO POR',
+    'SUCURSAL',
+    '1 ítem',
+    'Aceptado por SUNAT',
+    'Gracias por su preferencia',
+  ],
 } as const;
 
 /** Bytes 0x80-0x9F de WinAnsi que no coinciden con Latin-1. */
@@ -187,6 +202,30 @@ describe('paridad del PDF A4 con la hoja de la vista previa: rótulos fijos', ()
     expect(t).toMatch(/CLIENTE CLIENTES VARIOS/); // etiqueta del bloque (no «RAZÓN SOCIAL»: no hay RUC)
     expect(t).not.toContain('RAZÓN SOCIAL');
     expect(t).not.toContain('FECHA DE VENCIMIENTO');
+  });
+
+  it('más detalle (M1–M9): hora, correo, guía, atendido por, sucursal, ítems, aceptado y pie, solo si hay dato', async () => {
+    const con = textoDelPdf(
+      await generarA4(
+        factura({
+          cliente: { ...factura().cliente, email: 'compras@spsa.pe' },
+          guiaRemision: 'T001-00000045',
+          atendidoPor: 'Ana Quispe',
+          sucursal: 'Tienda Cusco',
+          aceptadoSunat: { fecha: '21/10/2026 14:36' },
+        }),
+      ),
+    );
+    for (const rotulo of ROTULOS_PDF_A4.detalle) expect(con).toContain(rotulo);
+    expect(con).toContain('compras@spsa.pe');
+    expect(con).toContain('T001-00000045');
+    expect(con).toContain('Aceptado por SUNAT · 21/10/2026 14:36');
+
+    const sin = textoDelPdf(await generarA4(factura({ horaEmision: null })));
+    for (const rotulo of ['HORA', 'CORREO', 'GUÍA DE REMISIÓN', 'ATENDIDO POR', 'SUCURSAL', 'Aceptado por SUNAT'])
+      expect(sin).not.toContain(rotulo);
+    expect(sin).toContain('1 ítem');
+    expect(sin).toContain('Gracias por su preferencia');
   });
 
   it('sin firma electrónica el QR se reemplaza por la casilla de «no disponible»', async () => {

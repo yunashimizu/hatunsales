@@ -45,16 +45,28 @@ interface LienzoPdf {
   restore(): LienzoPdf;
 }
 
-/** Franja de marca en el borde superior de cada hoja A4: grafito con un tramo dorado. */
+/** Alto de la franja de marca: 7 pt de grafito + 1,2 pt de hilo dorado. */
+export const ALTO_FRANJA_MARCA = 8.2;
+
+/**
+ * Franja de marca en el borde superior de cada hoja A4 (estilo B «oro presente»): grafito de
+ * 7 pt con el primer tercio en dorado y, debajo, un hilo dorado de 1,2 pt a todo el ancho.
+ */
 export function dibujarFranjaMarca(doc: LienzoPdf): void {
+  const ancho = doc.page.width;
   doc
     .save()
-    .rect(0, 0, doc.page.width, 7)
+    .rect(0, 0, ancho, 7)
     .fill(PALETA.grafito)
-    .rect(0, 0, 96, 7)
+    .rect(0, 0, ancho / 3, 7)
+    .fill(PALETA.dorado)
+    .rect(0, 7, ancho, 1.2)
     .fill(PALETA.dorado)
     .restore();
 }
+
+/** Pie común de los documentos (comprobante A4 y ticket, proforma y guía); la hoja del front repite la cadena. */
+export const MENSAJE_PIE_DOCUMENTO = 'Gracias por su preferencia';
 
 /** "#3E403F" -> "FF3E403F" (formato ARGB que usa exceljs). */
 export function argb(hex: string): string {

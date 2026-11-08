@@ -1,6 +1,8 @@
 import {
   AVISO_BETA_PDF,
+  describirMedioPago,
   generarPdfComprobante,
+  textoCantidadItems,
   type DatosPdfComprobante,
   type ItemPdfComprobante,
 } from './comprobante-pdf';
@@ -266,7 +268,8 @@ describe('generarPdfComprobante', () => {
         '20610206337',
         'SUPERMERCADOS PERUANOS SOCIEDAD ANONIMA',
         '20100070970',
-        '21/10/2026 14:35:10',
+        '21/10/2026',
+        '14:35:10',
         'SOLES (PEN)',
         'CEMENTO SOL TIPO I 42.5 KG',
         'Op. gravada',
@@ -586,5 +589,24 @@ describe('generarPdfComprobante', () => {
       const ms = Number(process.hrtime.bigint() - inicio) / 1e6;
       expect(ms).toBeLessThan(300);
     }
+  });
+});
+
+describe('más detalle del comprobante (plan DO §2)', () => {
+  it('medio de pago con montos, recibido y vuelto (M6)', () => {
+    expect(
+      describirMedioPago([
+        { metodo: 'Efectivo', monto: 100, monto_recibido: 110, vuelto: 10 },
+        { metodo: 'Yape', monto: 40 },
+      ]),
+    ).toBe('Efectivo S/ 100.00 · Yape S/ 40.00 · Recibido S/ 110.00 · Vuelto S/ 10.00');
+    expect(describirMedioPago([{ metodo: 'Tarjeta', monto: 0 }])).toBe('Tarjeta');
+    expect(describirMedioPago([{ metodo: '', monto: 5 }])).toBe('');
+    expect(describirMedioPago(null)).toBe('');
+  });
+
+  it('cantidad de ítems en singular y plural (M7)', () => {
+    expect(textoCantidadItems(1)).toBe('1 ítem');
+    expect(textoCantidadItems(7)).toBe('7 ítems');
   });
 });

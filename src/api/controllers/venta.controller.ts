@@ -95,8 +95,8 @@ export class VentaController {
 
   /** Devuelve el comprobante calculado sin registrar la venta. */
   @Post('preview')
-  preview(@Body() body: CrearVentaRequest) {
-    return this.service.previsualizar(body);
+  preview(@Body() body: CrearVentaRequest, @UsuarioActual() usuario: UsuarioToken) {
+    return this.service.previsualizar(body, usuario);
   }
 
   @Post()

@@ -25,6 +25,7 @@ import {
   textoMultilinea,
   textoPlano,
   textoValidaHasta,
+  MENSAJE_PIE_DOCUMENTO,
 } from './proforma-documento';
 
 /**
@@ -42,6 +43,7 @@ const ARGB = {
   marca: argb(PALETA.grafito),
   acento: argb(PALETA.dorado),
   acentoClaro: argb(PALETA.doradoClaro),
+  acentoTexto: argb(PALETA.doradoOscuro),
   acentoSuave: argb(PALETA.doradoSuave),
   texto: argb(PALETA.texto),
   gris: argb(PALETA.gris),
@@ -72,6 +74,9 @@ const bordeCompleto: Partial<ExcelJS.Borders> = {
   bottom: bordeFino,
   right: bordeFino,
 };
+/** Estilo B: cajas suaves (datos del cliente y de la proforma) con borde doradoClaro. */
+const bordeOro: Partial<ExcelJS.Border> = { style: 'thin', color: { argb: ARGB.acentoClaro } };
+const bordeCompletoOro: Partial<ExcelJS.Borders> = { top: bordeOro, left: bordeOro, bottom: bordeOro, right: bordeOro };
 
 function relleno(color: string): ExcelJS.Fill {
   return { type: 'pattern', pattern: 'solid', fgColor: { argb: color } };
@@ -201,9 +206,10 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
 
   // Recuadro de la derecha (G:H).
   for (const r of [r1, r2, r3, r4]) combinar('G', ULTIMA, r);
-  const bordeCaja = { style: 'medium' as const, color: { argb: ARGB.marca } };
+  // Estilo B: recuadro con marco dorado y serie en doradoOscuro.
+  const bordeCaja = { style: 'medium' as const, color: { argb: ARGB.acento } };
   poner(`G${r1}`, ruc ? `R.U.C. ${ruc}` : '', {
-    font: fuente({ bold: true, size: 11 }),
+    font: fuente({ bold: true, size: 11, color: { argb: ARGB.marca } }),
     alignment: { vertical: 'middle', horizontal: 'center' },
     border: { top: bordeCaja, left: bordeCaja, right: bordeCaja },
   });
@@ -214,7 +220,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     border: { left: bordeCaja, right: bordeCaja },
   });
   poner(`G${r3}`, codigo, {
-    font: fuente({ bold: true, size: 15, color: { argb: ARGB.marca } }),
+    font: fuente({ bold: true, size: 16, color: { argb: ARGB.acentoTexto } }),
     alignment: { vertical: 'middle', horizontal: 'center' },
     border: { top: { style: 'medium', color: { argb: ARGB.acento } }, left: bordeCaja, right: bordeCaja },
   });
@@ -253,14 +259,14 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   combinar('E', ULTIMA, rTitulo);
   for (const [celda, titulo] of [['A', 'DATOS DEL CLIENTE'], ['E', 'DATOS DE LA PROFORMA']]) {
     poner(`${celda}${rTitulo}`, titulo, {
-      font: fuente({ bold: true, size: 9, color: { argb: ARGB.marca } }),
+      font: fuente({ bold: true, size: 9, color: { argb: ARGB.acentoTexto } }),
       fill: relleno(ARGB.acentoSuave),
       alignment: { vertical: 'middle', indent: 1 },
-      border: { ...bordeCompleto, left: { style: 'medium', color: { argb: ARGB.acento } } },
+      border: { ...bordeCompletoOro, left: { style: 'thick', color: { argb: ARGB.acento } } },
     });
   }
   for (const c of [2, 3, 4, 6, 7, 8]) {
-    ws.getRow(rTitulo).getCell(c).border = bordeCompleto;
+    ws.getRow(rTitulo).getCell(c).border = bordeCompletoOro;
     ws.getRow(rTitulo).getCell(c).fill = relleno(ARGB.acentoSuave);
   }
 
@@ -292,15 +298,15 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     for (const [col, valor, esEtiqueta, resaltar] of celdas) {
       poner(`${col}${r}`, valor, {
         font: esEtiqueta
-          ? fuente({ bold: true, size: 9, color: { argb: ARGB.gris } })
+          ? fuente({ bold: true, size: 9, color: { argb: ARGB.marca } })
           : fuente({ bold: resaltar, color: { argb: resaltar ? colorEstado : ARGB.texto } }),
         alignment: { vertical: 'middle', wrapText: !esEtiqueta, indent: esEtiqueta ? 1 : 0 },
       });
     }
     for (let c = 1; c <= NUM_COLUMNAS; c++) {
       const celda = ws.getRow(r).getCell(c);
-      celda.fill = relleno(ARGB.fondo);
-      celda.border = bordeCompleto;
+      celda.fill = relleno(ARGB.acentoSuave);
+      celda.border = bordeCompletoOro;
     }
   }
   siguiente(10);
@@ -318,7 +324,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
         horizontal: izq ? 'left' : i === 0 || i === 2 ? 'center' : 'right',
         indent: i === 0 || i === 2 ? 0 : 1,
       },
-      border: { ...bordeCompleto, bottom: { style: 'medium', color: { argb: ARGB.acento } } },
+      border: { ...bordeCompleto, bottom: { style: 'thick', color: { argb: ARGB.acento } } },
     });
   });
 
@@ -356,7 +362,7 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
       const celda = ws.getRow(r).getCell(i + 1);
       celda.value = valor;
       celda.font = fuente({
-        bold: i === 7,
+        bold: i === 7 || i === 6 || i === 4,
         size: i === 1 ? 9 : 10,
         color: { argb: i === 1 ? ARGB.gris : i === 5 && descuentoLinea >= 0.005 ? ARGB.aviso : ARGB.texto },
       });
@@ -420,11 +426,14 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
       celdaEtiqueta.font = fuente({ bold: true, size: 12, color: { argb: ARGB.blanco } });
       celdaValor.font = fuente({ bold: true, size: 13, color: { argb: ARGB.acentoClaro } });
       for (let c = 6; c <= NUM_COLUMNAS; c++) ws.getRow(r).getCell(c).fill = relleno(ARGB.marca);
-      ws.getRow(r).getCell(6).border = { ...bordeCompleto, left: { style: 'thick', color: { argb: ARGB.acento } } };
+      // Estilo B: banda TOTAL con marco dorado.
+      const oro = { style: 'medium' as const, color: { argb: ARGB.acento } };
+      for (let c = 6; c <= NUM_COLUMNAS; c++)
+        ws.getRow(r).getCell(c).border = { top: oro, bottom: oro, left: c === 6 ? oro : undefined, right: c === NUM_COLUMNAS ? oro : undefined };
     } else {
       const color = tipo === 'ahorro' ? ARGB.aviso : undefined;
-      celdaEtiqueta.font = fuente({ color: { argb: color ?? ARGB.gris } });
-      celdaValor.font = fuente(color ? { color: { argb: color } } : {});
+      celdaEtiqueta.font = fuente({ color: { argb: color ?? ARGB.texto } });
+      celdaValor.font = fuente({ bold: true, color: { argb: color ?? ARGB.texto } });
     }
   });
   // Resumen a la izquierda (A:E), junto a los totales.
@@ -465,16 +474,16 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   for (let c = 1; c <= NUM_COLUMNAS; c++) {
     const celda = ws.getRow(rSon).getCell(c);
     celda.fill = relleno(ARGB.acentoSuave);
-    celda.border = bordeCompleto;
+    celda.border = bordeCompletoOro;
   }
-  ws.getRow(rSon).getCell(1).border = { ...bordeCompleto, left: { style: 'thick', color: { argb: ARGB.acento } } };
+  ws.getRow(rSon).getCell(1).border = { ...bordeCompletoOro, left: { style: 'thick', color: { argb: ARGB.acento } } };
 
   const titulo = (texto: string) => {
     siguiente(8);
     const t = siguiente(19);
     combinar('A', ULTIMA, t);
     poner(`A${t}`, texto.toUpperCase(), {
-      font: fuente({ bold: true, color: { argb: ARGB.marca } }),
+      font: fuente({ bold: true, color: { argb: ARGB.acentoTexto } }),
       alignment: { vertical: 'middle', indent: 1 },
       border: {
         left: { style: 'thick', color: { argb: ARGB.acento } },
@@ -589,8 +598,8 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
   siguiente(6);
   const rGracias = siguiente(16);
   combinar('A', ULTIMA, rGracias);
-  poner(`A${rGracias}`, 'Gracias por su preferencia.', {
-    font: fuente({ italic: true, color: { argb: ARGB.gris } }),
+  poner(`A${rGracias}`, MENSAJE_PIE_DOCUMENTO, {
+    font: fuente({ bold: true, color: { argb: ARGB.acentoTexto } }),
     alignment: { horizontal: 'center' },
   });
 
@@ -615,8 +624,8 @@ export async function generarProformaExcel(d: DatosProformaDocumento): Promise<B
     printTitlesRow: `${filaCabecera}:${filaCabecera}`,
   };
   ws.headerFooter = {
-    oddFooter: `&L&8${textoPie(`${razonSocial} · Proforma ${codigo}`)}&R&8Página &P de &N`,
-    evenFooter: `&L&8${textoPie(`${razonSocial} · Proforma ${codigo}`)}&R&8Página &P de &N`,
+    oddFooter: `&L&8${textoPie(`${razonSocial} · Proforma ${codigo}`)}&C&8${textoPie(MENSAJE_PIE_DOCUMENTO)}&R&8Página &P de &N`,
+    evenFooter: `&L&8${textoPie(`${razonSocial} · Proforma ${codigo}`)}&C&8${textoPie(MENSAJE_PIE_DOCUMENTO)}&R&8Página &P de &N`,
   };
 
   const contenido = await wb.xlsx.writeBuffer();

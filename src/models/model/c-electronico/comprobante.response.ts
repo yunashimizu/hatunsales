@@ -247,6 +247,20 @@ export interface ComprobanteDetalleResponse {
   puede_informar_por_resumen: boolean;
   /** Baja o resumen vigente del comprobante (en curso o aceptado); null si no tiene. */
   baja: LoteDeComprobante | null;
+  /** Representación impresa (plan DO §2): quien registró, sucursal/almacén, pagos y fecha de aceptación. */
+  atendido_por?: string | null;
+  sucursal?: string | null;
+  pagos_detalle?: PagoDetalleResponse[];
+  /** ISO; solo si SUNAT aceptó y el envío guardó la fecha de respuesta. */
+  aceptado_en?: string | null;
+}
+
+/** Pago de la venta tal como sale en «MEDIO DE PAGO» del comprobante. */
+export interface PagoDetalleResponse {
+  metodo: string;
+  monto: number;
+  monto_recibido?: number | null;
+  vuelto?: number | null;
 }
 
 export interface ItemPreviewResponse {
@@ -315,6 +329,10 @@ export interface PreviewComprobanteResponse {
   forma_pago?: 'Contado' | 'Credito';
   /** false si hoy la venta se registraría sin comprobante (el motivo va en `advertencias`). */
   emision_activa?: boolean;
+  /** Solo en la vista previa del POS: usuario de la sesión (fila ATENDIDO POR). */
+  atendido_por?: string | null;
+  /** Solo en la vista previa del POS y si hay medios elegidos: pagos con nombre y monto. */
+  pagos_detalle?: PagoDetalleResponse[];
   /** Aviso del ambiente (p. ej. «Prueba SUNAT BETA: sin validez tributaria»). */
   aviso?: string | null;
   /**

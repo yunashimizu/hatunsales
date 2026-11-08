@@ -37,6 +37,10 @@ const PARES: Array<[texto: ColorPaleta, fondo: ColorPaleta]> = [
   ['grisClaro', 'fondo'],
   ['doradoOscuro', 'blanco'],
   ['doradoOscuro', 'doradoSuave'],
+  // Estilo B «oro presente»: etiquetas grafito y valores en la caja doradoSuave (cliente/documento, SON).
+  ['grafito', 'doradoSuave'],
+  ['texto', 'doradoSuave'],
+  ['gris', 'doradoSuave'],
   ['aviso', 'blanco'],
   ['peligro', 'blanco'],
   // Texto claro sobre las bandas grafito (cabeceras de tabla, IMPORTE TOTAL, caja del documento).
