@@ -256,6 +256,8 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
       expect(bd.registro).toContain('COMMIT');
       expect(emision.enviarRegistrado).toHaveBeenCalledTimes(1);
       expect(emision.enviarRegistrado.mock.calls[0][0]).toBe(501);
+      // Nadie espera este envío: aguanta a SUNAT hasta el timeout del worker (30 s), no los 15 s del mostrador.
+      expect(emision.enviarRegistrado.mock.calls[0][2]).toEqual({ timeoutMs: 30000 });
       expect(respuesta).toMatchObject({
         id_comprobante: 900,
         serie: 'BB01',
@@ -297,6 +299,20 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
       expect(respuesta.error).toBeUndefined();
     });
 
+    it('la respuesta copia el tiempo de SUNAT del envío (tiempo_sunat_ms) cuando lo hay', async () => {
+      const bd = crearBdFalsa({ maximos: { BB01: [4] } });
+      const { servicio, emision } = crearMotor({ bd });
+      const original = emision.enviarRegistrado.getMockImplementation()!;
+      emision.enviarRegistrado.mockImplementationOnce(async (...args: unknown[]) => ({
+        ...(await (original as (...a: unknown[]) => Promise<Record<string, unknown>>)(...args)),
+        tiempo_sunat_ms: 2310,
+      }));
+
+      const respuesta = await servicio.generar(boleta());
+
+      expect(respuesta.tiempo_sunat_ms).toBe(2310);
+    });
+
     it('emisionDisponible informa si la emisión está activa y el motivo si no lo está', async () => {
       const { servicio, emision } = crearMotor({ bd: crearBdFalsa({}) });
       emision.modo.mockResolvedValueOnce({ activo: true, ambiente: 'beta' });
@@ -317,6 +333,8 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
         expect(respuesta.envio_diferido).toBeUndefined();
         expect(respuesta.aceptada_sunat).toBe(true);
         expect(bd.registro).toContain('enviar:501');
+        // El mostrador espera con su propio timeout (sin opciones: 15 s en el motor).
+        expect(emision.enviarRegistrado.mock.calls[0][2]).toBeUndefined();
       }
     });
 

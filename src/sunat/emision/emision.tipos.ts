@@ -49,8 +49,12 @@ export const ESTADOS_ENVIO_ABIERTOS: readonly EstadoSunat[] = ['ENVIANDO', 'PEND
 /** Reclamo de un envío mientras se habla con SUNAT: cubre el timeout (15 o 30 s) y el guardado de la respuesta. */
 export const SEGUNDOS_RECLAMO = 60;
 
-/** Espera hasta el siguiente reintento automático según los intentos ya hechos (D7): 2, 5, 15, 30 y 60 minutos. */
-export const ESPERA_REINTENTO_MINUTOS: readonly number[] = [2, 5, 15, 30, 60];
+/**
+ * Espera hasta el siguiente reintento automático según los intentos ya hechos (D7): 1, 3, 10, 30 y 60 minutos.
+ * Con la tarea cada 30 s, un envío que falló por red al primer intento vuelve a salir en 1–1,5 min.
+ * La comparten los lotes fiscales (RC/RA) para el reenvío de su ZIP.
+ */
+export const ESPERA_REINTENTO_MINUTOS: readonly number[] = [1, 3, 10, 30, 60];
 
 /**
  * Tras estos intentos sin una respuesta válida el envío pasa al reintento lento (ESPERA_LENTA_MINUTOS)

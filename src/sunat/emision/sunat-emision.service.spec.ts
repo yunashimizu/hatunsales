@@ -284,7 +284,7 @@ describe('SunatEmisionService: envío directo en BETA y PRODUCCIÓN (transporte 
     expect(transporte.enviar).not.toHaveBeenCalled();
     expect(resultado).toMatchObject({ estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', aceptado: false });
     expect(resultado.mensaje).toMatch(/no es del RUC emisor 20610206337/);
-    expect(envios.cierres[0].cierre.proximoIntentoMin).toBe(2);
+    expect(envios.cierres[0].cierre.proximoIntentoMin).toBe(1);
   });
 
   it('D4: un CDR de OTRO comprobante no se acepta; queda en EXCEPCION y se guarda para auditoría', async () => {
@@ -344,7 +344,7 @@ describe('SunatEmisionService: envío directo en BETA y PRODUCCIÓN (transporte 
     expect(eventos).toEqual([]);
   });
 
-  it('nunca repite sendBill por su cuenta: un timeout queda pendiente con espera de 2 minutos', async () => {
+  it('nunca repite sendBill por su cuenta: un timeout queda pendiente con espera de 1 minuto', async () => {
     const { servicio, envios, transporte } = crear();
     const doc = factura();
     const preparado = servicio.preparar(doc, material);
@@ -356,7 +356,7 @@ describe('SunatEmisionService: envío directo en BETA y PRODUCCIÓN (transporte 
     expect(transporte.enviar).toHaveBeenCalledTimes(1);
     expect(resultado).toMatchObject({ estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', codigo: 'ETIMEDOUT' });
     expect(resultado.archivos).toEqual(['xml_original', 'xml_firmado', 'zip']);
-    expect(envios.cierres[0].cierre.proximoIntentoMin).toBe(2);
+    expect(envios.cierres[0].cierre.proximoIntentoMin).toBe(1);
   });
 
   it('si otro proceso ya tomó el envío no se vuelve a mandar', async () => {
@@ -512,7 +512,7 @@ describe('SunatEmisionService.reintentar (D5.1, D5.2)', () => {
 
     expect(transporte.enviar.mock.calls.every((c) => c[0].soapAction === GET_STATUS_CDR)).toBe(true);
     expect(resultado).toMatchObject({ estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', codigo: 'ETIMEDOUT' });
-    expect(envios.cierres[0].cierre).toMatchObject({ sunat: null, proximoIntentoMin: 15 });
+    expect(envios.cierres[0].cierre).toMatchObject({ sunat: null, proximoIntentoMin: 10 });
   });
 
   it('boleta en producción: no hay getStatusCdr; reenvía el mismo ZIP', async () => {
@@ -637,7 +637,7 @@ describe('SunatEmisionService.reintentar (D5.1, D5.2)', () => {
     expect(transporte.enviar).not.toHaveBeenCalled();
   });
 
-  it('backoff 2-5-15-30-60 min y, tras 6 intentos dentro del plazo, sigue cada 60 min (no es un callejón)', async () => {
+  it('backoff 1-3-10-30-60 min y, tras 6 intentos dentro del plazo, sigue cada 60 min (no es un callejón)', async () => {
     const { servicio, envios, transporte } = crear();
     transporte.enviar.mockRejectedValue(new ErrorTransporteSoap('ETIMEDOUT', 'Tiempo agotado'));
     const doc = factura();
@@ -648,7 +648,7 @@ describe('SunatEmisionService.reintentar (D5.1, D5.2)', () => {
 
     await servicio.reintentar(conIntento(1).id_envio, 'tarea');
     await servicio.reintentar(conIntento(3).id_envio, 'tarea');
-    expect(envios.cierres.map((c) => c.cierre.proximoIntentoMin)).toEqual([5, 30]);
+    expect(envios.cierres.map((c) => c.cierre.proximoIntentoMin)).toEqual([3, 30]);
 
     const ultimo = await servicio.reintentar(conIntento(5).id_envio, 'tarea');
     expect(ultimo).toMatchObject({ estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR' });
@@ -1049,3 +1049,101 @@ describe('SunatEmisionService: respuestas reales del clasificador del núcleo', 
   });
 });
 
+
+describe('SunatEmisionService: timeout del primer envío y tiempos de SUNAT (A1/A5)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  function preparadoBeta(servicio: SunatEmisionService, envios: EnviosMemoria) {
+    const doc = factura('FB01', 77);
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'beta', documento: doc, preparado });
+    return { doc, preparado, envio };
+  }
+
+  it('sin opciones el cliente SOAP espera 15 s (mostrador); con timeoutMs del worker espera 30 s', async () => {
+    const crearCliente = jest.spyOn(FabricaClienteSoapSunat.prototype, 'crear');
+    const { servicio, envios, transporte } = crear();
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    transporte.enviar.mockImplementation(async () => ({ estadoHttp: 200, cuerpo: respuestaSendBill(cdrDe(factura('FB01', 77))) }));
+
+    const mostrador = preparadoBeta(servicio, envios);
+    await servicio.enviar(mostrador.envio.id_envio, { ambiente: 'beta', documento: mostrador.doc, preparado: mostrador.preparado });
+    expect(crearCliente).toHaveBeenLastCalledWith(expect.objectContaining({ timeoutMs: 15_000 }));
+
+    const fondo = preparadoBeta(servicio, envios);
+    await servicio.enviar(fondo.envio.id_envio, { ambiente: 'beta', documento: fondo.doc, preparado: fondo.preparado }, { timeoutMs: 30_000 });
+    expect(crearCliente).toHaveBeenLastCalledWith(expect.objectContaining({ timeoutMs: 30_000 }));
+  });
+
+  it('el timeout pedido se acota a 1–120 s, como el cliente SOAP', async () => {
+    const crearCliente = jest.spyOn(FabricaClienteSoapSunat.prototype, 'crear');
+    const { servicio, envios, transporte } = crear();
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    transporte.enviar.mockImplementation(async () => ({ estadoHttp: 200, cuerpo: respuestaSendBill(cdrDe(factura('FB01', 77))) }));
+
+    const largo = preparadoBeta(servicio, envios);
+    await servicio.enviar(largo.envio.id_envio, { ambiente: 'beta', documento: largo.doc, preparado: largo.preparado }, { timeoutMs: 999_999 });
+    expect(crearCliente).toHaveBeenLastCalledWith(expect.objectContaining({ timeoutMs: 120_000 }));
+    const corto = preparadoBeta(servicio, envios);
+    await servicio.enviar(corto.envio.id_envio, { ambiente: 'beta', documento: corto.doc, preparado: corto.preparado }, { timeoutMs: 10 });
+    expect(crearCliente).toHaveBeenLastCalledWith(expect.objectContaining({ timeoutMs: 1_000 }));
+  });
+
+  it('la prueba del panel (emitirPrueba) espera a SUNAT con el timeout del worker (30 s)', async () => {
+    const crearCliente = jest.spyOn(FabricaClienteSoapSunat.prototype, 'crear');
+    const { servicio, transporte } = crear();
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const doc = factura('FB01', 78);
+    transporte.enviar.mockResolvedValueOnce({ estadoHttp: 200, cuerpo: respuestaSendBill(cdrDe(doc)) });
+
+    await servicio.emitirPrueba(doc, material, 4);
+
+    expect(crearCliente).toHaveBeenLastCalledWith(expect.objectContaining({ ambiente: 'beta', timeoutMs: 30_000 }));
+  });
+
+  it('devuelve tiempo_sunat_ms y deja UNA línea de log con SUNAT, total, estado y origen (sin credenciales)', async () => {
+    const { servicio, envios, transporte, reloj } = crear();
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const { doc, preparado, envio } = preparadoBeta(servicio, envios);
+    transporte.enviar.mockImplementationOnce(async () => {
+      reloj.momento = new Date(reloj.momento.getTime() + 2_300);
+      return { estadoHttp: 200, cuerpo: respuestaSendBill(cdrDe(doc)) };
+    });
+
+    const resultado = await servicio.enviar(envio.id_envio, { ambiente: 'beta', documento: doc, preparado });
+
+    expect(typeof resultado.tiempo_sunat_ms).toBe('number');
+    expect(resultado.tiempo_sunat_ms).toBe(envios.cierres[0].cierre.sunat?.tiempoMs);
+    const lineas = log.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith(`Envío ${envio.id_envio} `));
+    expect(lineas).toHaveLength(1);
+    expect(lineas[0]).toMatch(new RegExp(`^Envío ${envio.id_envio} ${preparado.nombreBase} \\(beta\\): SUNAT \\d+ ms, total 2300 ms, ACEPTADO, origen envio$`));
+    expect(lineas[0]).not.toContain('MODDATOS');
+  });
+
+  it('un reintento también se mide (origen tarea)', async () => {
+    const { servicio, envios, transporte } = crear();
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const doc = factura('FB01', 79);
+    const preparado = servicio.preparar(doc, material);
+    const envio = envios.agregar({ ambiente: 'beta', documento: doc, preparado, estado: 'PENDIENTE_REENVIO', accion: 'REINTENTAR', libre: true });
+    transporte.enviar.mockResolvedValueOnce({ estadoHttp: 200, cuerpo: respuestaSendBill(cdrDe(doc)) });
+
+    await servicio.reintentar(envio.id_envio, 'tarea');
+
+    const lineas = log.mock.calls.map((c) => String(c[0]));
+    expect(lineas.some((l) => new RegExp(`^Envío ${envio.id_envio} .*: SUNAT \\d+ ms, total \\d+ ms, ACEPTADO, origen tarea$`).test(l))).toBe(true);
+  });
+
+  it('cerrado sin llamar a SUNAT (emisión detenida): tiempo_sunat_ms null y el log dice «sin respuesta»', async () => {
+    const { servicio, envios, transporte, bloqueos } = crear();
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const { doc, preparado, envio } = preparadoBeta(servicio, envios);
+    bloqueos.beta = { codigo: '0102', motivo: 'Clave SOL rechazada.', fecha: '2026-10-13' };
+
+    const resultado = await servicio.enviar(envio.id_envio, { ambiente: 'beta', documento: doc, preparado });
+
+    expect(transporte.enviar).not.toHaveBeenCalled();
+    expect(resultado.tiempo_sunat_ms).toBeNull();
+    expect(log.mock.calls.map((c) => String(c[0]))).toContainEqual(expect.stringMatching(/: SUNAT sin respuesta, total \d+ ms, PENDIENTE_REENVIO, origen envio$/));
+  });
+});

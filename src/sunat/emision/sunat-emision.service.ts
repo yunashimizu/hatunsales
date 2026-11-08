@@ -65,6 +65,22 @@ export interface ResultadoPruebaCredenciales {
   tiempo_ms: number;
 }
 
+/** Opciones del primer envío. */
+export interface OpcionesEnvio {
+  /**
+   * Tiempo máximo de espera a SUNAT. Por omisión TIMEOUT_POS_MS (15 s, el mostrador espera); el envío en
+   * segundo plano y la prueba del panel usan TIMEOUT_WORKER_MS (30 s). Se acota a 1–120 s.
+   */
+  timeoutMs?: number;
+}
+
+/** Tiempo de espera del primer envío, acotado igual que el cliente SOAP. */
+function timeoutDe(opciones?: OpcionesEnvio): number {
+  const pedido = Number(opciones?.timeoutMs);
+  if (!Number.isFinite(pedido)) return TIMEOUT_POS_MS;
+  return Math.min(120_000, Math.max(1_000, Math.trunc(pedido)));
+}
+
 /** Quién pide un reintento manual y si lo fuerza (un envío en EXCEPCION solo lo reintenta un administrador). */
 export interface OpcionesReintentoManual {
   /** Reintenta aunque el envío esté en EXCEPCION. El controlador solo lo permite al rol administrador. */
@@ -134,6 +150,8 @@ function resumen(respuesta: RespuestaSunat): Omit<RespuestaSunat, 'cdrZip' | 'cd
 @Injectable()
 export class SunatEmisionService {
   private readonly logger = new Logger(SunatEmisionService.name);
+  /** Inicio (ms) de cada envío o reintento en curso en este proceso, para el log de tiempos. */
+  private readonly inicios = new Map<number, number>();
 
   constructor(
     private readonly envios: EnvioFiscalRepository,
@@ -190,7 +208,11 @@ export class SunatEmisionService {
   }
 
   /** Primer envío de un envío registrado (después del COMMIT del negocio). */
-  async enviar(idEnvio: number, enMemoria?: EnvioEnMemoria): Promise<ResultadoEmision> {
+  async enviar(idEnvio: number, enMemoria?: EnvioEnMemoria, opciones?: OpcionesEnvio): Promise<ResultadoEmision> {
+    return this.cronometrado(idEnvio, () => this.enviarSinMedir(idEnvio, enMemoria, opciones));
+  }
+
+  private async enviarSinMedir(idEnvio: number, enMemoria?: EnvioEnMemoria, opciones?: OpcionesEnvio): Promise<ResultadoEmision> {
     const envio = await this.envios.reclamarPrimerEnvio(idEnvio, !enMemoria);
     if (!envio) {
       const actual = await this.envios.leer(idEnvio);
@@ -205,10 +227,13 @@ export class SunatEmisionService {
     if (!documento || !zip) {
       return this.cerrar(envio, documento ?? null, this.sinDatos(), 'envio');
     }
-    return this.enviarZip(envio, documento, zip, 'envio', TIMEOUT_POS_MS);
+    return this.enviarZip(envio, documento, zip, 'envio', timeoutDe(opciones));
   }
 
-  /** Comprobante de prueba del panel (BETA): sin comprobante comercial, con su propio número. */
+  /**
+   * Comprobante de prueba del panel (BETA): sin comprobante comercial, con su propio número. Espera hasta
+   * TIMEOUT_WORKER_MS: el administrador prefiere esperar 30 s a recibir un «no respondió» a los 15.
+   */
   async emitirPrueba(documento: DocumentoCpe, material: MaterialFirma, idUsuario: number | null): Promise<ResultadoEmision> {
     if (!material.ruc || material.ruc !== documento.emisor?.ruc) {
       throw new FiscalConfigError(
@@ -218,7 +243,7 @@ export class SunatEmisionService {
     }
     const preparado = this.preparar(documento, material);
     const idEnvio = await this.transacciones.ejecutar((tx) => this.registrar(tx, 'beta', documento, preparado, null, idUsuario));
-    return this.enviar(idEnvio, { ambiente: 'beta', documento, preparado });
+    return this.enviar(idEnvio, { ambiente: 'beta', documento, preparado }, { timeoutMs: TIMEOUT_WORKER_MS });
   }
 
   /**
@@ -229,6 +254,14 @@ export class SunatEmisionService {
     idEnvio: number,
     origen: 'reintento' | 'tarea' = 'reintento',
     opciones: OpcionesReintentoManual = {},
+  ): Promise<ResultadoEmision> {
+    return this.cronometrado(idEnvio, () => this.reintentarSinMedir(idEnvio, origen, opciones));
+  }
+
+  private async reintentarSinMedir(
+    idEnvio: number,
+    origen: 'reintento' | 'tarea',
+    opciones: OpcionesReintentoManual,
   ): Promise<ResultadoEmision> {
     const forzar = origen === 'reintento' && opciones.forzar === true;
     const actual = await this.envios.leer(idEnvio);
@@ -328,7 +361,7 @@ export class SunatEmisionService {
     if (!envio) {
       throw new FiscalConfigError('FISCAL_ENVIO_EN_CURSO', 'El comprobante se está enviando o consultando ahora mismo; actualice en unos segundos.');
     }
-    const resultado = await this.consultarYCerrarRecuperacion(envio, documento);
+    const resultado = await this.cronometrado(idEnvio, () => this.consultarYCerrarRecuperacion(envio, documento));
     // Solo la pedida por una persona (botón «Recuperar CDR»); las consultas internas del sistema no llevan actor.
     if (opciones.actor) await this.auditarCdrRecuperado(actual, resultado, opciones.actor);
     return resultado;
@@ -490,6 +523,19 @@ export class SunatEmisionService {
   }
 
   // ── Interno ──────────────────────────────────────────────────────────────
+
+  /**
+   * Mide el envío o reintento completo (desde antes de reclamarlo hasta guardar la respuesta) para la línea
+   * de log de cerrar(): «total − SUNAT» es lo que tarda el sistema (BD, firma, red hasta la BD).
+   */
+  private async cronometrado(idEnvio: number, trabajo: () => Promise<ResultadoEmision>): Promise<ResultadoEmision> {
+    this.inicios.set(idEnvio, this.reloj.ms());
+    try {
+      return await trabajo();
+    } finally {
+      this.inicios.delete(idEnvio);
+    }
+  }
 
   /** Manda el ZIP ya reclamado (primer envío o reintento) con las credenciales de SU ambiente. */
   private async enviarZip(
@@ -829,8 +875,25 @@ export class SunatEmisionService {
       const actual = await this.envios.leer(envio.id_envio);
       return this.resultadoActual(actual ?? envio, 'El envío ya tenía un resultado de SUNAT; se conservó.');
     }
+    this.registrarTiempos(envio, cierre, origen);
     await this.avisar(envio, cerrado, cierre.estado, origen);
     return this.resultado(envio, documento, cierre, [...cerrado.archivos, ...(cierre.cdr?.xml ? ['cdr_xml'] : []), ...(cierre.cdr?.zip?.length ? ['cdr_zip'] : [])]);
+  }
+
+  /**
+   * Una línea por envío cerrado: cuánto tardó SUNAT y cuánto el envío completo. Sin datos sensibles (solo el
+   * identificador RUC-TT-SERIE-NÚMERO, que va en el nombre del ZIP). Si «total − SUNAT» pasa de ~300 ms a
+   * menudo, la demora es del sistema (BD/red), no de SUNAT.
+   */
+  private registrarTiempos(envio: EnvioRegistrado, cierre: CierreEnvio, origen: OrigenEnvio): void {
+    const inicio = this.inicios.get(envio.id_envio);
+    const total = inicio === undefined ? null : Math.max(0, this.reloj.ms() - inicio);
+    const sunat = cierre.sunat?.tiempoMs;
+    this.logger.log(
+      `Envío ${envio.id_envio} ${envio.nombre_base} (${envio.ambiente}): `
+        + `SUNAT ${typeof sunat === 'number' ? `${sunat} ms` : 'sin respuesta'}, total ${total === null ? '?' : `${total} ms`}, `
+        + `${cierre.estado}, origen ${origen}`,
+    );
   }
 
   private async avisar(envio: EnvioRegistrado, cerrado: EnvioCerrado, estado: EstadoSunat, origen: OrigenEnvio): Promise<void> {
@@ -952,6 +1015,7 @@ export class SunatEmisionService {
       serie: documento?.serie,
       numero: documento?.numero,
       fecha_limite_envio: envio.fecha_limite_envio,
+      tiempo_sunat_ms: typeof cierre.sunat?.tiempoMs === 'number' ? cierre.sunat.tiempoMs : null,
     };
   }
 

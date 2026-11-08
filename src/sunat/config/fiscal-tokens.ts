@@ -41,6 +41,9 @@ export const PROBADOR_ENVIO_GRE = Symbol('PROBADOR_ENVIO_GRE');
 /** Cola, plazos y último envío para GET /fiscal/estado (módulo de documentos y tareas). */
 export const FUENTE_ESTADO_OPERATIVO_FISCAL = Symbol('FUENTE_ESTADO_OPERATIVO_FISCAL');
 
+/** Documento de la prueba de envío en BETA: uno solo o «todos» (factura → boleta → NC → ND en serie). */
+export type TipoCpePrueba = '01' | '03' | '07' | '08' | 'todos';
+
 export interface PasoPruebaFiscal {
   /** 'esquema' | 'cifrado' | 'certificado' | 'firma' | 'credenciales' | 'conexion' | 'respuesta' | 'envio' | … */
   paso: string;
@@ -52,12 +55,26 @@ export interface PasoPruebaFiscal {
   observaciones?: Array<{ codigo: string; descripcion: string }>;
   envio_id?: number;
   archivos?: Array<'xml_original' | 'xml_firmado' | 'zip' | 'cdr_xml' | 'cdr_zip'>;
+  /** Solo en los pasos que envían a SUNAT: qué documento se mandó (catálogo 01). */
+  documento?: '01' | '03' | '07' | '08';
+}
+
+/** Resumen de cada documento enviado en la prueba (con «todos», uno por cada uno de los cuatro). */
+export interface DocumentoPruebaEnviado {
+  tipo: '01' | '03' | '07' | '08';
+  /** true = aceptado; false = rechazado o sin respuesta; null = no se intentó (la factura base no fue aceptada). */
+  ok: boolean | null;
+  codigo: string | null;
+  /** Lo que tardó SUNAT en responder (ms); null si no respondió o no se envió. */
+  tiempo_ms: number | null;
+  envio_id: number | null;
+  detalle: string;
 }
 
 export interface ContextoPruebaEnvio {
   ambiente: AmbienteFiscal;
   documento: 'cpe' | 'gre';
-  tipoCpe?: '01' | '03' | '07' | '08';
+  tipoCpe?: TipoCpePrueba;
   material: MaterialFirma;
   emisor: EmisorFiscal;
   /** Siempre presente para cpe; para gre viene dentro de credencialesGre. */

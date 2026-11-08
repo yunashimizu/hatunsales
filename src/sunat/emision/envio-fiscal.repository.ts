@@ -82,7 +82,7 @@ const FILTRO_CPE = `t.operacion = 'emitir' AND t.tipo_documento IN ('01', '03', 
 const COLUMNAS_VISTA = `
   t.id_envio, t.ambiente, t.tipo_documento, t.nombre_archivo, t.estado, t.codigo_sunat, t.mensaje_sunat,
   t.respuesta_json #>> '{clasificacion,accion}' AS accion_sunat, t.id_comprobante, t.creado_en, t.actualizado_en,
-  t.intento, t.proximo_intento_en, t.bloqueado_hasta, t.ultimo_error,
+  t.intento, t.proximo_intento_en, t.bloqueado_hasta, t.ultimo_error, t.tiempo_ms,
   t.respuesta_json #>> '{documento,fechaEmision}' AS fecha_emision,
   t.respuesta_json #>> '{documento,serie}' AS serie,
   CASE WHEN (t.respuesta_json #>> '{documento,numero}') ~ '^[0-9]{1,9}$'
@@ -157,7 +157,15 @@ function aVista(fila: Record<string, any>): EnvioVista {
     actualizado_en: iso(fila.actualizado_en),
     ultimo_error: fila.ultimo_error ?? null,
     fecha_limite_envio: limiteDeEnvio(fila),
+    tiempo_ms: tiempoDe(fila.tiempo_ms),
   };
+}
+
+/** fiscal_envios.tiempo_ms (int; node-postgres lo entrega como número o texto) → ms o null. */
+function tiempoDe(valor: unknown): number | null {
+  if (valor === null || valor === undefined || valor === '') return null;
+  const ms = Number(valor);
+  return Number.isFinite(ms) && ms >= 0 ? Math.trunc(ms) : null;
 }
 
 /** Último día para enviar el comprobante por sendBill, calculado de su documento (null si el envío no lo conserva). */

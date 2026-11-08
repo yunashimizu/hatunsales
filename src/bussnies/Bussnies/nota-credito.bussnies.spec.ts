@@ -723,6 +723,47 @@ describe('NotaCreditoBussnies', () => {
     });
   });
 
+  describe('nota con envío diferido (fiscal_envio_diferido): «en curso», no fallo', () => {
+    const diferida = (solicitudes: SolicitudEmisionNotaCredito[], tx: unknown) => async (solicitud: SolicitudEmisionNotaCredito) => {
+      solicitudes.push(solicitud);
+      await solicitud.validarEnTransaccion(tx as never);
+      return {
+        id_comprobante: 70,
+        tipo_de_comprobante: 7,
+        serie: 'FC01',
+        numero: 2,
+        numero_formateado: 'FC01-00000002',
+        estado: 'pendiente',
+        estado_sunat: 'ENVIANDO',
+        aceptada_sunat: false,
+        envio_diferido: true,
+        sunat_description: 'FC01-00000002 quedó firmado y guardado; se está enviando a SUNAT.',
+      } as Record<string, unknown>;
+    };
+
+    it('anular la venta responde «anulación en curso» con el mensaje de la nota que se está enviando, sin aplicar efectos', async () => {
+      const { servicio, emisor, solicitudes, tx, repo } = crear();
+      emisor.emitirNotaCredito.mockImplementation(diferida(solicitudes, tx));
+
+      const resultado = await servicio.anularVenta(9, { motivo: 'El cliente desiste' }, 1);
+
+      expect(resultado).toMatchObject({ estado: 'anulacion_en_curso', anulada: false, nota: { estado: 'pendiente', aceptada_sunat: false } });
+      expect(resultado.nota).not.toHaveProperty('error');
+      expect(resultado.avisos[0]).toBe('La nota FC01-00000002 quedó firmada y se está enviando a SUNAT; la venta 9 se anula cuando SUNAT la acepte.');
+      expect(repo.marcarAnulados).not.toHaveBeenCalled();
+    });
+
+    it('el asistente (emitir) la informa en envío y deja los efectos para cuando SUNAT la acepte', async () => {
+      const { servicio, emisor, solicitudes, tx } = crear();
+      emisor.emitirNotaCredito.mockImplementation(diferida(solicitudes, tx));
+
+      const respuesta = await servicio.emitir(40, { motivo: '07', sustento: 'Devolución de un martillo', items: [{ id_item: 401, cantidad: 1 }] }, 3);
+
+      expect(respuesta).toMatchObject({ estado: 'pendiente', envio_diferido: true, efectos_aplicados: false });
+      expect(respuesta.avisos[0]).toBe('La nota FC01-00000002 quedó firmada y se está enviando a SUNAT: sus efectos se aplicarán cuando la acepte.');
+    });
+  });
+
   describe('anular venta: otros comprobantes, notas en envío y configuración ilegible', () => {
     it('c) los comprobantes que nunca valieron se anulan con la venta cuando SUNAT acepta la nota (el aviso no lo adelanta)', async () => {
       const { servicio, repo, tx } = crear();

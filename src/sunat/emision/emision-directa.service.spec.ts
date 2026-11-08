@@ -7,6 +7,7 @@ import { FiscalConfigError } from '../config/fiscal-errores';
 import type { FiscalConfigService } from '../config/fiscal-config.service';
 import type { SnapshotConfigFiscal } from '../config/fiscal-config.tipos';
 import type { FiscalEsquemaService } from '../config/fiscal-esquema.service';
+import { NotificadorCambiosFiscales } from '../config/notificador-cambios-fiscales';
 import type { TransaccionesFiscales } from '../config/transacciones-fiscales';
 import { boletaPrueba, EMISOR_PRUEBA, facturaPrueba, notaCreditoPrueba } from '../nucleo/pruebas/documentos-prueba-spec';
 import type { CredencialesSolService } from '../seguridad/credenciales-sol.service';
@@ -67,6 +68,7 @@ function crear(valores: Record<string, string> = EN_PRODUCCION, opciones: { mate
   const auditoria = { registrar: jest.fn(async () => undefined) };
   const tx = { query: jest.fn(async () => []) };
   const transacciones = { ejecutar: jest.fn(async (trabajo: (e: typeof tx) => Promise<unknown>) => trabajo(tx)) };
+  const notificador = new NotificadorCambiosFiscales();
   const servicio = new EmisionDirectaService(
     config as unknown as FiscalConfigService,
     configuraciones as unknown as RepositorioConfigFiscal,
@@ -78,9 +80,11 @@ function crear(valores: Record<string, string> = EN_PRODUCCION, opciones: { mate
     envios as unknown as EnvioFiscalRepository,
     auditoria as unknown as FiscalAuditoriaRepository,
     transacciones as unknown as TransaccionesFiscales,
+    notificador,
   );
   return {
     servicio,
+    notificador,
     config,
     configuraciones,
     configGuardada,
@@ -166,10 +170,51 @@ describe('EmisionDirectaService.modo() (nunca lanza)', () => {
     await expect(caida.servicio.modo()).resolves.toMatchObject({ activo: false, codigo: 'FISCAL_LECTURA_ERROR' });
   });
 
-  it('lee la configuración sin caché en cada llamada (nada de caché para decidir emitir)', async () => {
+  it('una venta lee configuraciones UNA vez: modo() y contexto() seguidos comparten la lectura (memo de 1,5 s)', async () => {
     const { servicio, config } = crear(EN_PRODUCCION);
     await servicio.modo();
+    await servicio.contexto();
     await servicio.modo();
+    await servicio.prepararDocumento(facturaPrueba(undefined, { serie: 'F001', numero: 120 }));
+    expect(config.snapshotFresco).toHaveBeenCalledTimes(1);
+  });
+
+  it('el memo vence a los 1,5 s y entonces vuelve a leer', async () => {
+    let ahora = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => ahora);
+    const { servicio, config } = crear(EN_PRODUCCION);
+    await servicio.modo();
+    ahora += 1_499;
+    await servicio.modo();
+    expect(config.snapshotFresco).toHaveBeenCalledTimes(1);
+    ahora += 2;
+    await servicio.modo();
+    expect(config.snapshotFresco).toHaveBeenCalledTimes(2);
+  });
+
+  it('un cambio de configuración o de credenciales (notificador) lo invalida al instante; uno de certificado no', async () => {
+    const { servicio, config, notificador, cambiar } = crear(EN_PRODUCCION);
+    expect(await servicio.modo()).toMatchObject({ activo: true, diferido: false });
+    cambiar({ ...EN_PRODUCCION, fiscal_envio_diferido: 'true' });
+    notificador.notificar('certificado');
+    expect(await servicio.modo()).toMatchObject({ diferido: false });
+    expect(config.snapshotFresco).toHaveBeenCalledTimes(1);
+
+    notificador.notificar('config');
+    expect(await servicio.modo()).toMatchObject({ activo: true, diferido: true });
+    expect(config.snapshotFresco).toHaveBeenCalledTimes(2);
+
+    notificador.notificar('credenciales');
+    await servicio.modo();
+    expect(config.snapshotFresco).toHaveBeenCalledTimes(3);
+  });
+
+  it('un fallo de lectura no se recuerda: la siguiente llamada vuelve a intentar', async () => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const { servicio, config } = crear(EN_PRODUCCION);
+    config.snapshotFresco.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    expect(await servicio.modo()).toMatchObject({ activo: false, codigo: 'FISCAL_LECTURA_ERROR' });
+    expect(await servicio.modo()).toMatchObject({ activo: true });
     expect(config.snapshotFresco).toHaveBeenCalledTimes(2);
   });
 });
@@ -313,6 +358,15 @@ describe('EmisionDirectaService.registrarEnvio / emitirPreparado', () => {
     expect(emision.enviar).toHaveBeenCalledWith(321, { ambiente: 'produccion', documento: p.documento, preparado: p.preparado });
   });
 
+  it('enviarRegistrado pasa el timeout pedido al motor (envío en segundo plano) y, sin opciones, deja el del mostrador', async () => {
+    const { servicio, emision } = crear(EN_PRODUCCION);
+    const p = preparado('produccion');
+    await servicio.enviarRegistrado(321, p, { timeoutMs: 30_000 });
+    expect(emision.enviar).toHaveBeenLastCalledWith(321, { ambiente: 'produccion', documento: p.documento, preparado: p.preparado }, { timeoutMs: 30_000 });
+    await servicio.enviarRegistrado(322);
+    expect(emision.enviar).toHaveBeenLastCalledWith(322, undefined);
+  });
+
   it('obtenerArchivo solo admite los tipos de la lista cerrada', async () => {
     const { servicio, envios } = crear(EN_PRODUCCION);
     expect(await codigoDe(servicio.obtenerArchivo(1, '../../etc/passwd' as never))).toBe('FISCAL_CONFIG_INVALIDA');
@@ -330,6 +384,16 @@ describe('EmisionDirectaService: interruptor de la emisión de prueba del POS (/
     expect(configuraciones.guardar).toHaveBeenCalledWith({ fiscal_beta_pos_directo: 'true' }, tx);
     expect(auditoria.registrar).toHaveBeenCalledWith(expect.objectContaining({ accion: 'POS_BETA_ACTIVADO', id_usuario: 7 }), tx);
     expect(config.invalidar).toHaveBeenCalled();
+  });
+
+  it('cambiarEstado olvida el modo recordado: la siguiente venta ve el interruptor nuevo sin esperar 1,5 s', async () => {
+    const { servicio, config, cambiar } = crear({ ...EN_BETA, fiscal_beta_pos_directo: '' });
+    expect(await servicio.modo()).toMatchObject({ activo: false, codigo: 'FISCAL_BETA_POS_APAGADO' });
+    cambiar(EN_BETA);
+    await servicio.cambiarEstado(true, ACTOR);
+    const lecturas = config.snapshotFresco.mock.calls.length;
+    expect(await servicio.modo()).toMatchObject({ activo: true, ambiente: 'beta' });
+    expect(config.snapshotFresco.mock.calls.length).toBe(lecturas + 1);
   });
 
   it('no activa con producción ni con un certificado BETA de otro RUC', async () => {

@@ -1,7 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ACCIONES_AUDITORIA_FISCAL, FiscalAuditoriaRepository } from '../auditoria/fiscal-auditoria.repository';
 import { CertificadoFiscalService } from '../certificado/certificado-fiscal.service';
 import type { MaterialFirma } from '../certificado/material-firma';
+import { CacheTtl } from '../config/cache-ttl';
 import { RepositorioConfigFiscal } from '../config/config-fiscal.repository';
 import { CodigoFiscal, FiscalConfigError } from '../config/fiscal-errores';
 import { FiscalConfigService } from '../config/fiscal-config.service';
@@ -13,6 +14,7 @@ import {
   SnapshotConfigFiscal,
 } from '../config/fiscal-config.tipos';
 import { FiscalEsquemaService } from '../config/fiscal-esquema.service';
+import { NotificadorCambiosFiscales } from '../config/notificador-cambios-fiscales';
 import { defectosDesdeEntorno, leerAmbiente } from '../config/snapshot-config-fiscal';
 import { TransaccionesFiscales } from '../config/transacciones-fiscales';
 import type { DocumentoCpe } from '../nucleo/documento-fiscal.types';
@@ -69,12 +71,21 @@ function copiaEmisor(emisor: EmisorFiscal): EmisorFiscal {
  *   de pruebas, series FB01/BB01/… y credenciales públicas RUC+MODDATOS.
  * - PRODUCCIÓN: emite solo con el proveedor 'sunat_directo' (la activación exige el checklist completo),
  *   con el emisor real, el certificado de producción y el usuario secundario SOL.
- * - Nunca se mezclan: todo sale del ambiente leído en ESTA petición (sin caché) y registrarEnvio
- *   comprueba que no cambió entre preparar y guardar.
+ * - Nunca se mezclan: todo sale del ambiente leído para ESTA emisión y registrarEnvio comprueba DENTRO de
+ *   la transacción que no cambió entre preparar y guardar. La lectura de configuraciones que decide el modo
+ *   se recuerda 1,5 s (una sola lectura por venta en vez de cuatro); un cambio en este proceso la invalida
+ *   al instante (notificador y cambiarEstado) y uno hecho desde otra réplica se ve en ≤ 1,5 s.
  */
 @Injectable()
 export class EmisionDirectaService implements EmisionDirecta {
+  /** Vigencia del memo de { snapshot, modo }: cubre las lecturas de una misma emisión, no decisiones de minutos. */
+  static readonly MEMO_ESTADO_MS = 1_500;
+
   private readonly logger = new Logger(EmisionDirectaService.name);
+  private readonly memoEstado = new CacheTtl<{ snapshot: SnapshotConfigFiscal | null; modo: ModoEmision }>(
+    // Un fallo de lectura no se recuerda: la siguiente petición vuelve a intentar.
+    (estado) => (estado.snapshot ? EmisionDirectaService.MEMO_ESTADO_MS : 0),
+  );
 
   constructor(
     private readonly config: FiscalConfigService,
@@ -87,7 +98,17 @@ export class EmisionDirectaService implements EmisionDirecta {
     private readonly envios: EnvioFiscalRepository,
     private readonly auditoria: FiscalAuditoriaRepository,
     private readonly transacciones: TransaccionesFiscales,
-  ) {}
+    @Optional() notificador?: NotificadorCambiosFiscales,
+  ) {
+    notificador?.suscribir((tipo) => {
+      if (tipo === 'config' || tipo === 'credenciales') this.invalidarEstado();
+    });
+  }
+
+  /** Olvida el modo recordado: la próxima emisión vuelve a leer configuraciones. */
+  invalidarEstado(): void {
+    this.memoEstado.invalidar();
+  }
 
   // ── Interruptor de la emisión de prueba del POS (/fiscal/beta/pos) ───────
 
@@ -137,6 +158,7 @@ export class EmisionDirectaService implements EmisionDirecta {
       );
     });
     this.config.invalidar();
+    this.invalidarEstado();
     return this.estado();
   }
 
@@ -234,11 +256,9 @@ export class EmisionDirectaService implements EmisionDirecta {
     return this.emision.registrar(consultor, preparado.ambiente, preparado.documento, preparado.preparado, idComprobante, idUsuario, porResumir);
   }
 
-  enviarRegistrado(idEnvio: number, preparado?: DocumentoPreparado): Promise<ResultadoEmision> {
-    return this.emision.enviar(
-      idEnvio,
-      preparado ? { ambiente: preparado.ambiente, documento: preparado.documento, preparado: preparado.preparado } : undefined,
-    );
+  enviarRegistrado(idEnvio: number, preparado?: DocumentoPreparado, opciones?: { timeoutMs?: number }): Promise<ResultadoEmision> {
+    const enMemoria = preparado ? { ambiente: preparado.ambiente, documento: preparado.documento, preparado: preparado.preparado } : undefined;
+    return opciones ? this.emision.enviar(idEnvio, enMemoria, opciones) : this.emision.enviar(idEnvio, enMemoria);
   }
 
   async emitirPreparado(preparado: DocumentoPreparado, idComprobante: number, idUsuario: number | null): Promise<ResultadoEmision> {
@@ -283,8 +303,16 @@ export class EmisionDirectaService implements EmisionDirecta {
 
   // ── Interno ──────────────────────────────────────────────────────────────
 
-  /** Una lectura fresca por petición (nada de caché para decidir si se emite). Nunca lanza. */
-  private async leerEstado(): Promise<{ snapshot: SnapshotConfigFiscal | null; modo: ModoEmision }> {
+  /**
+   * Una lectura fresca de configuraciones, recordada MEMO_ESTADO_MS (las 3–4 llamadas de una misma venta
+   * comparten la lectura). Las lecturas de seguridad no pasan por aquí: el ambiente dentro de la transacción
+   * (ambienteVigente) y el interruptor justo antes de llamar a SUNAT. Nunca lanza.
+   */
+  private leerEstado(): Promise<{ snapshot: SnapshotConfigFiscal | null; modo: ModoEmision }> {
+    return this.memoEstado.obtener('estado', () => this.leerEstadoFresco());
+  }
+
+  private async leerEstadoFresco(): Promise<{ snapshot: SnapshotConfigFiscal | null; modo: ModoEmision }> {
     let ambiente: AmbienteFiscal = defectosDesdeEntorno().ambiente;
     try {
       const snapshot = await this.config.snapshotFresco();

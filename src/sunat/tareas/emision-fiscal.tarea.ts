@@ -12,8 +12,8 @@ const RETRASO_INICIAL_MS = 60_000;
 const DISPERSION_INICIAL_MS = 60_000;
 
 /**
- * Tarea programada de la emisión (D7): cada 2 minutos toma hasta 10 envíos del ambiente VIGENTE que
- * quedaron pendientes de reintento (cuando les llega el turno del backoff 2, 5, 15, 30 y 60 min) o en
+ * Tarea programada de la emisión (D7): cada 30 s toma hasta 20 envíos del ambiente VIGENTE que
+ * quedaron pendientes de reintento (cuando les llega el turno del backoff 1, 3, 10, 30 y 60 min) o en
  * ENVIANDO con el reclamo vencido (el proceso cayó tras el COMMIT), y los manda por el MISMO camino
  * seguro del reintento manual: en producción las facturas consultan antes su CDR, se respetan los
  * plazos y el interruptor, y tras 6 intentos el envío queda en EXCEPCION para revisarlo a mano.
@@ -22,11 +22,13 @@ const DISPERSION_INICIAL_MS = 60_000;
  * Varias réplicas: cada envío se reclama por separado (FOR UPDATE SKIP LOCKED + plazo de 60 s), así
  * dos instancias nunca mandan el mismo; no se usan candados de sesión. Solo corre con
  * fiscal_tareas_activas y la emisión activa. También aporta la cola y los plazos a GET /fiscal/estado.
+ * Una vuelta en vacío cuesta dos consultas livianas (modo() —con su memo de 1,5 s— y candidatosTarea);
+ * la guarda `enCurso` impide que dos vueltas se solapen si SUNAT tarda.
  */
 @Injectable()
 export class EmisionFiscalTarea implements OnApplicationBootstrap, OnModuleDestroy, FuenteEstadoOperativoFiscal {
-  static readonly INTERVALO_MS = 2 * 60_000;
-  static readonly ENVIOS_POR_VUELTA = 10;
+  static readonly INTERVALO_MS = 30_000;
+  static readonly ENVIOS_POR_VUELTA = 20;
 
   private readonly log = new Logger(EmisionFiscalTarea.name);
   private temporizador: NodeJS.Timeout | null = null;
@@ -44,10 +46,14 @@ export class EmisionFiscalTarea implements OnApplicationBootstrap, OnModuleDestr
 
   onApplicationBootstrap(): void {
     const retraso = RETRASO_INICIAL_MS + Math.floor(Math.random() * DISPERSION_INICIAL_MS);
-    this.primera = setTimeout(() => void this.ejecutar(), retraso);
+    // El intervalo arranca tras la primera vuelta: con 30 s, empezar junto al arranque se saltaría el retraso inicial.
+    this.primera = setTimeout(() => {
+      this.primera = null;
+      void this.ejecutar();
+      this.temporizador = setInterval(() => void this.ejecutar(), EmisionFiscalTarea.INTERVALO_MS);
+      this.temporizador.unref?.();
+    }, retraso);
     this.primera.unref?.();
-    this.temporizador = setInterval(() => void this.ejecutar(), EmisionFiscalTarea.INTERVALO_MS);
-    this.temporizador.unref?.();
   }
 
   onModuleDestroy(): void {

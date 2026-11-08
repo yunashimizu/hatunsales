@@ -523,7 +523,8 @@ describe('LotesFiscalesService: anular sin nota con la baja (RA) o el resumen (R
 
       const primero = await servicio.solicitarAnulacion(PEDIDO);
       expect(primero).toMatchObject({ estado: 'PENDIENTE_REENVIO' });
-      expect(lotes.cierres[0].cierre.proximoIntentoMin).toBe(2);
+      // ESPERA_REINTENTO_MINUTOS es compartida con la emisión (1, 3, 10, 30, 60).
+      expect(lotes.cierres[0].cierre.proximoIntentoMin).toBe(1);
       expect((lotes.comprobantes.get(40) as CabeceraBaja).estado_sunat).toBe('BAJA_PENDIENTE');
 
       let ultimo = primero;

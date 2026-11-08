@@ -750,7 +750,8 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     const estado = calcularAcreditable(origen, notas, lineas);
     const plan = planificarNota(origen, estado, solicitud);
 
-    // Se emite en el acto: la respuesta ya trae lo que dijo SUNAT (aceptada, rechazada o en envío).
+    // Se emite en el acto: la respuesta trae lo que dijo SUNAT (aceptada, rechazada o en envío); con el envío
+    // diferido llega «pendiente» (envio_diferido) y los efectos los aplica EfectosNotasTarea al aceptarse.
     const respuesta = await this.emitirPlan(origen, plan, sustento, idUsuario, (o, e) => planificarNota(o, e, solicitud));
     const efectosAplicados = respuesta.aceptada_sunat === true && !!respuesta.id_comprobante
       && (await this.efectosSinFallar(respuesta.id_comprobante, respuesta.numero_formateado ?? ''));
@@ -1180,13 +1181,16 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       return { ...vacio, estado: 'anulacion_en_curso', nota, venta_anulada: false, avisos: [this.avisoEfectosPendientes(nota.numero_formateado)] };
     }
     if (respuesta.estado === 'pendiente') {
+      // Con el envío diferido la nota sale en segundo plano: no es un fallo, es una anulación en curso.
       return {
         ...vacio,
         estado: 'anulacion_en_curso',
         nota,
         venta_anulada: false,
         avisos: [
-          `Se emitió la nota ${nota.numero_formateado}: ${queSeAnula} se anulará cuando SUNAT la acepte. Revise su estado en Documentos.`,
+          respuesta.envio_diferido
+            ? `La nota ${nota.numero_formateado} quedó firmada y se está enviando a SUNAT; ${queSeAnula} se anula cuando SUNAT la acepte.`
+            : `Se emitió la nota ${nota.numero_formateado}: ${queSeAnula} se anulará cuando SUNAT la acepte. Revise su estado en Documentos.`,
           ...otros.map((o) => this.avisoSinValidez(o, false)),
           ...this.avisoDevolucionDinero(venta, false),
         ],
@@ -1722,7 +1726,9 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     if (aceptada) {
       avisos.push(efectosAplicados ? `SUNAT aceptó la nota ${numero}.` : this.avisoEfectosPendientes(numero));
     } else if (pendiente) {
-      avisos.push(`La nota ${numero} quedó en envío a SUNAT: sus efectos se aplicarán cuando la acepte. Revise su estado en Documentos.`);
+      avisos.push(respuesta.envio_diferido
+        ? `La nota ${numero} quedó firmada y se está enviando a SUNAT: sus efectos se aplicarán cuando la acepte.`
+        : `La nota ${numero} quedó en envío a SUNAT: sus efectos se aplicarán cuando la acepte. Revise su estado en Documentos.`);
     } else {
       const motivo = String(respuesta.error ?? '').replace(/[.\s]+$/, '');
       avisos.push(`SUNAT no aceptó la nota ${numero}${motivo ? `: ${motivo}` : ''}. No se aplicó nada: corrija el problema y emita otra nota.`);

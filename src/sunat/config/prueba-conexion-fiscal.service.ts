@@ -13,12 +13,14 @@ import { ActorFiscal, AmbienteFiscal } from './fiscal-config.tipos';
 import { FiscalEsquemaService } from './fiscal-esquema.service';
 import {
   ContextoPruebaEnvio,
+  DocumentoPruebaEnviado,
   EMISOR_PRUEBA_BETA,
   EmisorPruebaBeta,
   PasoPruebaFiscal,
   PROBADOR_ENVIO_CPE,
   PROBADOR_ENVIO_GRE,
   ProbadorEnvioFiscal,
+  TipoCpePrueba,
 } from './fiscal-tokens';
 import { diasHasta, fechaEnLima, RelojFiscal } from './reloj-fiscal';
 
@@ -30,6 +32,25 @@ export interface ResultadoPruebaConexion {
   /** false mientras el módulo de emisión/GRE no registre su probador de envío. */
   envio_disponible: boolean;
   pasos: PasoPruebaFiscal[];
+  /**
+   * Un resumen por documento enviado a SUNAT (factura base de una nota incluida). Con tipo_cpe «todos» son
+   * los cuatro, en orden: factura, boleta, nota de crédito y nota de débito. Ausente si no se envió nada.
+   */
+  documentos?: DocumentoPruebaEnviado[];
+}
+
+/** Los pasos que mandaron (o debían mandar) un documento a SUNAT, uno por documento. */
+function documentosDe(pasos: PasoPruebaFiscal[]): DocumentoPruebaEnviado[] {
+  return pasos
+    .filter((p): p is PasoPruebaFiscal & { documento: DocumentoPruebaEnviado['tipo'] } => !!p.documento)
+    .map((p) => ({
+      tipo: p.documento,
+      ok: p.ok,
+      codigo: p.codigo ?? null,
+      tiempo_ms: typeof p.tiempo_ms === 'number' ? p.tiempo_ms : null,
+      envio_id: p.envio_id ?? null,
+      detalle: p.detalle,
+    }));
 }
 
 function mensajeDe(error: unknown): { detalle: string; codigo?: string; envio_id?: number } {
@@ -68,7 +89,7 @@ export class PruebaConexionFiscalService {
   ) {}
 
   async probar(
-    opciones: { ambiente?: AmbienteFiscal; documento?: DocumentoPrueba; tipoCpe?: '01' | '03' | '07' | '08' },
+    opciones: { ambiente?: AmbienteFiscal; documento?: DocumentoPrueba; tipoCpe?: TipoCpePrueba },
     actor: ActorFiscal,
   ): Promise<ResultadoPruebaConexion> {
     const inicio = this.reloj.ms();
@@ -109,13 +130,17 @@ export class PruebaConexionFiscalService {
     }
 
     const ejecutados = pasos.filter((p) => p.ok !== null);
+    const documentos = documento === 'cpe' ? documentosDe(pasos) : [];
+    // «Los 4 documentos»: solo está bien si SUNAT aceptó los cuatro (una nota que no se intentó no cuenta como bien).
+    const cuatroAceptados = opciones.tipoCpe !== 'todos' || (documentos.length === 4 && documentos.every((d) => d.ok === true));
     const resultado: ResultadoPruebaConexion = {
-      ok: ejecutados.length > 0 && ejecutados.every((p) => p.ok === true),
+      ok: ejecutados.length > 0 && ejecutados.every((p) => p.ok === true) && cuatroAceptados,
       ambiente,
       documento,
       tiempo_ms: this.reloj.ms() - inicio,
       envio_disponible: !!probador,
       pasos,
+      ...(documentos.length ? { documentos } : {}),
     };
     await this.auditar(resultado, actor);
     return resultado;
@@ -230,7 +255,7 @@ export class PruebaConexionFiscalService {
           ambiente: resultado.ambiente,
           documento: resultado.documento,
           ok: resultado.ok,
-          pasos: resultado.pasos.map((p) => ({ paso: p.paso, ok: p.ok, codigo: p.codigo ?? null })),
+          pasos: resultado.pasos.map((p) => ({ paso: p.paso, ok: p.ok, codigo: p.codigo ?? null, ...(p.documento ? { tipo: p.documento } : {}) })),
         },
         ip: actor.ip,
       });

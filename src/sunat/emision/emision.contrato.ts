@@ -109,6 +109,8 @@ export interface ResultadoEmision {
   numero?: number;
   /** Último día (yyyy-mm-dd, Lima) para que SUNAT reciba el documento por envío individual. */
   fecha_limite_envio?: string | null;
+  /** Lo que tardó SUNAT en responder este envío (ms); null si no hubo respuesta de SUNAT en esta llamada. */
+  tiempo_sunat_ms?: number | null;
 }
 
 export interface EnvioVista {
@@ -133,6 +135,8 @@ export interface EnvioVista {
   ultimo_error?: string | null;
   /** yyyy-mm-dd: último día para enviarlo por sendBill (null si el envío no conserva su documento). */
   fecha_limite_envio?: string | null;
+  /** Lo que tardó SUNAT en su ÚLTIMA respuesta a este envío (ms); null si todavía no respondió. */
+  tiempo_ms?: number | null;
 }
 
 export interface FiltroEnvios {
@@ -235,8 +239,10 @@ export abstract class EmisionDirecta {
   /**
    * Manda a SUNAT el envío ya registrado (después del COMMIT) y guarda la respuesta y el CDR. Si se pasa
    * `preparado` se usa el ZIP en memoria; si no, se lee el guardado. Nunca reintenta sendBill solo.
+   * `opciones.timeoutMs` (opcional): espera máxima a SUNAT; por omisión la del mostrador (15 s). El envío en
+   * segundo plano, que nadie espera, pasa la del worker (30 s).
    */
-  abstract enviarRegistrado(idEnvio: number, preparado?: DocumentoPreparado): Promise<ResultadoEmision>;
+  abstract enviarRegistrado(idEnvio: number, preparado?: DocumentoPreparado, opciones?: { timeoutMs?: number }): Promise<ResultadoEmision>;
 
   /** Atajo para comprobantes ya guardados: registrarEnvio en su propia transacción + enviarRegistrado. */
   abstract emitirPreparado(

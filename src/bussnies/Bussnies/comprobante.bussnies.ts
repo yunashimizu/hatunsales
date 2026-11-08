@@ -70,6 +70,7 @@ import type {
 } from '../../sunat/nucleo/documento-fiscal.types';
 import { DocumentoCpeInvalidoError } from '../../sunat/nucleo/errores-nucleo';
 import { MENSAJE_POR_RESUMIR } from '../../sunat/emision/emision.tipos';
+import { TIMEOUT_WORKER_MS } from '../../sunat/nucleo/soap/sunat-soap-client';
 import { LotesFiscales } from '../../sunat/documentos/lotes.contrato';
 import type { LoteDeComprobante, ResultadoResumenAdicion } from '../../sunat/documentos/lotes.contrato';
 import { fechaLima, horaLima } from '../../sunat/nucleo/fechas-fiscales';
@@ -531,7 +532,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       fecha_limite_envio: this.fechaLimite('07', serie, cuerpo.fechaEmision),
       id_comprobante_modificado: origen.id_comprobante,
       doc_modificado: `${origen.serie}-${origen.numero}`,
-    }, contexto.aviso);
+    }, contexto.aviso, true);
   }
 
   // ── Reintento, recuperación y confirmación manual ────────────
@@ -988,8 +989,9 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
   ): Promise<ComprobanteResponse> {
     // Modo «resumen»: la boleta ya quedó firmada y guardada como POR_RESUMIR; no se manda a SUNAT, la informa el resumen diario.
     if (registrado.porResumir) return this.responderPorResumen(registrado, base, aviso);
-    // Envío diferido (fiscal_envio_diferido): la venta no espera a SUNAT. Solo facturas y boletas: una nota de
-    // crédito anula la venta cuando SUNAT la acepta y su respuesta se necesita en el acto.
+    // Envío diferido (fiscal_envio_diferido): nadie espera a SUNAT. Facturas, boletas y notas de crédito: los efectos
+    // de una nota (stock, deuda, anulación) los aplica EfectosNotasTarea cuando SUNAT la acepta, y quien la pidió la
+    // ve «en curso» (estado 'pendiente', envio_diferido) hasta entonces.
     if (diferible) {
       const modo = await this.emision.modo();
       if (modo.activo && (modo.diferido === true || forzarDiferido)) return this.responderDiferido(registrado, base, aviso);
@@ -1016,13 +1018,14 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
 
   /**
    * El comprobante ya está firmado y guardado, con su envío en ENVIANDO. Se lanza el primer intento sin
-   * esperarlo y se responde «en proceso». Si el proceso cae o SUNAT tarda, la tarea de emisión retoma el envío
+   * esperarlo y se responde «en proceso». Como nadie lo espera, el envío aguanta a SUNAT hasta TIMEOUT_WORKER_MS
+   * (30 s) en vez de los 15 s del mostrador. Si el proceso cae o SUNAT tarda, la tarea de emisión retoma el envío
    * (ENVIANDO con el reclamo vencido, o PENDIENTE_REENVIO) con el mismo ZIP: nunca se emite otro.
    */
   private responderDiferido(registrado: Registrado, base: BaseRespuesta, aviso: string | null): ComprobanteResponse {
     const numero = this.formatearNumero(base.serie, base.numero);
     void this.emision
-      .enviarRegistrado(registrado.idEnvio, registrado.preparado)
+      .enviarRegistrado(registrado.idEnvio, registrado.preparado, { timeoutMs: TIMEOUT_WORKER_MS })
       .catch((error) =>
         this.logger.error(`${numero}: el envío diferido a SUNAT (envío ${registrado.idEnvio}) no terminó: ${this.mensajeDe(error)}. La tarea de emisión lo retomará.`),
       );
@@ -1599,6 +1602,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       archivos_beta: archivos,
       aviso,
       fecha_limite_envio: resultado.fecha_limite_envio ?? base.fecha_limite_envio,
+      ...(typeof resultado.tiempo_sunat_ms === 'number' ? { tiempo_sunat_ms: resultado.tiempo_sunat_ms } : {}),
     };
   }
 

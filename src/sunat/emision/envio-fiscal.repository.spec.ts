@@ -389,9 +389,9 @@ describe('EnvioFiscalRepository: reclamos, cierre y consultas', () => {
       [
         /SELECT/,
         [
-          { ...base, id_envio: 1, tipo_documento: '01', serie: 'F001', fecha_emision: '2026-10-13', ultimo_error: 'Fuera de plazo' },
-          { ...base, id_envio: 2, tipo_documento: '03', serie: 'B001', fecha_emision: '2026-10-13', ultimo_error: null },
-          { ...base, id_envio: 3, tipo_documento: '03', serie: null, fecha_emision: null },
+          { ...base, id_envio: 1, tipo_documento: '01', serie: 'F001', fecha_emision: '2026-10-13', ultimo_error: 'Fuera de plazo', tiempo_ms: 2310 },
+          { ...base, id_envio: 2, tipo_documento: '03', serie: 'B001', fecha_emision: '2026-10-13', ultimo_error: null, tiempo_ms: '845' },
+          { ...base, id_envio: 3, tipo_documento: '03', serie: null, fecha_emision: null, tiempo_ms: null },
         ],
       ],
     ]);
@@ -403,8 +403,11 @@ describe('EnvioFiscalRepository: reclamos, cierre y consultas', () => {
       [2, null, '2026-10-18'],
       [3, null, null],
     ]);
+    // Lo que tardó SUNAT en su última respuesta (lo guarda completar); null si aún no respondió.
+    expect(pagina.datos.map((d) => d.tiempo_ms)).toEqual([2310, 845, null]);
     const consulta = bd.llamadas.find((l) => /LIMIT/.test(l.sql))!;
     expect(consulta.sql).toContain('t.ultimo_error');
+    expect(consulta.sql).toContain('t.tiempo_ms');
     expect(consulta.sql).toContain("{documento,fechaEmision}");
   });
 

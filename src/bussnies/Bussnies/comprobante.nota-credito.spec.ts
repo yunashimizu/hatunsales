@@ -209,6 +209,48 @@ describe('ComprobanteBussnies.emitirNotaCredito (contrato EmisorNotasCredito)', 
     expect(motor.emision.prepararDocumento).not.toHaveBeenCalled();
   });
 
+  describe('envío diferido (fiscal_envio_diferido) también para la nota', () => {
+    it('con el modo diferido la nota responde «en curso» (envio_diferido) sin esperar a SUNAT y la envía después del COMMIT', async () => {
+      const motor = motorConOrigen(facturaOrigen());
+      motor.emision.modo.mockResolvedValue({ activo: true, ambiente: 'produccion', diferido: true });
+      // SUNAT que nunca contesta: si la nota la esperara, la prueba no terminaría.
+      motor.emision.enviarRegistrado.mockReturnValue(new Promise(() => undefined));
+
+      const respuesta = await motor.servicio.emitirNotaCredito(solicitud(motor.bd.registro));
+
+      expect(motor.bd.registro).toContain('COMMIT');
+      expect(motor.emision.enviarRegistrado).toHaveBeenCalledTimes(1);
+      expect(motor.emision.enviarRegistrado.mock.calls[0][2]).toEqual({ timeoutMs: 30000 });
+      expect(respuesta).toMatchObject({
+        tipo_de_comprobante: 7,
+        serie: 'FC01',
+        numero: 3,
+        estado: 'pendiente',
+        estado_sunat: 'ENVIANDO',
+        aceptada_sunat: false,
+        envio_diferido: true,
+        id_comprobante_modificado: 40,
+      });
+      // No es un error: quien anula ve la nota «en curso», no «rechazada».
+      expect(respuesta.error).toBeUndefined();
+      expect(respuesta.sunat_description).toContain('se está enviando a SUNAT');
+    });
+
+    it('sin el modo diferido la nota sigue esperando la respuesta de SUNAT', async () => {
+      for (const modo of [{ activo: true, ambiente: 'produccion' }, { activo: true, ambiente: 'produccion', diferido: false }]) {
+        const motor = motorConOrigen(facturaOrigen());
+        motor.emision.modo.mockResolvedValue(modo);
+
+        const respuesta = await motor.servicio.emitirNotaCredito(solicitud(motor.bd.registro));
+
+        expect(respuesta.envio_diferido).toBeUndefined();
+        expect(respuesta).toMatchObject({ estado: 'emitido', aceptada_sunat: true });
+        expect(motor.emision.enviarRegistrado).toHaveBeenCalledWith(501, expect.anything());
+        expect(motor.emision.enviarRegistrado.mock.calls[0][2]).toBeUndefined();
+      }
+    });
+  });
+
   describe('origen admisible (PLAN D8)', () => {
     it.each([
       ['no aceptado', { aceptada_sunat: false, estado_sunat: 'PENDIENTE_REENVIO' }, 'todavía no está aceptado'],

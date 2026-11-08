@@ -40,6 +40,8 @@ export interface ComprobanteResponse {
   aviso?: string | null;
   /** true: el comprobante quedó firmado y guardado y su envío a SUNAT sigue en segundo plano (fiscal_envio_diferido). */
   envio_diferido?: boolean;
+  /** Lo que tardó SUNAT en responder el envío de esta petición (ms); null/ausente si no respondió o va en segundo plano. */
+  tiempo_sunat_ms?: number | null;
   /** true: modo «resumen» de boletas: quedó firmada y guardada y SUNAT la recibe en el resumen diario, no al cobrar. */
   por_resumen?: boolean;
   /** Último día (yyyy-mm-dd, Lima) para que SUNAT reciba el comprobante por envío individual. */

@@ -79,10 +79,10 @@ describe('EmisionFiscalTarea (D7)', () => {
     expect(detenida.emision.reintentar).not.toHaveBeenCalled();
   });
 
-  it('toma hasta 10 envíos del ambiente VIGENTE y los manda por el camino seguro del reintento', async () => {
+  it('toma hasta 20 envíos del ambiente VIGENTE y los manda por el camino seguro del reintento', async () => {
     const { tarea, envios, emision } = crear({ modo: { activo: true, ambiente: 'beta' }, candidatos: [4, 9] });
     expect(await tarea.ejecutar()).toBe(2);
-    expect(envios.candidatosTarea).toHaveBeenCalledWith('beta', 10);
+    expect(envios.candidatosTarea).toHaveBeenCalledWith('beta', 20);
     expect(emision.reintentar.mock.calls).toEqual([
       [4, 'tarea'],
       [9, 'tarea'],
@@ -137,17 +137,32 @@ describe('EmisionFiscalTarea (D7)', () => {
     expect(envios.contadores).toHaveBeenCalledWith('produccion', '2026-10-21');
   });
 
-  it('programa la vuelta cada 2 minutos con un retraso inicial al azar y limpia los temporizadores al cerrar', async () => {
+  it('programa la vuelta cada 30 s tras un retraso inicial al azar (sin adelantarlo) y limpia los temporizadores al cerrar', async () => {
     jest.useFakeTimers();
     jest.spyOn(Math, 'random').mockReturnValue(0.5);
     const { tarea, config } = crear({ candidatos: [] });
+    expect(EmisionFiscalTarea.INTERVALO_MS).toBe(30_000);
     tarea.onApplicationBootstrap();
+    // El intervalo de 30 s no corre antes de la primera vuelta (60–120 s tras arrancar).
     jest.advanceTimersByTime(89_000);
     expect(config.tareasActivas).not.toHaveBeenCalled();
     jest.advanceTimersByTime(1_000);
     expect(config.tareasActivas).toHaveBeenCalledTimes(1);
+    // La vuelta en vacío es asíncrona: se deja terminar antes del siguiente tic (la guarda enCurso la saltaría).
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(config.tareasActivas).toHaveBeenCalledTimes(2);
     tarea.onModuleDestroy();
     jest.advanceTimersByTime(10 * 60_000);
-    expect(config.tareasActivas).toHaveBeenCalledTimes(1);
+    expect(config.tareasActivas).toHaveBeenCalledTimes(2);
+  });
+
+  it('cerrar antes de la primera vuelta no deja ningún temporizador vivo', async () => {
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0);
+    const { tarea, config } = crear({ candidatos: [] });
+    tarea.onApplicationBootstrap();
+    tarea.onModuleDestroy();
+    jest.advanceTimersByTime(10 * 60_000);
+    expect(config.tareasActivas).not.toHaveBeenCalled();
   });
 });
