@@ -817,8 +817,10 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       const ventaActiva = venta && venta.estado.trim().toLowerCase() !== 'anulada' ? venta : null;
       // Con la venta anulada no queda vigente ninguno de sus comprobantes: el dado de baja y los que nunca valieron.
       // Uno que SUNAT sí tiene aceptado (o con su propia baja en curso) no se toca aquí: se anula por su propio camino.
+      const principales = ventaActiva ? await this.repo.principalesDeVenta(ventaActiva.id_venta) : [];
+      const vistos = [origen.id_comprobante, ...principales.map((c) => c.id_comprobante)];
       const otros = ventaActiva
-        ? (await this.repo.principalesDeVenta(ventaActiva.id_venta)).filter(
+        ? principales.filter(
             (c) =>
               !c.anulado
               && c.id_comprobante !== origen.id_comprobante
@@ -826,7 +828,8 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
               && c.estado_sunat !== 'BAJA_PENDIENTE',
           )
         : [];
-      await this.anularEnSistema([origen, ...otros], ventaActiva, { motivo: `Baja aceptada por SUNAT (${lote.identificador})` }, [], [], null);
+      // Los principales que se vieron (también los excluidos a propósito) no cuentan como «nuevos» al releer.
+      await this.anularEnSistema([origen, ...otros], ventaActiva, { motivo: `Baja aceptada por SUNAT (${lote.identificador})` }, [], [], null, vistos);
       aplicados += 1;
       this.logger.log(`Baja ${lote.identificador} aceptada por SUNAT: ${this.numeroDe(origen)} anulado${ventaActiva ? ` y venta ${ventaActiva.id_venta} anulada` : ''}.`);
     }
@@ -1033,7 +1036,14 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     return this.anularEnSistema(comprobantes, venta, dto, descartes, [...avisos, ...sinValidez.map((s) => this.avisoSinValidez(s, true))], idUsuario);
   }
 
-  /** Ramas a/b (y d resuelta como inexistente): todo en el sistema, en UNA transacción, sin tocar SUNAT. */
+  /**
+   * Ramas a/b (y d resuelta como inexistente): todo en el sistema, en UNA transacción, sin tocar SUNAT.
+   *
+   * Con venta, lo primero es el candado `cpe-venta:<id>` (el mismo que toma la emisión antes de numerar)
+   * y, ya con él, se releen sus facturas y boletas: si apareció una vigente que quien llama no vio
+   * (`vistos`, por defecto los `comprobantes` recibidos), no se anula nada. Así no queda la venta
+   * anulada con un comprobante vigente en SUNAT. Orden: cpe-venta → venta → salidas → inventario → cuentas.
+   */
   private async anularEnSistema(
     comprobantes: CabeceraComprobante[],
     venta: VentaDeNota | null,
@@ -1041,9 +1051,23 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     descartes: DescarteEnvio[],
     avisos: string[],
     idUsuario: number | null,
+    vistos: number[] = comprobantes.map((c) => c.id_comprobante),
   ): Promise<ResultadoAnulacion> {
     const motivo = this.limpiar(dto.motivo) || (venta ? `Venta ${venta.id_venta} anulada` : 'Anulado en el sistema');
     const resultado = await this.repo.transaccion(async (tx) => {
+      if (venta) {
+        await tx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`cpe-venta:${venta.id_venta}`]);
+        const conocidos = new Set(vistos);
+        const nuevo = (await this.repo.principalesDeVenta(venta.id_venta, tx)).find(
+          (c) => !c.anulado && c.estado !== 'error' && !conocidos.has(c.id_comprobante),
+        );
+        if (nuevo) {
+          throw new ConflictException({
+            codigo: 'ANULACION_COMPROBANTE_NUEVO',
+            message: `La venta ${venta.id_venta} acaba de recibir el comprobante ${this.numeroDe(nuevo)}. No se anuló nada: vuelva a pulsar Anular para anularla con su comprobante.`,
+          });
+        }
+      }
       for (const descarte of descartes) {
         if (!(await this.repo.descartarEnvio(tx, descarte))) {
           throw new ConflictException({

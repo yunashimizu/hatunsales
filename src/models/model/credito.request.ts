@@ -20,6 +20,16 @@ export class AbonoCreditoRequest {
   @IsString()
   @MaxLength(120, { message: 'La referencia admite hasta 120 caracteres' })
   referencia?: string;
+
+  /**
+   * Saldo que el cliente vio antes de abonar. Si el real ya es otro, responde 409
+   * `CXC_DESACTUALIZADA` sin registrar nada (protege de un abono enviado dos veces).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({}, { message: 'El saldo esperado debe ser un número' })
+  @Min(0, { message: 'El saldo esperado no puede ser negativo' })
+  saldo_esperado?: number;
 }
 
 /** PUT /credito/cliente/:id y PUT /credito/empresa/:id */

@@ -1,4 +1,5 @@
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Logger } from '@nestjs/common';
+import { QueryFailedError } from 'typeorm';
 import { InventarioBussnies } from '../../bussnies/Bussnies/inventario.bussnies';
 import { InventarioRepository } from './inventario.repository';
 
@@ -174,5 +175,156 @@ describe('InventarioRepository.stockPorProducto', () => {
     expect(sql).toMatch(/FROM almacenes a/);
     expect(sql).toMatch(/LEFT JOIN inventario i ON i\.id_almacen = a\.id_almacen AND i\.id_producto = \$1/);
     expect(sql).toMatch(/ORDER BY a\.nombre/);
+  });
+});
+
+/** Error como lo entrega TypeORM con el SQLSTATE del driver dentro. */
+function errorPg(code: string, mensaje: string): QueryFailedError {
+  const driver = Object.assign(new Error(mensaje), { code, severity: 'ERROR', routine: 'prueba' });
+  return new QueryFailedError('UPDATE inventario SET stock = 1', [], driver);
+}
+
+/**
+ * Transferencia (Fase A, A4): las dos filas se bloquean en una sola sentencia y en orden fijo,
+ * así dos transferencias opuestas no se interbloquean; con `stockOrigenEsperado` no se repite.
+ */
+describe('InventarioRepository.transferir · candados y stock esperado', () => {
+  function armarTx(filas: { id_inventario: number; id_almacen: number; stock: string }[]) {
+    const query = jest.fn(async (sql: string, _params: unknown[] = []) => {
+      if (sql.includes('FOR UPDATE')) return filas;
+      if (sql.includes('FROM almacenes')) return [{ id_almacen: 1, id_sucursal: 10 }, { id_almacen: 2, id_sucursal: 20 }];
+      return [];
+    });
+    const dataSource = { transaction: jest.fn(async (fn: (m: unknown) => unknown) => fn({ query })) };
+    const repo = new InventarioRepository({} as any, dataSource as any);
+    return { repo, query, dataSource };
+  }
+  const escrituras = (query: jest.Mock) =>
+    query.mock.calls.filter((c) => /^\s*(UPDATE|INSERT)/.test(String(c[0])));
+
+  it('bloquea origen y destino en UNA consulta ordenada por almacén, sea cual sea el sentido', async () => {
+    const { repo, query } = armarTx([
+      { id_inventario: 4, id_almacen: 1, stock: '3' },
+      { id_inventario: 7, id_almacen: 2, stock: '10' },
+    ]);
+
+    // De 2 a 1: el sentido contrario al orden de bloqueo.
+    await repo.transferir(9, 2, 1, 4, 'Transferencia entre almacenes');
+
+    const bloqueos = query.mock.calls.filter((c) => String(c[0]).includes('FOR UPDATE'));
+    expect(bloqueos).toHaveLength(1);
+    expect(String(bloqueos[0][0])).toMatch(/WHERE id_producto = \$1 AND id_almacen = ANY\(\$2::int\[\]\)\s+ORDER BY id_almacen, id_inventario\s+FOR UPDATE/);
+    expect(bloqueos[0][1]).toEqual([9, [2, 1]]);
+    const updates = escrituras(query).filter((c) => String(c[0]).startsWith('UPDATE'));
+    expect(updates.map((c) => [String(c[0]).includes('stock - $1') ? 'resta' : 'suma', c[1]])).toEqual([
+      ['resta', [4, 7]],
+      ['suma', [4, 4]],
+    ]);
+  });
+
+  it('sin fila en el destino la crea con lo transferido', async () => {
+    const { repo, query } = armarTx([{ id_inventario: 4, id_almacen: 1, stock: '5' }]);
+
+    await repo.transferir(9, 1, 2, 5, 'x');
+
+    const insert = query.mock.calls.find((c) => String(c[0]).startsWith('INSERT INTO inventario'))!;
+    expect(insert[1]).toEqual([9, 2, 5]);
+  });
+
+  it('stock de origen distinto del esperado → STOCK_DESACTUALIZADO:<actual> sin escribir nada', async () => {
+    const { repo, query } = armarTx([{ id_inventario: 4, id_almacen: 1, stock: '6' }]);
+
+    await expect(repo.transferir(9, 1, 2, 2, 'x', 8)).rejects.toThrow('STOCK_DESACTUALIZADO:6');
+    expect(escrituras(query)).toEqual([]);
+  });
+
+  it('igual al esperado transfiere normal; sin stock suficiente sigue siendo STOCK_INSUFICIENTE', async () => {
+    const igual = armarTx([{ id_inventario: 4, id_almacen: 1, stock: '6' }]);
+    await expect(igual.repo.transferir(9, 1, 2, 2, 'x', 6)).resolves.toBeUndefined();
+
+    const corto = armarTx([{ id_inventario: 4, id_almacen: 1, stock: '1' }]);
+    await expect(corto.repo.transferir(9, 1, 2, 2, 'x')).rejects.toThrow('STOCK_INSUFICIENTE:1');
+  });
+
+  it('un interbloqueo repite la transacción completa', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { repo, dataSource } = armarTx([{ id_inventario: 4, id_almacen: 1, stock: '6' }]);
+    const original = dataSource.transaction.getMockImplementation()!;
+    dataSource.transaction.mockRejectedValueOnce(errorPg('40P01', 'deadlock detected')).mockImplementation(original);
+
+    await expect(repo.transferir(9, 1, 2, 2, 'x')).resolves.toBeUndefined();
+    expect(dataSource.transaction).toHaveBeenCalledTimes(2);
+    jest.restoreAllMocks();
+  });
+
+  it('el negocio: stock desactualizado → 409 como el ajuste; error de la base → sale tal cual', async () => {
+    const repo = { transferir: jest.fn().mockRejectedValueOnce(new Error('STOCK_DESACTUALIZADO:6')) };
+    const negocio = new InventarioBussnies(repo as any, {} as any);
+    const dto = { id_producto: 9, id_almacen_origen: 1, id_almacen_destino: 2, cantidad: 2, stock_origen_esperado: 8 };
+
+    const error: any = await negocio.transferir(dto).catch((e) => e);
+    expect(error).toBeInstanceOf(ConflictException);
+    expect(error.getResponse()).toEqual({
+      codigo: 'STOCK_DESACTUALIZADO',
+      stock_actual: 6,
+      message:
+        'El stock de este producto en ese almacén cambió mientras lo editaba: ahora hay 6. Recargue la ficha y vuelva a intentar.',
+    });
+    expect(repo.transferir).toHaveBeenCalledWith(9, 1, 2, 2, 'Transferencia entre almacenes', 8);
+
+    const deBase = errorPg('40P01', 'deadlock detected');
+    repo.transferir.mockRejectedValueOnce(deBase);
+    const otro = await negocio.transferir(dto).catch((e) => e);
+    expect(otro).toBe(deBase);
+    expect(otro).not.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('InventarioRepository.ajustar · reintento', () => {
+  it('sin manager repite su propia transacción tras un interbloqueo; con manager no repite', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const query = jest.fn(async (sql: string) => (sql.includes('FOR UPDATE') ? [{ id_inventario: 4, stock: '10' }] : []));
+    const transaction = jest.fn()
+      .mockRejectedValueOnce(errorPg('40P01', 'deadlock detected'))
+      .mockImplementation(async (fn: (m: unknown) => unknown) => fn({ query }));
+    const repo = new InventarioRepository({} as any, { transaction } as any);
+
+    await expect(repo.ajustar(9, 2, 2, 'x')).resolves.toBe(12);
+    expect(transaction).toHaveBeenCalledTimes(2);
+
+    const conflicto = errorPg('40P01', 'deadlock detected');
+    const ajeno = { query: jest.fn().mockRejectedValue(conflicto) };
+    await expect(repo.ajustar(9, 2, 2, 'x', ajeno as any)).rejects.toBe(conflicto);
+    expect(ajeno.query).toHaveBeenCalledTimes(1);
+    jest.restoreAllMocks();
+  });
+
+  it('el negocio deja pasar el error de la base del ajuste sin convertirlo en 400', async () => {
+    const deBase = errorPg('22003', 'integer out of range');
+    const repo = { ajustar: jest.fn().mockRejectedValue(deBase) };
+    const negocio = new InventarioBussnies(repo as any, { getById: jest.fn().mockResolvedValue({ id_producto: 9 }) } as any);
+
+    const error = await negocio.ajustar({ id_producto: 9, id_almacen: 2, cantidad: 2, motivo: 'correccion' }).catch((e) => e);
+    expect(error).toBe(deBase);
+  });
+});
+
+describe('InventarioRepository.listarDetallado · comodines escritos por el usuario (B8)', () => {
+  it('`%`, `_` y `\\` se buscan tal cual: van escapados y cada LIKE lleva ESCAPE', async () => {
+    const { repo, pendientes } = armar();
+
+    const promesa = repo.listarDetallado({ texto: ' Cinta_50%\\X ' });
+    await Promise.resolve();
+    const conteo = pendientes.find((p) => p.sql.includes('COUNT(*)'))!;
+    const filas = pendientes.find((p) => !p.sql.includes('COUNT(*)'))!;
+
+    expect(conteo.params[0]).toBe('%cinta\\_50\\%\\\\x%');
+    for (const { sql } of [conteo, filas]) {
+      expect(sql.match(/LIKE \$1 ESCAPE '\\'/g)).toHaveLength(3);
+    }
+
+    conteo.resolver([{ total: 0 }]);
+    filas.resolver([]);
+    await promesa;
   });
 });

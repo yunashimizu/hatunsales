@@ -83,4 +83,13 @@ export class TransferirStockRequest {
   @IsOptional()
   @MaxLength(250)
   comentario?: string;
+
+  /**
+   * Stock que el cliente vio en el almacén de origen. Si el real ya es otro, responde 409
+   * `STOCK_DESACTUALIZADO` sin mover nada (protege de una transferencia enviada dos veces).
+   */
+  @IsOptional()
+  @IsNumber()
+  @Min(0, { message: 'El stock esperado no puede ser negativo' })
+  stock_origen_esperado?: number;
 }

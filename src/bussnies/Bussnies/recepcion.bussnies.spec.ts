@@ -80,7 +80,7 @@ function armar(cantidad = 5) {
 
   const archivos = { nombre: 'base_datos', guardar: jest.fn(), eliminar: jest.fn() };
   const servicio = new RecepcionBussnies(repo, inventario as any, archivos as any);
-  return { servicio, repo, inventario, obs, stock, manager };
+  return { servicio, repo, inventario, obs, stock, manager, archivos };
 }
 
 const cuerpo = (items: any[], extra: Record<string, unknown> = {}) => ({
@@ -236,5 +236,31 @@ describe('RecepcionBussnies · confirmar recepción', () => {
     expect(repo.productosExistentes).toHaveBeenCalledTimes(1);
     expect(repo.productosExistentes).toHaveBeenCalledWith([3, 404]);
     expect(repo.registrarRecepcion).not.toHaveBeenCalled();
+  });
+});
+
+describe('RecepcionBussnies · foto de la observación (B1)', () => {
+  const imagen = (mimetype: string) => ({
+    originalname: 'foto', mimetype, buffer: Buffer.from('contenido'), size: 9,
+  });
+
+  it('rechaza SVG, HTML y cualquier tipo fuera de la lista cerrada sin guardar nada', async () => {
+    const { servicio, archivos } = armar();
+
+    for (const tipo of ['image/svg+xml', 'text/html', 'image/x-icon', 'application/octet-stream', '']) {
+      await expect(servicio.subirFoto(9, imagen(tipo))).rejects.toBeInstanceOf(BadRequestException);
+    }
+    expect(archivos.guardar).not.toHaveBeenCalled();
+  });
+
+  it('acepta un tipo de la lista y guarda el tipo validado (en minúsculas), no el texto declarado', async () => {
+    const { servicio, repo, archivos } = armar();
+    archivos.guardar.mockResolvedValue({ url: '/archivos/5', mime: 'image/png' });
+    repo.agregarAdjunto = jest.fn().mockResolvedValue({ id_adjunto: 1 });
+
+    await servicio.subirFoto(9, imagen('IMAGE/PNG'));
+
+    expect(archivos.guardar).toHaveBeenCalledWith(expect.objectContaining({ mime: 'image/png', carpeta: 'recepcion/9' }));
+    expect(repo.agregarAdjunto).toHaveBeenCalledWith(9, '/archivos/5', 'image/png');
   });
 });

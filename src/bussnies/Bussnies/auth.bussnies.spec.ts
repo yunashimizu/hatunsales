@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException, UnauthorizedException } from '@nestjs/common';
 import { AuthBussnies } from './auth.bussnies';
 import { Usuarios } from '../../models/DBModel/usuarios.entity';
 import { HashUtil } from '../../util/jwt/hash.util';
@@ -180,5 +180,166 @@ describe('AuthBussnies · Google con correo guardado en mayúsculas', () => {
     expect(sesion.id_usuario).toBe(1);
     expect(sesion.mensaje).toBe('Inicio de sesión con Google');
     expect(usuarios).toHaveLength(1);
+  });
+});
+
+/** Payload firmado en la última sesión emitida. */
+function capturarFirma(servicio: AuthBussnies) {
+  const firmados: any[] = [];
+  (servicio as any).jwtService = {
+    sign: (payload: any) => {
+      firmados.push(payload);
+      return 'token-' + firmados.length;
+    },
+  };
+  return firmados;
+}
+
+describe('AuthBussnies · login sin delatar cuentas (B7)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('correo inexistente: compara contra el hash de relleno y responde lo mismo que una contraseña mala', async () => {
+    const { servicio } = armar([{ id_usuario: 1, email: 'ana@mail.com' }]);
+    const relleno = jest.spyOn(HashUtil, 'compararSinCuenta').mockResolvedValue(false);
+    const comparar = jest.spyOn(HashUtil, 'comparePassword').mockResolvedValue(false);
+
+    await expect(servicio.login({ email: 'nadie@mail.com', password: 'x' } as any, { cookie: jest.fn() }))
+      .rejects.toThrow(new UnauthorizedException('Credenciales incorrectas'));
+    expect(relleno).toHaveBeenCalledWith('x');
+
+    await expect(servicio.login({ email: 'ana@mail.com', password: 'mala' } as any, { cookie: jest.fn() }))
+      .rejects.toThrow(new UnauthorizedException('Credenciales incorrectas'));
+    expect(comparar).toHaveBeenCalledWith('mala', 'hash-previo');
+    expect(relleno).toHaveBeenCalledTimes(1);
+  });
+
+  it('cuenta sin contraseña local: también compara contra el relleno antes de responder', async () => {
+    const { servicio, usuarios } = armar([{ id_usuario: 1, email: 'ana@mail.com' }]);
+    usuarios[0].password = null;
+    const relleno = jest.spyOn(HashUtil, 'compararSinCuenta').mockResolvedValue(false);
+
+    await expect(servicio.login({ email: 'ana@mail.com', password: 'x' } as any, { cookie: jest.fn() }))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+    expect(relleno).toHaveBeenCalledTimes(1);
+  });
+
+  it('el relleno de verdad compara con bcrypt y devuelve false', async () => {
+    await expect(HashUtil.compararSinCuenta('cualquiera')).resolves.toBe(false);
+  });
+});
+
+describe('AuthBussnies · Google exige correo verificado (B7)', () => {
+  const clienteIdOriginal = googleAuthConfig.clientId;
+  beforeEach(() => {
+    googleAuthConfig.clientId = 'cliente-google-de-prueba';
+  });
+  afterEach(() => {
+    googleAuthConfig.clientId = clienteIdOriginal;
+    jest.restoreAllMocks();
+  });
+
+  for (const email_verified of [undefined, false, 'true']) {
+    it(`email_verified = ${JSON.stringify(email_verified)}: 401 y no entra`, async () => {
+      const { servicio } = armar([{ id_usuario: 1, email: 'juan@mail.com', rol: 'admin' }]);
+      (servicio as any).googleClient = {
+        verifyIdToken: async () => ({ getPayload: () => ({ email: 'juan@mail.com', email_verified, name: 'Juan' }) }),
+      };
+      const res = { cookie: jest.fn() };
+
+      await expect(servicio.loginConGoogle('credencial', res)).rejects.toThrow('El correo de Google no está verificado');
+      expect(res.cookie).not.toHaveBeenCalled();
+    });
+  }
+});
+
+describe('AuthBussnies · huella de la contraseña en el token (B3)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('la sesión lleva pv = 16 hex del SHA-256 del hash guardado', async () => {
+    const { servicio } = armar([{ id_usuario: 1, email: 'ana@mail.com' }]);
+    const firmados = capturarFirma(servicio);
+    jest.spyOn(HashUtil, 'comparePassword').mockResolvedValue(true);
+
+    await servicio.login({ email: 'ana@mail.com', password: 'buena' } as any, { cookie: jest.fn() });
+
+    expect(firmados[0].pv).toBe(HashUtil.huella('hash-previo'));
+    expect(firmados[0].pv).toMatch(/^[0-9a-f]{16}$/);
+    expect(HashUtil.huella('otro-hash')).not.toBe(firmados[0].pv);
+  });
+
+  it('al cambiar la contraseña, la sesión que devuelve el perfil ya lleva la huella del hash nuevo', async () => {
+    const { servicio } = armar([{ id_usuario: 1, email: 'ana@mail.com' }]);
+    const firmados = capturarFirma(servicio);
+    jest.spyOn(HashUtil, 'comparePassword').mockImplementation(async (plano) => plano === 'actual');
+    jest.spyOn(HashUtil, 'hashPassword').mockResolvedValue('hash-nuevo');
+
+    await servicio.actualizarPerfil(1, { password_actual: 'actual', password_nueva: 'nueva123' }, { cookie: jest.fn() });
+
+    expect(firmados[0].pv).toBe(HashUtil.huella('hash-nuevo'));
+    expect(firmados[0].pv).not.toBe(HashUtil.huella('hash-previo'));
+  });
+});
+
+describe('AuthBussnies · cambiar el correo pide la contraseña actual (B2)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('sin password_actual: 400 claro y el correo no cambia', async () => {
+    const { servicio, usuarios, repoUsuarios } = armar([{ id_usuario: 1, email: 'ana@mail.com', rol: 'admin' }]);
+    const guardar = jest.spyOn(repoUsuarios, 'save');
+
+    await expect(servicio.actualizarPerfil(1, { email: 'ladron@mail.com' }, { cookie: jest.fn() }))
+      .rejects.toThrow(new BadRequestException('Para cambiar el correo indique su contraseña actual'));
+    expect(guardar).not.toHaveBeenCalled();
+    expect(usuarios[0].email).toBe('ana@mail.com');
+  });
+
+  it('con contraseña incorrecta: 401 y no guarda', async () => {
+    const { servicio, repoUsuarios } = armar([{ id_usuario: 1, email: 'ana@mail.com' }]);
+    const guardar = jest.spyOn(repoUsuarios, 'save');
+    jest.spyOn(HashUtil, 'comparePassword').mockResolvedValue(false);
+
+    await expect(servicio.actualizarPerfil(1, { email: 'otro@mail.com', password_actual: 'mala' }, { cookie: jest.fn() }))
+      .rejects.toThrow(new UnauthorizedException('La contraseña actual no es correcta'));
+    expect(guardar).not.toHaveBeenCalled();
+  });
+
+  it('con la contraseña correcta cambia el correo; con correo y contraseña nuevos compara una sola vez', async () => {
+    const { servicio, repoUsuarios } = armar([{ id_usuario: 1, email: 'ana@mail.com' }]);
+    capturarFirma(servicio);
+    const guardar = jest.spyOn(repoUsuarios, 'save');
+    const comparar = jest.spyOn(HashUtil, 'comparePassword').mockImplementation(async (plano) => plano === 'actual');
+    jest.spyOn(HashUtil, 'hashPassword').mockResolvedValue('hash-nuevo');
+
+    const sesion = await servicio.actualizarPerfil(
+      1,
+      { email: 'Nueva@Mail.com', password_actual: 'actual', password_nueva: 'nueva123' },
+      { cookie: jest.fn() },
+    );
+
+    expect(comparar).toHaveBeenCalledTimes(1);
+    expect(guardar).toHaveBeenCalledWith(expect.objectContaining({ email: 'nueva@mail.com', password: 'hash-nuevo' }));
+    expect(sesion.email).toBe('nueva@mail.com');
+  });
+
+  it('el mismo correo (aunque cambien las mayúsculas) no pide contraseña', async () => {
+    const { servicio, repoUsuarios } = armar([{ id_usuario: 1, email: 'ana@mail.com' }]);
+    capturarFirma(servicio);
+    const guardar = jest.spyOn(repoUsuarios, 'save');
+    const comparar = jest.spyOn(HashUtil, 'comparePassword');
+
+    await servicio.actualizarPerfil(1, { nombre: 'Ana María', email: 'ANA@mail.com' }, { cookie: jest.fn() });
+
+    expect(comparar).not.toHaveBeenCalled();
+    expect(guardar).toHaveBeenCalledWith(expect.objectContaining({ nombre: 'Ana María', email: 'ana@mail.com' }));
+  });
+
+  it('cuenta sin contraseña local (solo Google): 400, no puede cambiar el correo por esta vía', async () => {
+    const { servicio, usuarios, repoUsuarios } = armar([{ id_usuario: 1, email: 'ana@mail.com' }]);
+    usuarios[0].password = null;
+    const guardar = jest.spyOn(repoUsuarios, 'save');
+
+    await expect(servicio.actualizarPerfil(1, { email: 'otro@mail.com', password_actual: 'x' }, { cookie: jest.fn() }))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(guardar).not.toHaveBeenCalled();
   });
 });

@@ -74,17 +74,17 @@ describe('CajaSesionRepository.resumenTurno', () => {
  * T3: sugerido_inicial en disponibles y turnos del arqueo por sucursal. El SQL se arma según las
  * columnas que existan y todo valor del usuario va como parámetro ($n), nunca en el texto.
  */
-function snapshotCaja(opciones: { conteo?: boolean; sucursal?: boolean } = {}): SnapshotEsquema {
-  const { conteo = true, sucursal = true } = opciones;
+function snapshotCaja(opciones: { conteo?: boolean; sucursal?: boolean; estado?: boolean } = {}): SnapshotEsquema {
+  const { conteo = true, sucursal = true, estado = false } = opciones;
   const columnas = new Map<string, Set<string>>([
     ['aperturas_caja', new Set(['id_apertura', 'id_caja', 'fecha', 'monto_inicial', 'id_usuario'])],
     ['cierres_caja', new Set(['id_cierre', 'id_apertura', 'fecha', ...(conteo ? ['monto_conteo'] : [])])],
-    ['cajas', new Set(['id_caja', 'nombre', ...(sucursal ? ['id_sucursal'] : [])])],
+    ['cajas', new Set(['id_caja', 'nombre', ...(sucursal ? ['id_sucursal'] : []), ...(estado ? ['estado'] : [])])],
   ]);
   return new SnapshotEsquema(columnas, Date.now());
 }
 
-function armarCaja(opciones: { conteo?: boolean; sucursal?: boolean } = {}, respuesta: (sql: string) => any[] = () => []) {
+function armarCaja(opciones: { conteo?: boolean; sucursal?: boolean; estado?: boolean } = {}, respuesta: (sql: string) => any[] = () => []) {
   const query = jest.fn(async (sql: string, _params?: unknown[]) => respuesta(sql));
   const esquema = { snapshot: jest.fn().mockResolvedValue(snapshotCaja(opciones)) };
   const repo = new CajaSesionRepository({ query } as any, esquema as any, {} as any);
@@ -227,5 +227,241 @@ describe('CajaSesionRepository.listarTurnos', () => {
     expect(await b.repo.sucursalDeCaja(99)).toBeUndefined();
     const c = armarCaja({}, () => [{ id_sucursal: null }]);
     expect(await c.repo.sucursalDeCaja(2)).toBeNull();
+  });
+});
+
+describe('CajaSesionRepository.ocupantesDeCajas', () => {
+  it('turnos sin cierre, uno por caja, con el mismo nombre y fecha que el listado de turnos', async () => {
+    const { repo, query } = armarCaja({}, () => [
+      { id_caja: 2, id_usuario: 9, usuario_nombre: 'Ana Quispe', abierta_en: '2026-11-09T13:05:00.000Z' },
+      { id_caja: 4, id_usuario: null, usuario_nombre: null, abierta_en: null },
+    ]);
+
+    const mapa = await repo.ocupantesDeCajas();
+
+    expect(mapa.get(2)).toEqual({ id_usuario: 9, usuario_nombre: 'Ana Quispe', abierta_en: '2026-11-09T13:05:00.000Z' });
+    expect(mapa.get(4)).toEqual({ id_usuario: null, usuario_nombre: null, abierta_en: null });
+    expect(mapa.has(1)).toBe(false);
+
+    const sql = String(query.mock.calls[0][0]);
+    expect(sql).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM cierres_caja ci WHERE ci\.id_apertura = a\.id_apertura/);
+    expect(sql).toMatch(/LEFT JOIN usuarios u ON u\.id_usuario = a\.id_usuario/);
+    expect(sql).toMatch(/NULLIF\(TRIM\(CONCAT_WS\(' ', u\.nombre, u\.apellido_paterno\)\), ''\) AS usuario_nombre/);
+    expect(sql).toMatch(/to_char\(a\.fecha, .+\) AS abierta_en/);
+    expect(sql).toMatch(/DISTINCT ON \(a\.id_caja\)/);
+    expect(sql).toMatch(/ORDER BY a\.id_caja, a\.fecha DESC, a\.id_apertura DESC/);
+    expect(query.mock.calls[0][1]).toBeUndefined();
+  });
+
+  it('sin columna de fecha en aperturas_caja la hora llega NULL y la consulta no la nombra', async () => {
+    const query = jest.fn(async (_sql: string) => []);
+    const columnas = new Map<string, Set<string>>([
+      ['aperturas_caja', new Set(['id_apertura', 'id_caja', 'id_usuario'])],
+      ['cierres_caja', new Set(['id_cierre', 'id_apertura'])],
+      ['cajas', new Set(['id_caja', 'nombre'])],
+    ]);
+    const esquema = { snapshot: jest.fn().mockResolvedValue(new SnapshotEsquema(columnas, Date.now())) };
+    const repo = new CajaSesionRepository({ query } as any, esquema as any, {} as any);
+
+    await repo.ocupantesDeCajas();
+
+    const sql = String(query.mock.calls[0][0]);
+    expect(sql).toMatch(/to_char\(NULL::timestamp, .+\) AS abierta_en/);
+    expect(sql).toMatch(/ORDER BY a\.id_caja, a\.id_apertura DESC/);
+  });
+});
+
+describe('CajaSesionRepository: hora de apertura y cierre (Fase A)', () => {
+  /** Transacción simulada: sin turnos abiertos, la apertura 12 recién insertada y el cierre 40. */
+  function armarTx() {
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('INSERT INTO aperturas_caja')) return [{ id_apertura: 12 }];
+        if (sql.includes('INSERT INTO cierres_caja')) return [{ id_cierre: 40 }];
+        if (sql.includes('FOR UPDATE') && sql.includes('aperturas_caja')) return [{ id_apertura: 12 }];
+        if (sql.includes('WHERE a.id_apertura = $1')) return [apertura];
+        return [];
+      }),
+    };
+    const dataSource = { query: jest.fn(), transaction: jest.fn(async (fn: (m: unknown) => unknown) => fn(manager)) };
+    const esquema = { snapshot: jest.fn().mockResolvedValue(snapshot(true)) };
+    const repo = new CajaSesionRepository(dataSource as any, esquema as any, {} as any);
+    const insert = (tabla: string) => String(manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes(`INSERT INTO ${tabla}`))?.[0] ?? '');
+    return { repo, insert };
+  }
+
+  it('la apertura se fecha con clock_timestamp(), el mismo reloj que ventas.fecha', async () => {
+    const { repo, insert } = armarTx();
+
+    await repo.abrir({ idCaja: 1, idUsuario: 3, montoInicial: 50 });
+
+    expect(insert('aperturas_caja')).toContain('clock_timestamp()');
+    expect(insert('aperturas_caja')).not.toContain('NOW()');
+  });
+
+  it('el cierre se fecha con clock_timestamp(): la hora de cerrar, no la de empezar a esperar el candado', async () => {
+    const { repo, insert } = armarTx();
+
+    await expect(repo.cerrar({ idApertura: 12, idUsuario: 3, montoConteo: 80 }))
+      .resolves.toMatchObject({ id_apertura: 12, id_cierre: 40, cerrada: true });
+
+    expect(insert('cierres_caja')).toContain('clock_timestamp()');
+    expect(insert('cierres_caja')).not.toContain('NOW()');
+  });
+});
+
+/**
+ * Fase 7: todos los locales, cajas con `activa`, alta y edición de cajas, y abrir una caja
+ * desactivada. Las columnas se detectan del catálogo: sin `cajas.estado` toda caja es activa y
+ * no se intenta escribir esa columna.
+ */
+describe('CajaSesionRepository · locales y cajas (Fase 7)', () => {
+  const filaCaja = (o: Record<string, unknown> = {}) => ({
+    id_caja: 1,
+    nombre: 'Caja 1',
+    id_sucursal: 1,
+    sucursal_nombre: 'Lurín',
+    activa: true,
+    ocupada: false,
+    sugerido_inicial: null,
+    ...o,
+  });
+
+  it('listarLocales: todas las filas de sucursales por nombre, con dirección o null', async () => {
+    const { repo, query } = armarCaja({}, () => [
+      { id_sucursal: 2, nombre: 'Lurín', direccion: 'Av. Lima 123' },
+      { id_sucursal: 5, nombre: 'Villa', direccion: '  ' },
+    ]);
+    expect(await repo.listarLocales()).toEqual([
+      { id_sucursal: 2, nombre: 'Lurín', direccion: 'Av. Lima 123' },
+      { id_sucursal: 5, nombre: 'Villa', direccion: null },
+    ]);
+    const sql = String(query.mock.calls[0][0]);
+    expect(sql).toMatch(/FROM sucursales/);
+    expect(sql).toMatch(/ORDER BY lower\(nombre\)/);
+    expect(sql).not.toMatch(/\bWHERE\b/);
+  });
+
+  it('listarDisponibles con columna estado: activa = COALESCE(c.estado, TRUE) y lo mapea', async () => {
+    const { repo, query } = armarCaja({ estado: true }, () => [filaCaja(), filaCaja({ id_caja: 2, activa: false })]);
+    const items = await repo.listarDisponibles();
+    expect(items.map((i) => i.activa)).toEqual([true, false]);
+    expect(String(query.mock.calls[0][0])).toMatch(/COALESCE\(c\.estado, TRUE\) AS activa/);
+  });
+
+  it('sin columna estado: toda caja es activa y la consulta no nombra la columna', async () => {
+    const { repo, query } = armarCaja({ estado: false }, () => [filaCaja({ activa: true })]);
+    const items = await repo.listarDisponibles();
+    expect(items[0].activa).toBe(true);
+    const sql = String(query.mock.calls[0][0]);
+    expect(sql).toMatch(/TRUE AS activa/);
+    expect(sql).not.toMatch(/c\.estado/);
+  });
+
+  /** Transacción simulada con las cajas que ya tiene el local 2. */
+  function armarTx(opciones: { estado?: boolean; existentes?: string[]; localExiste?: boolean; ocupada?: boolean } = {}) {
+    const { estado = true, existentes = [], localExiste = true, ocupada = false } = opciones;
+    const manager = {
+      query: jest.fn(async (sql: string, _params?: unknown[]) => {
+        if (sql.includes('FROM sucursales') && sql.includes('FOR UPDATE')) return localExiste ? [{ id_sucursal: 2 }] : [];
+        if (sql.includes('SELECT nombre') && sql.includes('FROM cajas')) return existentes.map((nombre) => ({ nombre }));
+        if (sql.includes('INSERT INTO cajas')) return [{ id_caja: 9 }];
+        if (sql.includes('SELECT id_caja') && sql.includes('FOR UPDATE')) return [{ id_caja: 9, activa: true }];
+        if (/^\s*SELECT 1\s+FROM aperturas_caja/.test(sql)) return ocupada ? [{ '?column?': 1 }] : [];
+        if (sql.includes('AS sugerido_inicial')) return [filaCaja({ id_caja: 9, id_sucursal: 2, sucursal_nombre: 'Pachacámac' })];
+        return [];
+      }),
+    };
+    const dataSource = { query: jest.fn(), transaction: jest.fn(async (fn: (m: unknown) => unknown) => fn(manager)) };
+    const esquema = { snapshot: jest.fn().mockResolvedValue(snapshotCaja({ estado })) };
+    const repo = new CajaSesionRepository(dataSource as any, esquema as any, {} as any);
+    const llamadas = (frag: string) => manager.query.mock.calls.filter((c: unknown[]) => String(c[0]).includes(frag));
+    return { repo, manager, llamadas };
+  }
+
+  it('crearCaja: bloquea el local antes de leer los nombres y de insertar; sin nombre pone «Caja 1»', async () => {
+    const { repo, manager } = armarTx();
+    const creada = await repo.crearCaja({ idSucursal: 2, nombre: null });
+    const sqls = manager.query.mock.calls.map((c: unknown[]) => String(c[0]));
+    const iLock = sqls.findIndex((q) => q.includes('FROM sucursales') && q.includes('FOR UPDATE'));
+    const iNombres = sqls.findIndex((q) => q.includes('SELECT nombre'));
+    const iInsert = sqls.findIndex((q) => q.includes('INSERT INTO cajas'));
+    expect(iLock).toBe(0);
+    expect(iNombres).toBeGreaterThan(iLock);
+    expect(iInsert).toBeGreaterThan(iNombres);
+    const insert = manager.query.mock.calls[iInsert] as unknown[];
+    expect(insert[1]).toEqual([2, 'Caja 1']);
+    expect(creada.id_caja).toBe(9);
+  });
+
+  it('crearCaja sin nombre toma el primer número libre del local (Caja 2 si ya hay Caja 1 y Caja 3)', async () => {
+    const { repo, manager } = armarTx({ existentes: ['Caja 1', 'CAJA 3'] });
+    await repo.crearCaja({ idSucursal: 2 });
+    const insert = manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('INSERT INTO cajas')) as unknown[];
+    expect(insert[1]).toEqual([2, 'Caja 2']);
+  });
+
+  it('crearCaja con un nombre ya usado en el local (sin distinguir mayúsculas) → CAJA_NOMBRE_REPETIDO y no inserta', async () => {
+    const { repo, llamadas } = armarTx({ existentes: ['Caja Principal'] });
+    await expect(repo.crearCaja({ idSucursal: 2, nombre: '  caja principal ' })).rejects.toThrow('CAJA_NOMBRE_REPETIDO');
+    expect(llamadas('INSERT INTO cajas')).toHaveLength(0);
+  });
+
+  it('crearCaja en un local inexistente → SUCURSAL_NO_ENCONTRADA y no inserta', async () => {
+    const { repo, llamadas } = armarTx({ localExiste: false });
+    await expect(repo.crearCaja({ idSucursal: 99 })).rejects.toThrow('SUCURSAL_NO_ENCONTRADA');
+    expect(llamadas('INSERT INTO cajas')).toHaveLength(0);
+  });
+
+  it('actualizarCaja: renombrar bloquea local y caja y compara contra las demás cajas del local', async () => {
+    const { repo, manager, llamadas } = armarTx({ existentes: ['Caja 1'] });
+    await expect(repo.actualizarCaja(9, { nombre: 'caja 1' })).rejects.toThrow('CAJA_NOMBRE_REPETIDO');
+    expect(llamadas('UPDATE cajas')).toHaveLength(0);
+    expect(manager.query.mock.calls.some((c: unknown[]) => String(c[0]).includes('FROM sucursales') && String(c[0]).includes('FOR UPDATE'))).toBe(true);
+
+    const ok = armarTx({ existentes: ['Caja 1'] });
+    await ok.repo.actualizarCaja(9, { nombre: ' Mostrador ' });
+    const upd = ok.llamadas('UPDATE cajas')[0] as unknown[];
+    expect(String(upd[0])).toMatch(/SET nombre = \$1/);
+    expect(upd[1]).toEqual(['Mostrador', 9]);
+  });
+
+  it('actualizarCaja desactivar con turno abierto → CAJA_CON_TURNO_ABIERTO, con la caja bloqueada y sin escribir', async () => {
+    const { repo, llamadas } = armarTx({ ocupada: true });
+    await expect(repo.actualizarCaja(9, { activa: false })).rejects.toThrow('CAJA_CON_TURNO_ABIERTO');
+    expect(llamadas('SELECT id_caja FROM cajas WHERE id_caja = $1 FOR UPDATE')).toHaveLength(1);
+    expect(llamadas('UPDATE cajas')).toHaveLength(0);
+  });
+
+  it('actualizarCaja desactivar sin turno escribe estado = false; activar escribe true sin mirar turnos', async () => {
+    const sin = armarTx({ ocupada: false });
+    await sin.repo.actualizarCaja(9, { activa: false });
+    expect((sin.llamadas('UPDATE cajas')[0] as unknown[])[1]).toEqual([false, 9]);
+
+    const act = armarTx({ ocupada: true });
+    await act.repo.actualizarCaja(9, { activa: true });
+    expect((act.llamadas('UPDATE cajas')[0] as unknown[])[1]).toEqual([true, 9]);
+  });
+
+  it('sin columna estado no se intenta escribirla: CAJA_ESQUEMA_NO_SOPORTA', async () => {
+    const { repo, manager } = armarTx({ estado: false });
+    await expect(repo.actualizarCaja(9, { activa: false })).rejects.toThrow('CAJA_ESQUEMA_NO_SOPORTA');
+    expect(manager.query).not.toHaveBeenCalled();
+  });
+
+  it('abrir una caja desactivada → CAJA_DESACTIVADA y no inserta el turno', async () => {
+    const manager = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('FROM cajas WHERE id_caja = $1 FOR UPDATE')) return [{ id_caja: 3, activa: false }];
+        return [];
+      }),
+    };
+    const dataSource = { query: jest.fn(), transaction: jest.fn(async (fn: (m: unknown) => unknown) => fn(manager)) };
+    const esquema = { snapshot: jest.fn().mockResolvedValue(snapshotCaja({ estado: true })) };
+    const repo = new CajaSesionRepository(dataSource as any, esquema as any, {} as any);
+
+    await expect(repo.abrir({ idCaja: 3, idUsuario: 7, montoInicial: 0 })).rejects.toThrow('CAJA_DESACTIVADA');
+    expect(manager.query.mock.calls.some((c: unknown[]) => String(c[0]).includes('INSERT INTO aperturas_caja'))).toBe(false);
+    expect(String(manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('FOR UPDATE'))?.[0])).toMatch(/COALESCE\(estado, TRUE\) AS activa/);
   });
 });

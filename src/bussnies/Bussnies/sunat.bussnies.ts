@@ -9,6 +9,22 @@ import { Cliente } from '../../models/DBModel/cliente.entity';
 import { Empresa } from '../../models/DBModel/empresa.entity';
 import { Proveedor } from '../../models/DBModel/proveedor.entity';
 
+/**
+ * Solo dígitos: el número va dentro de la URL de ApiPeru, y con solo contar el
+ * largo pasaban `../`, `?` o `#` que cambian la ruta o la consulta.
+ */
+export function validarDni(dni: unknown): void {
+  if (typeof dni !== 'string' || !/^\d{8}$/.test(dni)) {
+    throw new BadRequestException('El DNI debe tener 8 dígitos');
+  }
+}
+
+export function validarRuc(ruc: unknown): void {
+  if (typeof ruc !== 'string' || !/^\d{11}$/.test(ruc)) {
+    throw new BadRequestException('El RUC debe tener 11 dígitos');
+  }
+}
+
 @Injectable()
 export class SunatBussnies implements ISunatBussniees {
 
@@ -17,7 +33,7 @@ export class SunatBussnies implements ISunatBussniees {
   // ── DNI solo consulta ────────────────────────────────────────
 
   async consultarDni(dni: string): Promise<DniResponse> {
-    if (dni.length !== 8) throw new BadRequestException('El DNI debe tener 8 dígitos');
+    validarDni(dni);
 
     const enBD = await this.sunatRepo.buscarClientePorDni(Number(dni));
     if (enBD) return this.mapCliente(enBD);
@@ -50,7 +66,7 @@ export class SunatBussnies implements ISunatBussniees {
   // ── DNI consulta y guarda en clientes + documento ────────────
 
   async guardarClienteDni(dto: BuscarDniRequest): Promise<DniResponse> {
-    if (dto.dni.length !== 8) throw new BadRequestException('El DNI debe tener 8 dígitos');
+    validarDni(dto.dni);
 
     const enBD = await this.sunatRepo.buscarClientePorDni(Number(dto.dni));
     if (enBD) return this.mapCliente(enBD);
@@ -83,7 +99,7 @@ export class SunatBussnies implements ISunatBussniees {
   // ── RUC solo consulta ────────────────────────────────────────
 
   async consultarRuc(ruc: string): Promise<RucResponse> {
-    if (ruc.length !== 11) throw new BadRequestException('El RUC debe tener 11 dígitos');
+    validarRuc(ruc);
 
     const enBD = await this.sunatRepo.buscarEmpresaPorRuc(ruc);
     if (enBD) return this.mapEmpresa(enBD);
@@ -125,7 +141,7 @@ export class SunatBussnies implements ISunatBussniees {
   // ── RUC guarda en empresas ───────────────────────────────────
 
   async guardarEmpresaRuc(dto: BuscarRucEmpresaRequest): Promise<RucResponse> {
-    if (dto.ruc.length !== 11) throw new BadRequestException('El RUC debe tener 11 dígitos');
+    validarRuc(dto.ruc);
 
     const enBD = await this.sunatRepo.buscarEmpresaPorRuc(dto.ruc);
     if (enBD) return this.mapEmpresa(enBD);
@@ -168,7 +184,7 @@ export class SunatBussnies implements ISunatBussniees {
   // ── RUC guarda en proveedores ────────────────────────────────
 
   async guardarProveedorRuc(dto: BuscarRucProveedorRequest): Promise<RucResponse> {
-    if (dto.ruc.length !== 11) throw new BadRequestException('El RUC debe tener 11 dígitos');
+    validarRuc(dto.ruc);
 
     const enBD = await this.sunatRepo.buscarProveedorPorRuc(dto.ruc);
     if (enBD) return this.mapProveedor(enBD);

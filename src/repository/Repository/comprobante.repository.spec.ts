@@ -277,4 +277,43 @@ describe('ComprobanteRepository', () => {
     expect(String(sql)).not.toContain('fiscal_envios');
     expect(parametros).toEqual([[5, 6]]);
   });
+
+  describe('estadoDe (seguimiento liviano)', () => {
+    it('un solo SELECT parametrizado de las seis columnas, sin relaciones ni ítems', async () => {
+      const query = jest.fn().mockResolvedValue([
+        { id_comprobante: '50', estado: 'emitido', estado_sunat: 'ACEPTADO', aceptada_sunat: true, sunat_description: 'ok', anulado: false },
+      ]);
+
+      const r = await crearRepositorio({}, { query }).estadoDe(50);
+
+      expect(query).toHaveBeenCalledTimes(1);
+      const [sql, parametros] = query.mock.calls[0];
+      expect(sql).toContain('FROM comprobantes c');
+      expect(sql).toContain('WHERE c.id_comprobante = $1');
+      expect(sql).not.toMatch(/JOIN|to_jsonb/);
+      expect(parametros).toEqual([50]);
+      expect(r).toEqual({
+        id_comprobante: 50,
+        estado: 'emitido',
+        estado_sunat: 'ACEPTADO',
+        aceptada_sunat: true,
+        sunat_description: 'ok',
+        anulado: false,
+      });
+    });
+
+    it('null si no existe y las columnas vacías salen como null', async () => {
+      const repo = crearRepositorio({}, { query: jest.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([{ id_comprobante: 7 }]) });
+
+      expect(await repo.estadoDe(1)).toBeNull();
+      expect(await repo.estadoDe(7)).toEqual({
+        id_comprobante: 7,
+        estado: null,
+        estado_sunat: null,
+        aceptada_sunat: null,
+        sunat_description: null,
+        anulado: null,
+      });
+    });
+  });
 });

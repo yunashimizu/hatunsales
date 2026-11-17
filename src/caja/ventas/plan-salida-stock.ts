@@ -9,6 +9,10 @@
  *   stock, aunque haya almacén preferido.
  * - Las líneas se atienden en el orden del carrito; si un producto se repite, la segunda
  *   línea ve el stock que dejó la primera (igual que cuando se consultaba línea por línea).
+ *
+ * Las cuentas se hacen en milésimas enteras (el stock es NUMERIC(12,3)): con coma flotante,
+ * 0,1 + 0,2 sobre un stock de 0,3 dejaba un «faltante» de 2,7e-17. Salidas y faltantes vuelven
+ * en unidades.
  */
 export interface FilaInventarioBloqueada {
   id_inventario: number;
@@ -47,7 +51,8 @@ export function planificarSalidas(
 ): PlanSalida {
   const exclusivo = !opciones.derrame
     && idAlmacenPreferido != null && Number.isFinite(idAlmacenPreferido) && idAlmacenPreferido > 0;
-  const restante = new Map<number, number>(filas.map((f) => [f.id_inventario, Math.max(0, Number(f.stock) || 0)]));
+  const restante = new Map<number, number>(filas.map((f) => [f.id_inventario, Math.max(0, milesimas(f.stock))]));
+  /** Salidas en milésimas; se pasan a unidades al final. */
   const salidas: SalidaStock[] = [];
 
   for (const linea of lineas) {
@@ -70,7 +75,7 @@ export function planificarSalidas(
         return a.id_almacen - b.id_almacen || a.id_inventario - b.id_inventario;
       });
 
-    let pendiente = linea.cantidad;
+    let pendiente = milesimas(linea.cantidad);
     for (const fila of candidatas) {
       if (pendiente <= 0) break;
       const disponible = restante.get(fila.id_inventario) ?? 0;
@@ -80,14 +85,20 @@ export function planificarSalidas(
       salidas.push({ id_inventario: fila.id_inventario, id_producto: linea.id_producto, id_almacen: fila.id_almacen, cantidad: tomar });
       pendiente -= tomar;
     }
-    if (pendiente > 0) return { ok: false, id_producto: linea.id_producto, faltante: pendiente };
+    if (pendiente > 0) return { ok: false, id_producto: linea.id_producto, faltante: pendiente / 1000 };
   }
 
   const porFila = new Map<number, number>();
   for (const s of salidas) porFila.set(s.id_inventario, (porFila.get(s.id_inventario) ?? 0) + s.cantidad);
   const descuentos = [...porFila.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([id_inventario, cantidad]) => ({ id_inventario, cantidad }));
+    .map(([id_inventario, cantidad]) => ({ id_inventario, cantidad: cantidad / 1000 }));
 
-  return { ok: true, salidas, descuentos };
+  return { ok: true, salidas: salidas.map((s) => ({ ...s, cantidad: s.cantidad / 1000 })), descuentos };
+}
+
+/** Cantidad en milésimas enteras (NUMERIC(12,3)); lo no numérico cuenta como 0. */
+function milesimas(valor: unknown): number {
+  const numero = Number(valor ?? 0);
+  return Number.isFinite(numero) ? Math.round(numero * 1000) : 0;
 }

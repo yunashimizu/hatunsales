@@ -5,7 +5,9 @@ import { EsquemaCajaService } from '../../caja/esquema/esquema-caja.service';
 import { Dinero } from '../../caja/dominio/dinero';
 import { filasDe } from '../../caja/bd/resultado-consulta';
 import { SQL_HOY_LIMA } from '../../util/fecha-lima';
+import { reintentarSiHuboConflicto } from '../../util/reintento-bd';
 import { TIPO_BOLETA, TIPO_FACTURA } from '../../util/fiscal/tipos-comprobante';
+import { patronContiene } from './venta-documentos.repository';
 
 export interface LineaCredito {
   credito_activo: boolean;
@@ -246,11 +248,12 @@ export class CreditoRepository {
       where.push(`(${SQL_ESTADO_CXC}) = $${params.length}`);
     }
     if (filtros.texto?.trim()) {
-      params.push(`%${filtros.texto.trim().toLowerCase().slice(0, 100)}%`);
+      // `%`, `_` y `\` del usuario se buscan tal cual, no como comodines.
+      params.push(patronContiene(filtros.texto.trim().toLowerCase().slice(0, 100)));
       where.push(`(
-        LOWER(COALESCE(c.nombre, '')) LIKE $${params.length}
-        OR LOWER(COALESCE(e.razon_social, '')) LIKE $${params.length}
-        OR CAST(cxc.id_venta AS TEXT) LIKE $${params.length}
+        LOWER(COALESCE(c.nombre, '')) LIKE $${params.length} ESCAPE '\\'
+        OR LOWER(COALESCE(e.razon_social, '')) LIKE $${params.length} ESCAPE '\\'
+        OR CAST(cxc.id_venta AS TEXT) LIKE $${params.length} ESCAPE '\\'
       )`);
     }
 
@@ -399,6 +402,9 @@ export class CreditoRepository {
   /**
    * Registra el abono con aritmética en céntimos y devuelve la cuenta ya actualizada
    * (leída después del COMMIT; antes se leía con otra conexión y salía el saldo viejo).
+   *
+   * `saldo_esperado`: el saldo que vio quien abona. Si el real, ya bloqueado, difiere en más de
+   * medio céntimo, `CxC_DESACTUALIZADA:<saldo>` sin escribir nada: un doble envío no cobra dos veces.
    */
   async registrarAbono(datos: {
     id_cxc: number;
@@ -406,19 +412,26 @@ export class CreditoRepository {
     id_metodo?: number;
     referencia?: string;
     id_usuario?: number;
+    saldo_esperado?: number;
   }) {
     await this.exigirEsquema();
-    await this.dataSource.transaction(async (manager) => {
+    // Un interbloqueo revierte todo: el abono entero se repite solo.
+    await reintentarSiHuboConflicto(() => this.dataSource.transaction(async (manager) => {
       const filas = await manager.query(
         `SELECT id_cxc, estado, saldo::text AS saldo FROM cuentas_por_cobrar WHERE id_cxc = $1 FOR UPDATE`,
         [datos.id_cxc],
       );
       const cxc = filas[0];
       if (!cxc) throw new Error('CxC_NO_ENCONTRADA');
+
+      const saldo = Dinero.desdeBd(cxc.saldo);
+      if (datos.saldo_esperado !== undefined && datos.saldo_esperado !== null
+        && Math.abs(saldo.centimos - Number(datos.saldo_esperado) * 100) > 0.5) {
+        throw new Error(`CxC_DESACTUALIZADA:${saldo.aTexto()}`);
+      }
       if (['pagado', 'anulado'].includes(cxc.estado)) throw new Error('CxC_CERRADA');
 
       const monto = Dinero.desdeNumeroRedondeado(Number(datos.monto));
-      const saldo = Dinero.desdeBd(cxc.saldo);
       // Holgura de 5 céntimos por redondeos al cobrar.
       if (!monto.esPositivo() || monto.centimos > saldo.centimos + 5) throw new Error('CxC_MONTO_INVALIDO');
 
@@ -447,7 +460,7 @@ export class CreditoRepository {
           WHERE id_cxc = $3`,
         [pagado ? '0.00' : restante.aTexto(), pagado, datos.id_cxc],
       );
-    });
+    }), { operacion: 'Registrar abono' });
     return this.obtener(datos.id_cxc);
   }
 

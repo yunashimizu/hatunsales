@@ -258,6 +258,37 @@ export class ComprobanteRepository {
   }
 
   /**
+   * Solo las columnas del estado, sin relaciones ni ítems: lo consulta el seguimiento del envío
+   * diferido varias veces por venta y `buscarPorId` carga el comprobante completo. Son columnas
+   * base de `comprobantes` (la misma entidad las lee siempre), no opcionales.
+   */
+  async estadoDe(id_comprobante: number): Promise<{
+    id_comprobante: number;
+    estado: string | null;
+    estado_sunat: string | null;
+    aceptada_sunat: boolean | null;
+    sunat_description: string | null;
+    anulado: boolean | null;
+  } | null> {
+    const filas: any[] = await this.dataSource.query(
+      `SELECT c.id_comprobante, c.estado, c.estado_sunat, c.aceptada_sunat, c.sunat_description, c.anulado
+         FROM comprobantes c
+        WHERE c.id_comprobante = $1`,
+      [id_comprobante],
+    );
+    const f = filas[0];
+    if (!f) return null;
+    return {
+      id_comprobante: Number(f.id_comprobante),
+      estado: f.estado ?? null,
+      estado_sunat: f.estado_sunat ?? null,
+      aceptada_sunat: f.aceptada_sunat ?? null,
+      sunat_description: f.sunat_description ?? null,
+      anulado: f.anulado ?? null,
+    };
+  }
+
+  /**
    * Comprobantes de la venta con el principal vigente primero (factura o boleta no anulada ni
    * en error), luego los demás principales y al final las notas; dentro de cada grupo, el más reciente.
    */

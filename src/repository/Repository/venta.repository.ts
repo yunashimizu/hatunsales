@@ -8,6 +8,8 @@ import { Dinero } from '../../caja/dominio/dinero';
 import { filasDe } from '../../caja/bd/resultado-consulta';
 import { variantesCodigo } from '../../util/codigo-barras.util';
 import { SQL_HOY_LIMA, sqlFinExclusivoDiaLima, sqlInicioDiaLima } from '../../util/fecha-lima';
+import { reintentarSiHuboConflicto } from '../../util/reintento-bd';
+import { condicionBusquedaProductos } from '../../util/busqueda-productos.util';
 import { TIPO_NOTA_CREDITO } from '../../util/fiscal/tipos-comprobante';
 import type { EstadoSunat } from '../../sunat/nucleo/documento-fiscal.types';
 import type { Paginado, VentaHistorialFila } from '../../models/model/venta/venta-documentos.response';
@@ -39,7 +41,7 @@ export interface LineaVentaPersistida {
 export interface DatosVenta {
   id_cliente?: number;
   id_empresa?: number;
-  id_caja?: number;
+  /** Cajero: su apertura tiene prioridad al elegir la caja (la caja nunca la elige el cliente). */
   id_usuario?: number;
   subtotal: number;
   igv: number;
@@ -123,6 +125,15 @@ export interface FiltroVentas {
 export const LIMITE_BUSQUEDA_POS = 50;
 const LARGO_MAXIMO_BUSQUEDA = 100;
 
+/**
+ * Fragmento de `destacado` del catálogo del mostrador. Son constantes del código (nunca texto
+ * del usuario): con la columna se lee directo; sin ella (instalación antigua) sale `false`.
+ */
+const SQL_DESTACADO_CON_COLUMNA = 'COALESCE(p.destacado, false)';
+const SQL_DESTACADO_SIN_COLUMNA = 'false';
+/** Si la columna falta se vuelve a mirar como máximo cada 60 s (por si corren el script sin reiniciar). */
+const RELECTURA_COLUMNA_MS = 60_000;
+
 type Consultor = Pick<EntityManager, 'query'>;
 
 const SQL_MOVIMIENTO = {
@@ -130,13 +141,16 @@ const SQL_MOVIMIENTO = {
   entrada: { tipo: `'entrada'`, sucursales: 'NULL::int, a.id_sucursal' },
 } as const;
 
-/** Línea de crédito del deudor: candado sobre su fila y, aparte, su deuda viva. */
+/**
+ * Línea de crédito del deudor: candado sobre su fila y, aparte, su deuda viva. FOR NO KEY UPDATE
+ * y no FOR UPDATE: no choca con el KEY SHARE que toman las llaves foráneas de ventas y cuentas.
+ */
 const SQL_LINEA_CREDITO = {
   empresa: {
     bloquear: `SELECT COALESCE(e.credito_activo, FALSE) AS credito_activo,
                       COALESCE(e.limite_credito, 0)::text AS limite_credito
                  FROM empresas e WHERE e.id_empresa = $1
-                  FOR UPDATE`,
+                  FOR NO KEY UPDATE`,
     deuda: `SELECT COALESCE(SUM(saldo), 0)::text AS deuda
               FROM cuentas_por_cobrar
              WHERE id_empresa = $1 AND estado IN ('pendiente', 'parcial', 'vencido')`,
@@ -146,7 +160,7 @@ const SQL_LINEA_CREDITO = {
     bloquear: `SELECT COALESCE(c.credito_activo, FALSE) AS credito_activo,
                       COALESCE(c.limite_credito, 0)::text AS limite_credito
                  FROM clientes c WHERE c.id_cliente = $1
-                  FOR UPDATE`,
+                  FOR NO KEY UPDATE`,
     deuda: `SELECT COALESCE(SUM(saldo), 0)::text AS deuda
               FROM cuentas_por_cobrar
              WHERE id_cliente = $1 AND estado IN ('pendiente', 'parcial', 'vencido')`,
@@ -188,7 +202,8 @@ function agruparPorAlmacen(
  *
  * Registrar una venta toma los candados siempre en el mismo orden para que dos cajas no
  * se bloqueen entre sí: clave de idempotencia → cotización → filas de inventario por
- * (id_producto, id_almacen) → línea de crédito del cliente o empresa.
+ * (id_producto, id_almacen) → línea de crédito del cliente o empresa → apertura de caja
+ * → escrituras (ventas, detalle, pagos, cuentas por cobrar).
  */
 @Injectable()
 export class VentaRepository {
@@ -200,6 +215,10 @@ export class VentaRepository {
     private readonly dataSource: DataSource,
     private readonly esquema: EsquemaCajaService,
   ) {}
+
+  /** Lectura cacheada de si `productos.destacado` existe (ver `columnaDestacadoExiste`). */
+  private destacadoColumna: { existe: boolean; leidoEn: number } | null = null;
+  private destacadoColumnaEnCurso: Promise<boolean> | null = null;
 
   // ── Búsqueda de productos para el mostrador ──────────────────
 
@@ -223,6 +242,35 @@ export class VentaRepository {
   }
 
   /**
+   * ¿Existe `productos.destacado`? `EsquemaCajaService` no lee la tabla `productos`, así que se
+   * consulta aquí `information_schema` una vez: con la columna presente la lectura queda fija;
+   * si falta se relee como máximo cada 60 s. Un error de la consulta no se cachea.
+   */
+  private async columnaDestacadoExiste(): Promise<boolean> {
+    const actual = this.destacadoColumna;
+    if (actual && (actual.existe || Date.now() - actual.leidoEn < RELECTURA_COLUMNA_MS)) return actual.existe;
+    if (!this.destacadoColumnaEnCurso) {
+      this.destacadoColumnaEnCurso = Promise.resolve(
+        this.dataSource.query(
+          `SELECT 1
+             FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'productos' AND column_name = 'destacado'
+            LIMIT 1`,
+        ),
+      )
+        .then((filas: unknown[]) => {
+          const existe = Array.isArray(filas) && filas.length > 0;
+          this.destacadoColumna = { existe, leidoEn: Date.now() };
+          return existe;
+        })
+        .finally(() => {
+          this.destacadoColumnaEnCurso = null;
+        });
+    }
+    return this.destacadoColumnaEnCurso;
+  }
+
+  /**
    * Catálogo completo del mostrador (activos). Una carga para cache en el front.
    * Misma forma de respuesta que el autocompletado.
    */
@@ -231,6 +279,9 @@ export class VentaRepository {
     const stock = this.joinStock(idAlmacen);
     const idxLimite = stock.params.length + 1;
     const joinSql = stock.sql.replace('$ALM', `$${stock.params.length || 1}`);
+    const destacadoSql = (await this.columnaDestacadoExiste())
+      ? SQL_DESTACADO_CON_COLUMNA
+      : SQL_DESTACADO_SIN_COLUMNA;
 
     const filas = await this.dataSource.query(
       `SELECT p.id_producto,
@@ -244,8 +295,8 @@ export class VentaRepository {
               COALESCE(inv.stock, 0)         AS stock_disponible,
               COALESCE(img.url, '')          AS imagen_url,
               cat.nombre                     AS categoria,
-              -- Vía JSON: si la columna aún no existe en esa instalación devuelve false en vez de fallar.
-              COALESCE((to_jsonb(p) ->> 'destacado')::boolean, false) AS destacado
+              -- Lectura directa de la columna: antes se serializaba la fila entera de cada producto.
+              ${destacadoSql} AS destacado
          FROM productos p
          LEFT JOIN categorias cat ON cat.id_categoria = p.id_categoria
          ${joinSql}
@@ -297,6 +348,8 @@ export class VentaRepository {
     const stock = this.joinStock(idAlmacen);
     const offset = stock.params.length;
     const joinSql = stock.sql.replace('$ALM', `$${offset || 1}`);
+    // Perdona tildes y el orden de las palabras; nada del usuario entra al SQL salvo como parámetro.
+    const condicion = condicionBusquedaProductos(texto, offset + 1);
 
     const filas = await this.dataSource.query(
       `SELECT p.id_producto,
@@ -324,19 +377,14 @@ export class VentaRepository {
                  LIMIT 1
               ) img ON TRUE
         WHERE COALESCE(p.estado, TRUE) = TRUE
-          AND (
-                LOWER(p.nombre) LIKE $${offset + 1}
-             OR LOWER(COALESCE(p.sku, '')) LIKE $${offset + 1}
-             OR COALESCE(p.codigo_barras, '') LIKE $${offset + 2}
-          )
-        ORDER BY (COALESCE(p.codigo_barras, '') = $${offset + 3}) DESC,
-                 (LOWER(COALESCE(p.sku, '')) = $${offset + 4}) DESC,
+          AND ${condicion.sql}
+        ORDER BY (COALESCE(p.codigo_barras, '') = $${offset + condicion.params.length + 1}) DESC,
+                 (LOWER(COALESCE(p.sku, '')) = $${offset + condicion.params.length + 2}) DESC,
                  p.nombre ASC
-        LIMIT $${offset + 5}`,
+        LIMIT $${offset + condicion.params.length + 3}`,
       [
         ...stock.params,
-        `%${texto.toLowerCase()}%`,
-        `%${texto}%`,
+        ...condicion.params,
         texto,
         texto.toLowerCase(),
         tope,
@@ -635,7 +683,8 @@ export class VentaRepository {
     const conStockSalida = await this.esquema.tiene('ventaStockSalida');
 
     try {
-      return await this.dataSource.transaction(async (manager) => {
+      // Un interbloqueo o fallo de serialización revierte todo: la venta entera se repite sola.
+      return await reintentarSiHuboConflicto(() => this.dataSource.transaction(async (manager) => {
         if (clave) {
           // Serializa reintentos concurrentes de la misma venta aunque falte el índice único.
           await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [clave]);
@@ -660,14 +709,20 @@ export class VentaRepository {
           salidasStock = await this.descontarStock(manager, lineas, opciones.idAlmacenPreferido);
         }
 
-        const idCaja =
-          datos.id_caja
-          ?? (await this.cajaAbierta(manager, {
-            idUsuario: datos.id_usuario,
-            idAlmacen: opciones.idAlmacenPreferido,
-          }));
+        // Antes del INSERT de la venta: su llave foránea toma KEY SHARE del cliente o empresa y,
+        // si el candado de la línea de crédito viniera después, dos ventas a crédito al mismo
+        // deudor se interbloquearían.
+        if (datos.credito && Number(datos.credito.monto) > 0) {
+          await this.assertCupoCreditoEnTx(manager, datos.credito);
+        }
 
-        const idVenta = await this.insertarCabecera(manager, esquema, datos, idCaja, clave);
+        // La caja la decide el servidor (nunca el cliente) y queda a salvo de un cierre en curso.
+        const apertura = await this.aperturaParaVenta(manager, {
+          idUsuario: datos.id_usuario,
+          idAlmacen: opciones.idAlmacenPreferido,
+        });
+
+        const idVenta = await this.insertarCabecera(manager, esquema, datos, apertura?.id_caja ?? null, clave);
 
         if (salidasStock.length && conStockSalida) {
           await manager.query(
@@ -688,8 +743,6 @@ export class VentaRepository {
         await this.insertarPagos(manager, esquema, idVenta, pagos);
 
         if (datos.credito && Number(datos.credito.monto) > 0) {
-          await this.assertCupoCreditoEnTx(manager, datos.credito);
-
           const dias = Math.max(1, Math.trunc(Number(datos.credito.dias)) || 15);
           // Vence en días calendario de Lima (CURRENT_DATE va en UTC y adelanta un día desde las 19:00).
           await manager.query(
@@ -723,7 +776,7 @@ export class VentaRepository {
 
         this.log.log(`Venta ${idVenta} registrada por ${datos.total}`);
         return { id_venta: idVenta, existente: false };
-      });
+      }), { operacion: 'Registrar venta' });
     } catch (error: any) {
       if (this.esViolacionUnica(error) && clave) {
         const existente = await this.buscarPorClaveIdempotencia(clave);
@@ -762,9 +815,11 @@ export class VentaRepository {
       valores.push(clave);
     }
     const marcadores = valores.map((_, i) => `$${i + 1}`);
+    // clock_timestamp() y no NOW(): la hora real, tomada después de los candados (la de la caja
+    // incluida). Así la venta cae dentro de [apertura, cierre) del turno al que se cuelga.
     const insertadas = await manager.query(
       `INSERT INTO ventas (${columnas.join(', ')}, fecha)
-       VALUES (${marcadores.join(', ')}, NOW())
+       VALUES (${marcadores.join(', ')}, clock_timestamp())
        RETURNING id_venta`,
       valores,
     );
@@ -936,7 +991,7 @@ export class VentaRepository {
   }
 
   /**
-   * Bloquea la fila del cliente o de la empresa (FOR UPDATE) y DESPUÉS lee su deuda en otra
+   * Bloquea la fila del cliente o de la empresa (FOR NO KEY UPDATE) y DESPUÉS lee su deuda en otra
    * consulta: en READ COMMITTED esa segunda lectura ve las cuentas que otra caja confirmó
    * mientras esperábamos el candado. Si la fila ya no existe (borrada a mitad de la venta)
    * lanza CREDITO_ENTIDAD con un mensaje claro, en vez de leer propiedades de undefined.
@@ -1054,15 +1109,37 @@ export class VentaRepository {
   }
 
   /**
-   * Caja abierta para la venta (Fase 7), en UNA consulta y con la misma prioridad de siempre:
-   * 1) apertura del mismo usuario, 2) caja de la sucursal del almacén de despacho,
-   * 3) cualquier caja abierta (legacy). Sin try/catch: dentro de la transacción un error
-   * debe abortar la venta, no esconderse.
+   * Apertura a la que se cuelga la venta. Si el cierre de esa caja se confirmó mientras
+   * esperábamos su candado, elige otra una vez; si la segunda también se cerró, CAJA_CERRANDO
+   * (la venta se revierte entera y el cajero vuelve a cobrar).
+   */
+  private async aperturaParaVenta(
+    manager: Consultor,
+    opts: { idUsuario?: number; idAlmacen?: number },
+  ): Promise<{ id_apertura: number; id_caja: number } | null> {
+    for (let intento = 1; intento <= 2; intento++) {
+      const apertura = await this.cajaAbierta(manager, opts);
+      if (!apertura) return null;
+      // Sentencia aparte a propósito: en READ COMMITTED la consulta que esperó el candado no ve
+      // el cierre que se confirmó entre tanto; esta, que empieza después, sí.
+      const cierres = await manager.query('SELECT 1 FROM cierres_caja WHERE id_apertura = $1 LIMIT 1', [apertura.id_apertura]);
+      if (!filasDe(cierres).length) return apertura;
+    }
+    throw new Error('CAJA_CERRANDO');
+  }
+
+  /**
+   * Caja abierta para la venta (Fase 7), en UNA consulta: 1) apertura del mismo usuario,
+   * 2) caja de la sucursal del almacén de despacho, 3) otra caja abierta, pero nunca una de
+   * otra sucursal conocida y distinta de la del almacén (salvo la del propio cajero); sin
+   * sucursales configuradas todo sigue como antes. FOR KEY SHARE de la apertura: el cierre
+   * (que la toma FOR UPDATE) espera a que la venta termine y la incluye en su arqueo. Sin
+   * try/catch: dentro de la transacción un error debe abortar la venta, no esconderse.
    */
   private async cajaAbierta(
     manager: Consultor,
     opts?: { idUsuario?: number; idAlmacen?: number },
-  ): Promise<number | null> {
+  ): Promise<{ id_apertura: number; id_caja: number } | null> {
     const idUsuario =
       opts?.idUsuario != null && Number.isFinite(Number(opts.idUsuario)) && Number(opts.idUsuario) > 0
         ? Number(opts.idUsuario)
@@ -1072,20 +1149,25 @@ export class VentaRepository {
         ? Number(opts.idAlmacen)
         : null;
 
-    const filas = await manager.query(
-      `SELECT a.id_caja
+    const filas = filasDe<{ id_apertura: unknown; id_caja: unknown }>(await manager.query(
+      `SELECT a.id_apertura, a.id_caja
          FROM aperturas_caja a
          JOIN cajas c ON c.id_caja = a.id_caja
-         LEFT JOIN almacenes al ON al.id_almacen = $2::int AND al.id_sucursal = c.id_sucursal
+         LEFT JOIN almacenes al ON al.id_almacen = $2::int
         WHERE NOT EXISTS (SELECT 1 FROM cierres_caja ci WHERE ci.id_apertura = a.id_apertura)
+          AND (COALESCE(a.id_usuario = $1::int, FALSE)
+               OR al.id_sucursal IS NULL OR c.id_sucursal IS NULL
+               OR al.id_sucursal = c.id_sucursal)
         ORDER BY COALESCE(a.id_usuario = $1::int, FALSE) DESC,
-                 (al.id_almacen IS NOT NULL) DESC,
-                 a.fecha DESC NULLS LAST,
-                 a.id_apertura DESC
-        LIMIT 1`,
+                 (al.id_sucursal IS NOT NULL AND al.id_sucursal = c.id_sucursal) DESC,
+                 a.fecha DESC NULLS LAST, a.id_apertura DESC
+        LIMIT 1
+          FOR KEY SHARE OF a`,
       [idUsuario, idAlmacen],
-    );
-    return filas[0]?.id_caja != null ? Number(filas[0].id_caja) : null;
+    ));
+    const fila = filas[0];
+    if (fila?.id_apertura == null || fila.id_caja == null) return null;
+    return { id_apertura: Number(fila.id_apertura), id_caja: Number(fila.id_caja) };
   }
 
   // ── Consultas ────────────────────────────────────────────────

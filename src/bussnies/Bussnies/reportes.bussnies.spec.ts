@@ -1001,3 +1001,207 @@ describe('ReportesBussnies · mapa de calor hora × día (F2)', () => {
     expect(r).toEqual({ fecha: '2026-11-08', total: 120, ventas: 2, ticket_promedio: 60 });
   });
 });
+
+/**
+ * Caché de 45 s de lo que pide el Inicio (reporteVentas y ventasPorHora). El riesgo principal es una
+ * clave incompleta: servir el reporte de otro filtro. Cada parámetro que cambia la salida debe cambiar la clave.
+ */
+describe('ReportesBussnies · caché de 45 s del Inicio', () => {
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }).setSystemTime(new Date('2026-11-08T15:00:00Z')));
+  afterEach(() => jest.useRealTimers());
+
+  const lista = () => [comprobante(1, { total: '118.00' })];
+
+  it('dos llamadas con la misma clave consultan el repositorio una sola vez y dan el mismo resultado', async () => {
+    const { servicio, repo } = armar(lista());
+
+    const a = await servicio.reporteVentas('semana', {});
+    const b = await servicio.reporteVentas('SEMANA ', {});
+
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(1);
+    expect(repo.obtenerProductosVendidos).toHaveBeenCalledTimes(1);
+    expect(b).toEqual(a);
+  });
+
+  it('peticiones simultáneas con caché fría comparten una sola carga', async () => {
+    const { servicio, repo } = armar(lista());
+
+    await Promise.all([servicio.reporteVentas('diario', {}), servicio.reporteVentas('diario', {}), servicio.reporteVentas('diario', {})]);
+
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['otro periodo', () => ['diario', {}] as const, () => ['semana', {}] as const],
+    ['otro rango', () => ['diario', { fecha_inicio: '2026-10-01', fecha_fin: '2026-10-31' }] as const, () => ['diario', { fecha_inicio: '2026-10-01', fecha_fin: '2026-10-30' }] as const],
+    ['otro inicio del rango', () => ['diario', { fecha_inicio: '2026-10-01', fecha_fin: '2026-10-31' }] as const, () => ['diario', { fecha_inicio: '2026-10-02', fecha_fin: '2026-10-31' }] as const],
+    ['otro cliente', () => ['mensual', { id_cliente: 1 }] as const, () => ['mensual', { id_cliente: 2 }] as const],
+    ['con y sin cliente', () => ['mensual', {}] as const, () => ['mensual', { id_cliente: 2 }] as const],
+    ['otra moneda', () => ['mensual', { id_moneda: 1 }] as const, () => ['mensual', { id_moneda: 2 }] as const],
+    ['otro tipo de comprobante', () => ['mensual', { id_tipo: 1 }] as const, () => ['mensual', { id_tipo: 7 }] as const],
+    ['con y sin tipo', () => ['mensual', {}] as const, () => ['mensual', { id_tipo: 1 }] as const],
+  ])('%s: consulta dos veces (la clave no se confunde)', async (_nombre, primera, segunda) => {
+    const { servicio, repo } = armar(lista());
+
+    await servicio.reporteVentas(...(primera() as [string, any]));
+    await servicio.reporteVentas(...(segunda() as [string, any]));
+
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(2);
+  });
+
+  it('otros límites de los rankings son otra clave (pantalla frente a exportación)', async () => {
+    const { servicio, repo } = armar(lista());
+
+    await servicio.reporteVentas('mensual', {});
+    await servicio.reporteVentas('mensual', {}, { limiteProductos: 50 });
+    await servicio.reporteVentas('mensual', {}, { limiteClientes: 20 });
+
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(3);
+  });
+
+  it('un id_tipo que no es un entero positivo equivale a «todos los tipos» y comparte la clave', async () => {
+    const { servicio, repo } = armar(lista());
+
+    await servicio.reporteVentas('mensual', {});
+    await servicio.reporteVentas('mensual', { id_tipo: 0 });
+    await servicio.reporteVentas('mensual', { id_tipo: Number.NaN });
+
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(1);
+  });
+
+  it('pasados 45 s se vuelve a consultar; antes, no', async () => {
+    const { servicio, repo } = armar(lista());
+
+    await servicio.reporteVentas('mensual', {});
+    jest.setSystemTime(new Date('2026-11-08T15:00:44Z'));
+    await servicio.reporteVentas('mensual', {});
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(1);
+
+    jest.setSystemTime(new Date('2026-11-08T15:00:46Z'));
+    await servicio.reporteVentas('mensual', {});
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(2);
+  });
+
+  it('el «diario» sin fechas cambia de clave a medianoche de Lima aunque no hayan pasado 45 s', async () => {
+    jest.setSystemTime(new Date('2026-11-09T04:59:50Z')); // 08/11 23:59:50 en Lima
+    const { servicio, repo } = armar(lista());
+
+    const antes = await servicio.reporteVentas('diario', {});
+    jest.setSystemTime(new Date('2026-11-09T05:00:10Z')); // 09/11 00:00:10 en Lima
+    const despues = await servicio.reporteVentas('diario', {});
+
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(2);
+    expect(despues.fecha_inicio).not.toBe(antes.fecha_inicio);
+  });
+
+  it('un error no se cachea: la siguiente llamada vuelve a consultar y se recupera', async () => {
+    const { servicio, repo } = armar(lista());
+    repo.obtenerVentasPorPeriodo.mockRejectedValueOnce(new Error('BD caída'));
+
+    await expect(servicio.reporteVentas('mensual', {})).rejects.toThrow('BD caída');
+    const r = await servicio.reporteVentas('mensual', {});
+
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(2);
+    expect(r.cantidad_comprobantes).toBe(1);
+  });
+
+  it('un periodo inválido sigue dando 400 y no deja nada en la caché', async () => {
+    const { servicio, repo } = armar(lista());
+
+    await expect(servicio.reporteVentas('siempre', {})).rejects.toBeInstanceOf(BadRequestException);
+    await expect(servicio.reporteVentas('mensual', { fecha_inicio: '2026-10-31', fecha_fin: '2026-10-01' })).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(repo.obtenerVentasPorPeriodo).not.toHaveBeenCalled();
+  });
+
+  it('quien recibe el reporte puede modificarlo sin alterar lo cacheado (cada uno recibe una copia)', async () => {
+    const { servicio } = armar(lista());
+
+    const primera = await servicio.reporteVentas('mensual', {});
+    const totalOriginal = primera.total_vendido;
+    primera.total_vendido = 999999;
+    primera.detalle.length = 0;
+    primera.excluidos.anulados = 77;
+    const segunda = await servicio.reporteVentas('mensual', {});
+
+    expect(segunda.total_vendido).toBe(totalOriginal);
+    expect(segunda.detalle).toHaveLength(1);
+    expect(segunda.excluidos.anulados).toBe(0);
+    expect(segunda).not.toBe(primera);
+  });
+
+  it('el reporte por categoría y las exportaciones no usan la caché (siempre recalculan)', async () => {
+    const { servicio, repo } = armar(lista());
+
+    await servicio.reporteVentas('mensual', {});
+    await servicio.reportePorCategoria({ periodo: 'mensual' });
+    await servicio.reportePorCategoria({ periodo: 'mensual' });
+
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(3);
+  });
+
+  it('con demasiadas claves distintas la caché se vacía (memoria acotada) y sigue funcionando', async () => {
+    const { servicio, repo } = armar(lista());
+
+    for (let i = 1; i <= 45; i += 1) await servicio.reporteVentas('mensual', { id_cliente: i });
+    await servicio.reporteVentas('mensual', { id_cliente: 45 });
+
+    expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(45);
+  });
+
+  describe('ventasPorHora', () => {
+    it('la misma fecha dos veces consulta una sola vez (hoy y el mismo día de la semana anterior)', async () => {
+      const { servicio, repo } = armar();
+
+      const a = await servicio.ventasPorHora('2026-11-08');
+      const b = await servicio.ventasPorHora('2026-11-08');
+
+      expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(2);
+      expect(b).toEqual(a);
+    });
+
+    it('otra fecha es otra clave; sin fecha usa el día de hoy de Lima y es la misma clave que esa fecha', async () => {
+      const { servicio, repo } = armar();
+
+      await servicio.ventasPorHora('2026-11-08');
+      await servicio.ventasPorHora('2026-11-07');
+      expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(4);
+
+      await servicio.ventasPorHora(); // hoy = 08/11 en Lima: ya cacheado
+      expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(4);
+    });
+
+    it('sin fecha, a medianoche de Lima cambia de clave', async () => {
+      jest.setSystemTime(new Date('2026-11-09T04:59:50Z'));
+      const { servicio, repo } = armar();
+
+      const antes = await servicio.ventasPorHora();
+      jest.setSystemTime(new Date('2026-11-09T05:00:10Z'));
+      const despues = await servicio.ventasPorHora();
+
+      expect(antes.fecha).toBe('2026-11-08');
+      expect(despues.fecha).toBe('2026-11-09');
+      expect(repo.obtenerVentasPorPeriodo).toHaveBeenCalledTimes(4);
+    });
+
+    it('un error no se cachea y la respuesta es una copia', async () => {
+      const { servicio, repo } = armar();
+      repo.obtenerVentasPorPeriodo.mockRejectedValueOnce(new Error('BD caída'));
+
+      await expect(servicio.ventasPorHora('2026-11-08')).rejects.toThrow('BD caída');
+      const r = await servicio.ventasPorHora('2026-11-08');
+      r.horas[0].total = 12345;
+      const otra = await servicio.ventasPorHora('2026-11-08');
+
+      expect(otra.horas[0].total).toBe(0);
+      expect(otra).not.toBe(r);
+    });
+
+    it('una fecha inválida sigue dando 400', async () => {
+      const { servicio, repo } = armar();
+
+      await expect(servicio.ventasPorHora('08/11/2026')).rejects.toBeInstanceOf(BadRequestException);
+      expect(repo.obtenerVentasPorPeriodo).not.toHaveBeenCalled();
+    });
+  });
+});

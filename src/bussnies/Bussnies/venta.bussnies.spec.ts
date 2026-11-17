@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { QueryFailedError } from 'typeorm';
 import { VentaRepository } from '../../repository/Repository/venta.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { ComprobanteBussnies } from './comprobante.bussnies';
@@ -350,7 +351,8 @@ describe('VentaBussnies: comprobante de la venta (emisión directa)', () => {
     subtotal: 17.11,
     igv: 3.08,
     total: 20.19,
-    items: [],
+    // El mismo carrito que piden los reintentos de abajo: 1 cemento.
+    items: [{ id_producto: 7, descripcion: 'CEMENTO', cantidad: 1, precio: 10 }],
     pagos: [],
   };
 
@@ -543,6 +545,140 @@ describe('VentaBussnies: comprobante de la venta (emisión directa)', () => {
         USUARIO,
       );
       expect(conRechazo).toMatchObject({ comprobante_pendiente: true, comprobante_error: 'El RUC del receptor no existe' });
+    });
+
+    it('la caja que manda el cliente se ignora: el repositorio elige la del cajero o la de su local', async () => {
+      const { servicio, repo } = crear();
+
+      await servicio.registrar(
+        { id_tipo: 2, id_caja: 3, items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+
+      const [datos] = repo.registrar.mock.calls[0];
+      expect(datos).not.toHaveProperty('id_caja');
+      expect(datos.id_usuario).toBe(4);
+    });
+
+    it('descontar_stock:false solo vale para administración; el de un cajero se ignora y el stock se descuenta', async () => {
+      const cajero = crear();
+      await cajero.servicio.registrar(
+        { id_tipo: 2, descontar_stock: false, items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+      expect(cajero.repo.registrar.mock.calls[0][3]).toMatchObject({ descontarStock: true });
+
+      const admin = crear();
+      await admin.servicio.registrar(
+        { id_tipo: 2, descontar_stock: false, items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        { id_usuario: 1, rol: 'admin' } as never,
+      );
+      expect(admin.repo.registrar.mock.calls[0][3]).toMatchObject({ descontarStock: false });
+    });
+
+    it('un error de la base (interbloqueo 40P01) sale tal cual para el filtro global, no como 400 con el texto crudo', async () => {
+      const { servicio, repo } = crear();
+      const driver = Object.assign(new Error('deadlock detected'), { code: '40P01', severity: 'ERROR', routine: 'DeadLockReport' });
+      const interbloqueo = new QueryFailedError('UPDATE inventario SET stock = 1', [], driver);
+      repo.registrar.mockRejectedValue(interbloqueo);
+
+      const intento = servicio.registrar(
+        { id_tipo: 2, items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        USUARIO,
+      );
+
+      await expect(intento).rejects.toBe(interbloqueo);
+      await expect(intento).rejects.not.toBeInstanceOf(BadRequestException);
+    });
+
+    it('la caja se cerró mientras se cobraba: 409 CAJA_CERRANDO con un mensaje para volver a cobrar', async () => {
+      const { servicio, repo, comprobantes } = crear();
+      repo.registrar.mockRejectedValue(new Error('CAJA_CERRANDO'));
+
+      const error = await servicio.registrar(
+        { id_tipo: 2, items: [{ id_producto: 7, cantidad: 1 }], pagos: [{ id_metodo: EFECTIVO, monto: 10 }] } as CrearVentaRequest,
+        USUARIO,
+      ).catch((e) => e);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(error.getResponse()).toEqual({
+        codigo: 'CAJA_CERRANDO',
+        message: 'La caja se estaba cerrando en ese momento. No se registró la venta: vuelva a cobrar.',
+      });
+      expect(comprobantes.generar).not.toHaveBeenCalled();
+    });
+
+    it('dos pagos con el mismo medio: 400 PAGOS_METODO_REPETIDO sin registrar nada', async () => {
+      const { servicio, repo } = crear();
+
+      const error = await servicio.registrar(
+        {
+          id_tipo: 2,
+          items: [{ id_producto: 7, cantidad: 1 }],
+          pagos: [{ id_metodo: EFECTIVO, monto: 4 }, { id_metodo: EFECTIVO, monto: 6 }],
+        } as CrearVentaRequest,
+        USUARIO,
+      ).catch((e) => e);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getResponse()).toEqual({
+        codigo: 'PAGOS_METODO_REPETIDO',
+        message: 'Hay dos pagos con el mismo medio: júntelos en una sola línea.',
+      });
+      expect(repo.registrar).not.toHaveBeenCalled();
+    });
+
+    describe('misma clave de idempotencia (A6)', () => {
+      // Cemento a S/ 10: el pago cuadra con el carrito para llegar hasta el registro.
+      const conClave = (items: CrearVentaRequest['items']) => ({
+        id_tipo: 2,
+        clave_idempotencia: 'abc-1',
+        items,
+        pagos: [{ id_metodo: EFECTIVO, monto: 10 * items.reduce((suma, i) => suma + i.cantidad, 0) }],
+      } as CrearVentaRequest);
+
+      it('con el mismo carrito (aunque venga partido en dos líneas) devuelve la venta existente', async () => {
+        const { servicio, repo } = crear();
+        repo.buscarPorClaveIdempotencia.mockResolvedValue(9);
+
+        const venta = await servicio.registrar(
+          conClave([{ id_producto: 7, cantidad: 0.5 }, { id_producto: 7, cantidad: 0.5 }]),
+          USUARIO,
+        );
+
+        expect(venta.id_venta).toBe(9);
+        expect(repo.registrar).not.toHaveBeenCalled();
+      });
+
+      it('con otro carrito responde 409 VENTA_CLAVE_REUTILIZADA y no registra nada', async () => {
+        const { servicio, repo, comprobantes } = crear();
+        repo.buscarPorClaveIdempotencia.mockResolvedValue(9);
+
+        const error = await servicio.registrar(conClave([{ id_producto: 7, cantidad: 2 }]), USUARIO).catch((e) => e);
+
+        expect(error).toBeInstanceOf(ConflictException);
+        expect(error.getResponse()).toEqual({
+          codigo: 'VENTA_CLAVE_REUTILIZADA',
+          id_venta: 9,
+          message: 'Esta venta ya se había registrado (venta N.º 9 por S/ 20.19) con otros productos. No se registró de nuevo: revísela en Ventas y, si falta algo, cóbrelo como una venta nueva.',
+        });
+        expect(repo.registrar).not.toHaveBeenCalled();
+        expect(comprobantes.generar).not.toHaveBeenCalled();
+      });
+
+      it('también cuando la venta existente la detecta el repositorio o la carrera del índice único', async () => {
+        const enRepo = crear();
+        enRepo.repo.registrar.mockResolvedValue({ id_venta: 9, existente: true });
+        await expect(enRepo.servicio.registrar(conClave([{ id_producto: 7, cantidad: 4 }]), USUARIO))
+          .rejects.toBeInstanceOf(ConflictException);
+
+        const carrera = crear();
+        carrera.repo.registrar.mockRejectedValue(Object.assign(new Error('duplicate key'), { code: '23505' }));
+        carrera.repo.buscarPorClaveIdempotencia.mockResolvedValueOnce(null).mockResolvedValueOnce(9);
+        const error = await carrera.servicio.registrar(conClave([{ id_producto: 7, cantidad: 3 }]), USUARIO).catch((e) => e);
+        expect(error).toBeInstanceOf(ConflictException);
+        expect(error.getResponse()).toMatchObject({ codigo: 'VENTA_CLAVE_REUTILIZADA', id_venta: 9 });
+      });
     });
   });
 

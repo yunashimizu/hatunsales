@@ -1,4 +1,5 @@
 import { jwtConfig } from '../../config/jwt.config';
+import { esProduccion } from '../../config/runtime.config';
 
 /** Roles de personal de tienda (turno largo). Incluye alias de BD. */
 const ROLES_STAFF = new Set([
@@ -57,7 +58,9 @@ export class TokenUtil {
    * `secure` solo en producción para no romper http://localhost.
    */
   static cookieOptions(rol: string) {
+    // esProduccion() también reconoce Railway aunque falte NODE_ENV=production.
     const enProduccion =
+      esProduccion() ||
       process.env.NODE_ENV === 'production' ||
       process.env.COOKIE_SECURE === 'true';
 

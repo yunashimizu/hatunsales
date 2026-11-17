@@ -26,6 +26,7 @@ function crear() {
     listar: jest.fn().mockResolvedValue({ datos: [], total: 0, pagina: 1, por_pagina: 20 }),
     generar: jest.fn().mockResolvedValue({}),
     obtenerDetalle: jest.fn().mockResolvedValue({ id_comprobante: 5, enviar_cliente: true }),
+    obtenerEstado: jest.fn().mockResolvedValue({ id_comprobante: 5, estado: 'aceptado' }),
   };
   const correo = {
     estadoResumen: jest.fn().mockResolvedValue({ estado: 'PENDIENTE', puede_reenviar: true }),
@@ -210,6 +211,17 @@ describe('ComprobanteController', () => {
     expect(servicio.generar).toHaveBeenCalledWith({ id_tipo: 2, items: [] }, 9);
   });
 
+  it('generar (ítems libres, sin venta) es solo del administrador; preview sigue abierto a los roles de venta', () => {
+    const guardia = new RolesGuard(new Reflector());
+    expect(Reflect.getMetadata(ROLES_KEY, ComprobanteController.prototype.generar)).toEqual(['admin']);
+    expect(guardia.canActivate(contexto('generar', 'admin'))).toBe(true);
+    expect(() => guardia.canActivate(contexto('generar', 'caja'))).toThrow(ForbiddenException);
+    expect(() => guardia.canActivate(contexto('generar', 'vendedor'))).toThrow(ForbiddenException);
+    expect(Reflect.getMetadata(ROLES_KEY, ComprobanteController.prototype.preview)).toBeUndefined();
+    expect(guardia.canActivate(contexto('preview', 'caja'))).toBe(true);
+    expect(guardia.canActivate(contexto('preview', 'vendedor'))).toBe(true);
+  });
+
   describe('correo del comprobante', () => {
     it('GET :id/detalle mezcla el resumen del correo en el detalle sin tocar el resto', async () => {
       const { controlador, servicio, correo } = crear();
@@ -242,6 +254,29 @@ describe('ComprobanteController', () => {
         expect(guard.canActivate(contexto('reenviarCorreo', rol))).toBe(true);
         expect(guard.canActivate(contexto('historialCorreos', rol))).toBe(true);
       }
+    });
+  });
+
+  describe('GET /comprobante/:id/estado (seguimiento liviano)', () => {
+    it('devuelve lo que entrega el servicio y propaga su 404', async () => {
+      const { controlador, servicio } = crear();
+      expect(await controlador.estado(5)).toEqual({ id_comprobante: 5, estado: 'aceptado' });
+      expect(servicio.obtenerEstado).toHaveBeenCalledWith(5);
+
+      servicio.obtenerEstado.mockRejectedValue(new NotFoundException('Comprobante no encontrado'));
+      await expect(controlador.estado(404)).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('se declara antes de GET :id y admite admin, vendedor y caja (los mismos que GET :id)', () => {
+      const orden = Object.getOwnPropertyNames(ComprobanteController.prototype);
+      expect(orden.indexOf('estado')).toBeGreaterThan(-1);
+      expect(orden.indexOf('estado')).toBeLessThan(orden.indexOf('obtenerPorId'));
+      const guard = new RolesGuard(new Reflector());
+      for (const rol of ['admin', 'vendedor', 'caja']) {
+        expect(guard.canActivate(contexto('estado', rol))).toBe(true);
+        expect(guard.canActivate(contexto('obtenerPorId', rol))).toBe(true);
+      }
+      expect(() => guard.canActivate(contexto('estado', 'cliente'))).toThrow(ForbiddenException);
     });
   });
 

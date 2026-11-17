@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -101,9 +102,20 @@ export class CreditoBussnies {
         id_metodo: body.id_metodo,
         referencia: body.referencia,
         id_usuario: usuario?.id_usuario,
+        saldo_esperado: body.saldo_esperado === undefined || body.saldo_esperado === null
+          ? undefined
+          : Number(body.saldo_esperado),
       });
     } catch (error: any) {
       const codigo = String(error?.message ?? '');
+      if (codigo.startsWith('CxC_DESACTUALIZADA:')) {
+        const saldoActual = Number(codigo.split(':')[1]);
+        throw new ConflictException({
+          codigo: 'CXC_DESACTUALIZADA',
+          saldo_actual: saldoActual,
+          message: `El saldo de esta cuenta cambió (ahora S/ ${saldoActual.toFixed(2)}): ya se registró otro abono. Recargue antes de abonar de nuevo.`,
+        });
+      }
       if (codigo === 'CxC_NO_ENCONTRADA') {
         throw new NotFoundException(
           cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Cuenta no encontrada'),

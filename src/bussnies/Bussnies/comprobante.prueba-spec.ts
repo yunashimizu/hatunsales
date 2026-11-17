@@ -129,6 +129,8 @@ export interface BdFalsa {
   /** Comprobante principal vigente de la venta que devuelve cada lectura, en orden (el último se repite). */
   vigentes: Record<number, Array<{ id_comprobante: number; serie: string; numero: number; estado: string } | null>>;
   columnas: string[];
+  /** Estado de cada venta al releerlo dentro de la transacción (por defecto 'activa'). */
+  estadosVenta: Record<number, string | null>;
   /** Errores que lanzará cada INSERT de comprobantes, en orden (undefined = inserta bien). */
   erroresInsert: unknown[];
   siguienteId: number;
@@ -141,13 +143,14 @@ function siguienteDe<T>(cola: T[] | undefined, respaldo: T): T {
   return cola.length > 1 ? (cola.shift() as T) : cola[0];
 }
 
-export function crearBdFalsa(parcial: Partial<Pick<BdFalsa, 'maximos' | 'vigentes' | 'columnas' | 'erroresInsert'>> = {}): BdFalsa {
+export function crearBdFalsa(parcial: Partial<Pick<BdFalsa, 'maximos' | 'vigentes' | 'columnas' | 'erroresInsert' | 'estadosVenta'>> = {}): BdFalsa {
   const bd = {
     registro: [] as string[],
     consultas: [] as ConsultaRegistrada[],
     maximos: parcial.maximos ?? {},
     vigentes: parcial.vigentes ?? {},
     columnas: parcial.columnas ?? COLUMNAS_FASE9,
+    estadosVenta: parcial.estadosVenta ?? {},
     erroresInsert: parcial.erroresInsert ?? [],
     siguienteId: 900,
   } as BdFalsa;
@@ -173,6 +176,12 @@ export function crearBdFalsa(parcial: Partial<Pick<BdFalsa, 'maximos' | 'vigente
       bd.registro.push(`${prefijo}vigente:${idVenta}`);
       const fila = siguienteDe(bd.vigentes[idVenta], null);
       return fila ? [fila] : [];
+    }
+    if (/FROM ventas v WHERE v\.id_venta = \$1/.test(sql)) {
+      const idVenta = Number(parametros[0]);
+      bd.registro.push(`${prefijo}estado-venta:${idVenta}`);
+      const estado = idVenta in bd.estadosVenta ? bd.estadosVenta[idVenta] : 'activa';
+      return [{ estado }];
     }
     if (/^\s*INSERT INTO comprobantes\s*\(/.test(sql)) {
       bd.registro.push(`${prefijo}insert:comprobantes`);

@@ -21,6 +21,12 @@ export const CodigoError = {
   CAJA_NO_ABIERTA: 'CAJA_NO_ABIERTA',
   /** 400: monto inicial del turno negativo, no numérico o fuera de rango. */
   CAJA_MONTO_INICIAL_INVALIDO: 'CAJA_MONTO_INICIAL_INVALIDO',
+  /** 409: ya hay otra caja con ese nombre en el mismo local. */
+  CAJA_NOMBRE_REPETIDO: 'CAJA_NOMBRE_REPETIDO',
+  /** 409: no se puede desactivar una caja con un turno abierto. */
+  CAJA_CON_TURNO_ABIERTO: 'CAJA_CON_TURNO_ABIERTO',
+  /** 409: no se puede abrir un turno en una caja desactivada. */
+  CAJA_DESACTIVADA: 'CAJA_DESACTIVADA',
   CLIENTE_CON_HISTORIAL: 'CLIENTE_CON_HISTORIAL',
   EMPRESA_CON_HISTORIAL: 'EMPRESA_CON_HISTORIAL',
   COTIZACION_SIN_ITEMS: 'COTIZACION_SIN_ITEMS',

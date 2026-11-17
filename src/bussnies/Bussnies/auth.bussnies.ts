@@ -23,6 +23,8 @@ interface JwtPayload {
   email: string;
   rol: string;
   permisos: string[];
+  /** Huella de la contraseña (HashUtil.huella): al cambiarla, los tokens viejos dejan de valer. */
+  pv?: string;
 }
 
 /** 23505 del índice único de correos (uq_usuarios_email_lower, sql/fase16). */
@@ -98,6 +100,9 @@ export class AuthBussnies {
       rol,
       permisos,
     };
+    // Sin contraseña local no hay huella; el token sigue valiendo hasta caducar.
+    const pv = HashUtil.huella(usuario.password);
+    if (pv) payload.pv = pv;
 
     const token = this.jwtService.sign(payload as any, {
       secret: jwtConfig.secret,
@@ -178,9 +183,15 @@ export class AuthBussnies {
       .orderBy('u.id_usuario', 'ASC')
       .getOne();
 
-    if (!usuario) throw new UnauthorizedException('Credenciales incorrectas');
+    // Sin cuenta o sin contraseña también se compara (contra un hash de relleno):
+    // así la respuesta tarda lo mismo y el tiempo no delata qué correos existen.
+    if (!usuario) {
+      await HashUtil.compararSinCuenta(dto.password);
+      throw new UnauthorizedException('Credenciales incorrectas');
+    }
 
     if (!usuario.password) {
+      await HashUtil.compararSinCuenta(dto.password);
       throw new UnauthorizedException('Esta cuenta usa Google. Continúa con Google.');
     }
 
@@ -274,7 +285,8 @@ export class AuthBussnies {
     }
 
     const email = (payload.email ?? '').trim().toLowerCase();
-    if (!email || payload.email_verified === false) {
+    // Solo `true` explícito: un token sin el campo no prueba que el correo sea suyo.
+    if (!email || payload.email_verified !== true) {
       throw new UnauthorizedException('El correo de Google no está verificado');
     }
 
@@ -357,9 +369,27 @@ export class AuthBussnies {
       usuario.nombre = dto.nombre.trim();
     }
 
+    // La contraseña actual se compara una sola vez aunque cambien correo y contraseña.
+    let passwordVerificada = false;
+    const verificarPasswordActual = async (mensajeSinPassword: string) => {
+      if (passwordVerificada) return;
+      if (!dto.password_actual) throw new BadRequestException(mensajeSinPassword);
+      const ok = await HashUtil.comparePassword(dto.password_actual, usuario.password);
+      if (!ok) throw new UnauthorizedException('La contraseña actual no es correcta');
+      passwordVerificada = true;
+    };
+
     if (dto.email?.trim()) {
       const email = dto.email.trim().toLowerCase();
       if (email !== usuario.email?.toLowerCase()) {
+        // Cambiar el correo es quedarse con la cuenta (login y Google van por correo):
+        // con una sesión abierta ajena no basta, hace falta la contraseña.
+        if (!usuario.password) {
+          throw new BadRequestException(
+            'Esta cuenta entra con Google y no tiene contraseña local; no puede cambiar el correo desde aquí',
+          );
+        }
+        await verificarPasswordActual('Para cambiar el correo indique su contraseña actual');
         const existe = await this.buscarUsuarioPorEmail(email);
         if (existe && existe.id_usuario !== idUsuario) {
           throw new ConflictException('Ese correo ya está en uso');
@@ -375,8 +405,9 @@ export class AuthBussnies {
       if (!usuario.password) {
         throw new BadRequestException('Esta cuenta usa Google; no tiene contraseña local');
       }
-      const ok = await HashUtil.comparePassword(dto.password_actual, usuario.password);
-      if (!ok) throw new UnauthorizedException('La contraseña actual no es correcta');
+      await verificarPasswordActual('Indique la contraseña actual para cambiarla');
+      // El hash nuevo cambia la huella `pv`: la sesión que se emite abajo ya la lleva
+      // y los tokens anteriores dejan de valer (JwtStrategy).
       usuario.password = await HashUtil.hashPassword(dto.password_nueva);
     }
 

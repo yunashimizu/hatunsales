@@ -130,7 +130,8 @@ function crear(opciones: { esquema?: boolean; origen?: OrigenNota | null; notas?
     notasDeOrigen: jest.fn(async () => opciones.notas ?? []),
     lineasVigentes: jest.fn(async () => opciones.lineas ?? []),
     ventaDeNota: jest.fn(async () => venta()),
-    principalesDeVenta: jest.fn(async () => [cabecera()]),
+    // Recibe (idVenta, consultor?): las pruebas de A3 distinguen la relectura dentro de la transacción.
+    principalesDeVenta: jest.fn(async (_idVenta: number, _consultor?: unknown) => [cabecera()]),
     idPorSerieNumero: jest.fn(async () => 40),
     reclamarEfectos: jest.fn(async (): Promise<NotaReclamada | null> => null),
     lineasDeNota: jest.fn(async () => []),
@@ -764,6 +765,67 @@ describe('NotaCreditoBussnies', () => {
     });
   });
 
+  describe('anular en el sistema comparte candado con la emisión (Fase A, A3)', () => {
+    it('con venta, lo primero de la transacción es el candado cpe-venta:<id> y después relee sus comprobantes', async () => {
+      const { servicio, repo, ventas, tx } = crear();
+      repo.principalesDeVenta.mockResolvedValue([]);
+      const orden: string[] = [];
+      tx.query.mockImplementation(async (sql: string) => orden.push(sql));
+      repo.principalesDeVenta.mockImplementation(async (_id: number, consultor?: unknown) => {
+        if (consultor === tx) orden.push('releer');
+        return [];
+      });
+      ventas.anularVentaCompleta.mockImplementation(async () => {
+        orden.push('anular venta');
+        return { stock_devuelto: true, cxc_cerradas: 0, ya_anulada: false };
+      });
+
+      await servicio.anularVenta(9, {}, 1);
+
+      expect(tx.query).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext($1))', ['cpe-venta:9']);
+      expect(orden).toEqual(['SELECT pg_advisory_xact_lock(hashtext($1))', 'releer', 'anular venta']);
+    });
+
+    it('si mientras tanto le emitieron un comprobante: 409 ANULACION_COMPROBANTE_NUEVO y no anula nada', async () => {
+      const { servicio, repo, ventas, tx } = crear();
+      const nueva = cabecera({ id_comprobante: 45, id_tipo: 2, serie: 'B001', numero: 7, estado: 'pendiente', estado_sunat: 'ENVIANDO', aceptada_sunat: false });
+      // Fuera de la transacción la venta no tenía comprobante; dentro, tras el candado, ya tiene la boleta.
+      repo.principalesDeVenta.mockImplementation(async (_id: number, consultor?: unknown) => (consultor === tx ? [nueva] : []));
+
+      const error = await servicio.anularVenta(9, {}, 1).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toEqual({
+        codigo: 'ANULACION_COMPROBANTE_NUEVO',
+        message: 'La venta 9 acaba de recibir el comprobante B001-00000007. No se anuló nada: vuelva a pulsar Anular para anularla con su comprobante.',
+      });
+      expect(ventas.anularVentaCompleta).not.toHaveBeenCalled();
+      expect(repo.marcarAnulados).not.toHaveBeenCalled();
+    });
+
+    it('los anulados o en error que aparezcan no cuentan como comprobante nuevo', async () => {
+      const { servicio, repo, ventas, tx } = crear();
+      repo.principalesDeVenta.mockImplementation(async (_id: number, consultor?: unknown) =>
+        consultor === tx
+          ? [cabecera({ id_comprobante: 46, anulado: true }), cabecera({ id_comprobante: 47, estado: 'error', estado_sunat: 'RECHAZADO', aceptada_sunat: false })]
+          : []);
+
+      await expect(servicio.anularVenta(9, {}, 1)).resolves.toMatchObject({ estado: 'anulada' });
+      expect(ventas.anularVentaCompleta).toHaveBeenCalledTimes(1);
+    });
+
+    it('sin venta (comprobante suelto) no toma el candado de la venta', async () => {
+      const { servicio, repo, tx } = crear();
+      repo.ventaDeNota.mockResolvedValue(venta({ estado: 'anulada' }));
+      repo.origen.mockResolvedValue(origenFactura({ estado_sunat: 'RECHAZADO', aceptada_sunat: false, estado: 'error' }));
+
+      await servicio.anularComprobante({ id_comprobante: 40 } as never, 1);
+
+      expect(repo.marcarAnulados).toHaveBeenCalledWith(tx, [40], expect.any(String));
+      expect(tx.query).not.toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext($1))', expect.anything());
+    });
+  });
+
   describe('anular venta: otros comprobantes, notas en envío y configuración ilegible', () => {
     it('c) los comprobantes que nunca valieron se anulan con la venta cuando SUNAT acepta la nota (el aviso no lo adelanta)', async () => {
       const { servicio, repo, tx } = crear();
@@ -1151,6 +1213,18 @@ describe('anular sin nota de crédito: la baja (RA) o el resumen (RC) en SUNAT',
       expect(repo.transaccion).toHaveBeenCalledTimes(1);
       expect(ventas.anularVentaCompleta).toHaveBeenCalledWith(9, { consultor: tx, descripcion: 'Devolución por venta 9 anulada' });
       expect(repo.marcarAnulados).toHaveBeenCalledWith(tx, [40, 41], 'Baja aceptada por SUNAT (RA-20261105-00001)');
+    });
+
+    it('un comprobante aceptado que se dejó fuera a propósito no bloquea la baja: solo cuentan los aparecidos después', async () => {
+      const lotes = lotesFalsos();
+      const { servicio, repo, ventas, tx } = crear({ lotes });
+      const aceptadaAparte = cabecera({ id_comprobante: 42, serie: 'F001', numero: 13 });
+      repo.principalesDeVenta.mockResolvedValue([cabecera(), aceptadaAparte]);
+
+      expect(await servicio.aplicarBajaAceptada(700)).toBe(1);
+      expect(repo.principalesDeVenta).toHaveBeenLastCalledWith(9, tx);
+      expect(ventas.anularVentaCompleta).toHaveBeenCalledTimes(1);
+      expect(repo.marcarAnulados).toHaveBeenCalledWith(tx, [40], 'Baja aceptada por SUNAT (RA-20261105-00001)');
     });
 
     it('idempotente: la segunda vez (oyente y barrido a la vez) no vuelve a anular nada', async () => {

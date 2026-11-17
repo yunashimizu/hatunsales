@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Param, Body, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Param, Query, UseGuards } from '@nestjs/common';
 import { StockSucursalBussnies } from '../../bussnies/Bussnies/stock-sucursal.bussnies';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
@@ -28,15 +28,17 @@ export class StockSucursalController {
   @Put('producto/:id_producto/sucursal/:id_sucursal')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin')
-  updateStock(@Param('id_producto') id_producto: string, @Param('id_sucursal') id_sucursal: string, @Body('stock') stock: number) {
-    return this.service.actualizarStock(Number(id_producto), Number(id_sucursal), Number(stock));
+  updateStock() {
+    // Retirada: responde 400 y remite a Inventario (Ajuste), que deja kardex.
+    return this.service.actualizarStock();
   }
 
   @Post('transfer')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin')
-  transfer(@Body() body: { id_producto: number; from_sucursal: number; to_sucursal: number; cantidad: number }) {
-    return this.service.transferirStock(body.id_producto, body.from_sucursal, body.to_sucursal, body.cantidad);
+  transfer() {
+    // Retirada: responde 400 y remite a Inventario (Transferencia), que deja kardex.
+    return this.service.transferirStock();
   }
 
   @Get('bajo-stock')

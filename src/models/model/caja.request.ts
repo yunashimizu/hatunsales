@@ -37,6 +37,32 @@ export class AbrirCajaRequest {
   sin_efectivo?: boolean;
 }
 
+/** POST /caja/cajas (solo admin). */
+export class CrearCajaRequest {
+  @Type(() => Number)
+  @IsInt({ message: 'Indique el local de la caja (id_sucursal)' })
+  @Min(1, { message: 'Indique el local de la caja (id_sucursal)' })
+  id_sucursal!: number;
+
+  /** Vacío o ausente → «Caja N» con el primer número libre en ese local. */
+  @IsOptional()
+  @IsString({ message: 'El nombre debe ser texto' })
+  @MaxLength(100, { message: 'El nombre admite como máximo 100 caracteres' })
+  nombre?: string;
+}
+
+/** PATCH /caja/cajas/:id (solo admin). */
+export class ActualizarCajaRequest {
+  @IsOptional()
+  @IsString({ message: 'El nombre debe ser texto' })
+  @MaxLength(100, { message: 'El nombre admite como máximo 100 caracteres' })
+  nombre?: string;
+
+  @IsOptional()
+  @IsBoolean({ message: 'activa debe ser verdadero o falso' })
+  activa?: boolean;
+}
+
 /** GET /caja/aperturas */
 export class AperturasCajaQuery {
   @IsOptional()

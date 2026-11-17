@@ -1,14 +1,21 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { CajaSesionRepository } from '../../repository/Repository/caja-sesion.repository';
+import type { LocalCaja, OcupanteCaja } from '../../repository/Repository/caja-sesion.repository';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { normalizarRol } from '../../config/roles.config';
-import { AbrirCajaRequest, CerrarCajaRequest } from '../../models/model/caja.request';
+import {
+  AbrirCajaRequest,
+  ActualizarCajaRequest,
+  CerrarCajaRequest,
+  CrearCajaRequest,
+} from '../../models/model/caja.request';
 import { CajaArqueoBussnies } from './caja-arqueo.bussnies';
 import type { ResultadoPreparacionCierre } from '../Ibussnies/ICajaArqueoBussniees';
 import { relanzarHttp } from '../../caja/http/errores-caja.http';
@@ -87,9 +94,124 @@ export class CajaSesionBussnies {
     return { apertura, resumen };
   }
 
-  async disponibles() {
-    const items = await this.repo.listarDisponibles();
-    return { items };
+  /**
+   * Cajas con quién tiene cada una (ocupada_por, abierta_en, es_mia) y todos los locales.
+   * El ocupante y los locales son informativos: si su consulta falla, las cajas se devuelven igual
+   * que antes (campos nuevos en null/false y `sucursales: []`). Quien no es admin no recibe las
+   * cajas desactivadas; el admin las recibe todas (con `activa: false`).
+   */
+  async disponibles(usuario?: UsuarioToken) {
+    const idUsuario = Number(usuario?.id_usuario) || null;
+    const esAdmin = normalizarRol(usuario?.rol) === 'admin';
+    const [cajas, ocupantes, sucursales] = await Promise.all([
+      this.repo.listarDisponibles(),
+      Promise.resolve()
+        .then(() => this.repo.ocupantesDeCajas())
+        .catch(() => new Map<number, OcupanteCaja>()),
+      Promise.resolve()
+        .then(() => this.repo.listarLocales())
+        .catch((): LocalCaja[] => []),
+    ]);
+    const items = cajas
+      .filter((c) => esAdmin || c.activa !== false)
+      .map((c) => this.conOcupante(c, ocupantes, idUsuario));
+    return { items, sucursales };
+  }
+
+  private conOcupante<T extends { id_caja: number; ocupada: boolean }>(
+    c: T,
+    ocupantes: Map<number, OcupanteCaja>,
+    idUsuario: number | null,
+  ) {
+    const o = c.ocupada ? ocupantes.get(c.id_caja) : undefined;
+    return {
+      ...c,
+      ocupada_por: o?.usuario_nombre ?? null,
+      abierta_en: o?.abierta_en ?? null,
+      es_mia: !!o && idUsuario != null && o.id_usuario === idUsuario,
+    };
+  }
+
+  /** Nombre recortado; null si vino vacío. Más de 100 caracteres → 400. */
+  private nombreDeCaja(crudo: unknown): string | null {
+    const nombre = typeof crudo === 'string' ? crudo.trim() : '';
+    if (nombre.length > 100) {
+      throw new BadRequestException('El nombre de la caja admite como máximo 100 caracteres');
+    }
+    return nombre === '' ? null : nombre;
+  }
+
+  /** La caja recién creada o cambiada, con la forma de `disponibles`. */
+  private async respuestaCaja<T extends { id_caja: number; ocupada: boolean }>(caja: T, usuario?: UsuarioToken) {
+    const idUsuario = Number(usuario?.id_usuario) || null;
+    const ocupantes = await Promise.resolve()
+      .then(() => this.repo.ocupantesDeCajas())
+      .catch(() => new Map<number, OcupanteCaja>());
+    return this.conOcupante(caja, ocupantes, idUsuario);
+  }
+
+  /** POST /caja/cajas (solo admin, lo exige el controlador). */
+  async crearCaja(body: CrearCajaRequest, usuario?: UsuarioToken) {
+    const idSucursal = Number(body?.id_sucursal);
+    if (!Number.isInteger(idSucursal) || idSucursal <= 0) {
+      throw new NotFoundException(cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Local no encontrado'));
+    }
+    const nombre = this.nombreDeCaja(body?.nombre);
+    try {
+      const creada = await this.repo.crearCaja({ idSucursal, nombre });
+      return await this.respuestaCaja(creada, usuario);
+    } catch (e: any) {
+      this.mapErrorCaja(e);
+    }
+  }
+
+  /** PATCH /caja/cajas/:id (solo admin, lo exige el controlador). */
+  async actualizarCaja(idCaja: number, body: ActualizarCajaRequest, usuario?: UsuarioToken) {
+    if (!Number.isInteger(idCaja) || idCaja <= 0) {
+      throw new NotFoundException(cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Caja no encontrada'));
+    }
+    const cambios: { nombre?: string; activa?: boolean } = {};
+    if (body?.nombre !== undefined) {
+      const nombre = this.nombreDeCaja(body.nombre);
+      if (nombre == null) throw new BadRequestException('El nombre de la caja no puede quedar vacío');
+      cambios.nombre = nombre;
+    }
+    if (body?.activa !== undefined) cambios.activa = body.activa === true;
+    if (cambios.nombre === undefined && cambios.activa === undefined) {
+      throw new BadRequestException('Indique el nombre o si la caja está activa');
+    }
+    try {
+      const actual = await this.repo.actualizarCaja(idCaja, cambios);
+      return await this.respuestaCaja(actual, usuario);
+    } catch (e: any) {
+      this.mapErrorCaja(e);
+    }
+  }
+
+  private mapErrorCaja(e: any): never {
+    const code = String(e?.message ?? e);
+    if (code === 'SUCURSAL_NO_ENCONTRADA') {
+      throw new NotFoundException(cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Local no encontrado'));
+    }
+    if (code === 'CAJA_NO_ENCONTRADA') {
+      throw new NotFoundException(cuerpoError(CodigoError.ENTIDAD_NO_ENCONTRADA, 'Caja no encontrada'));
+    }
+    if (code === 'CAJA_NOMBRE_REPETIDO') {
+      throw new ConflictException(
+        cuerpoError(CodigoError.CAJA_NOMBRE_REPETIDO, 'Ya hay una caja con ese nombre en este local'),
+      );
+    }
+    if (code === 'CAJA_CON_TURNO_ABIERTO') {
+      throw new ConflictException(
+        cuerpoError(CodigoError.CAJA_CON_TURNO_ABIERTO, 'Cierra el turno de esta caja antes de desactivarla'),
+      );
+    }
+    if (code === 'CAJA_ESQUEMA_NO_SOPORTA') {
+      throw new BadRequestException(
+        'Esta base de datos no permite administrar cajas desde el panel (faltan columnas en la tabla cajas)',
+      );
+    }
+    relanzarHttp(e);
   }
 
   async abrir(body: AbrirCajaRequest, usuario: UsuarioToken) {
@@ -228,6 +350,11 @@ export class CajaSesionBussnies {
           CodigoError.CAJA_OCUPADA,
           'Esa caja ya está abierta por otro turno. Elija otra o pida que la cierren.',
         ),
+      );
+    }
+    if (code === 'CAJA_DESACTIVADA') {
+      throw new ConflictException(
+        cuerpoError(CodigoError.CAJA_DESACTIVADA, 'Esa caja está desactivada. Elige otra o pide que la activen.'),
       );
     }
     if (code === 'CAJA_APERTURA_NO_ENCONTRADA') {

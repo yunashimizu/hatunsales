@@ -5,6 +5,7 @@ import {
   Controller,
   Get,
   InternalServerErrorException,
+  Logger,
   Param,
   Post,
   Put,
@@ -19,11 +20,15 @@ import { Rol } from 'src/models/DBModel/role.entity';
 import { Usuarios } from 'src/models/DBModel/usuarios.entity';
 import { HashUtil } from 'src/util/jwt/hash.util';
 import { esRolCliente } from 'src/config/roles.config';
+import { CrearEmpleadoRequest } from 'src/models/model/new/crear-empleado.request';
+import { CambiarRolRequest } from 'src/models/model/new/cambiar-rol.request';
 
 @Controller('admin/roles')
 @UseGuards(JwtGuard, RolesGuard)
 @Roles('admin')
 export class RolesAdminController {
+  private readonly logger = new Logger(RolesAdminController.name);
+
   constructor(
     @InjectRepository(Rol, 'pgConnection')
     private readonly rolRepo: Repository<Rol>,
@@ -59,7 +64,9 @@ export class RolesAdminController {
 
   @Post('usuarios')
   async crearUsuario(
-    @Body() body: { nombre?: string; email?: string; password?: string; id_rol?: number },
+    // DTO validado (correo válido, contraseña de 6 o más, rol entero): antes el cuerpo
+    // llegaba sin validar y aceptaba, por ejemplo, una contraseña de 1 carácter.
+    @Body() body: CrearEmpleadoRequest,
   ) {
     const nombre = (body?.nombre ?? '').trim();
     const email = (body?.email ?? '').trim().toLowerCase();
@@ -129,18 +136,21 @@ export class RolesAdminController {
         );
         return { success: true, id_usuario: creado.id_usuario, rol: rol.nombre };
       } catch (fallbackError: any) {
-        const msg =
-          fallbackError?.driverError?.detail ||
-          fallbackError?.message ||
-          error?.message ||
-          'Error al crear usuario';
-        throw new InternalServerErrorException(msg);
+        // Al cliente, mensaje genérico. Al log, la causa sin el `detail` de PostgreSQL
+        // (trae los valores de la fila, como el correo) ni el cuerpo de la petición.
+        const causa = fallbackError?.driverError ?? fallbackError;
+        this.logger.error(
+          `No se pudo crear el usuario (rol ${rol.id_rol}): código=${causa?.code ?? '?'} ` +
+            `restricción=${causa?.constraint ?? '-'} mensaje=${String(causa?.message ?? '').slice(0, 200)} ` +
+            `primer intento=${error?.code ?? error?.driverError?.code ?? '?'}`,
+        );
+        throw new InternalServerErrorException('Error al crear usuario');
       }
     }
   }
 
   @Put('usuarios/:id/rol')
-  async cambiarRol(@Param('id') id: string, @Body() body: { id_rol: number }) {
+  async cambiarRol(@Param('id') id: string, @Body() body: CambiarRolRequest) {
     const idUsuario = Number(id);
     const idRol = Number(body?.id_rol);
 

@@ -122,6 +122,7 @@ function envio(parcial: Partial<EnvioVista> = {}): EnvioVista {
 function crear(opciones: { comprobante?: Comprobante | null; fiscal?: DatosFiscalesComprobante | null; lotes?: unknown } = {}) {
   const repo = {
     buscarPorId: jest.fn().mockResolvedValue(opciones.comprobante === undefined ? cpe() : opciones.comprobante),
+    estadoDe: jest.fn(),
     buscarPorSerieNumero: jest.fn().mockResolvedValue(opciones.comprobante === undefined ? cpe() : opciones.comprobante),
     datosFiscales: jest.fn().mockResolvedValue(opciones.fiscal === undefined ? fiscal() : opciones.fiscal),
     notasDe: jest.fn().mockResolvedValue([]),
@@ -145,6 +146,54 @@ function crear(opciones: { comprobante?: Comprobante | null; fiscal?: DatosFisca
 describe('ComprobanteBussnies: detalle, listado, acciones y descargas', () => {
   beforeAll(silenciarLogs);
   afterEach(() => jest.useRealTimers());
+
+  describe('estado liviano (GET :id/estado)', () => {
+    const fila = (parcial: Record<string, unknown> = {}) => ({
+      id_comprobante: 50,
+      estado: 'emitido',
+      estado_sunat: 'ACEPTADO',
+      aceptada_sunat: true,
+      sunat_description: 'La Factura numero F001-12, ha sido aceptada',
+      anulado: false,
+      ...parcial,
+    });
+
+    it('usa solo estadoDe (nunca el comprobante completo) y entrega el mismo estado visible que GET :id', async () => {
+      const { servicio, repo } = crear();
+      repo.estadoDe.mockResolvedValue(fila());
+
+      expect(await servicio.obtenerEstado(50)).toEqual({
+        id_comprobante: 50,
+        estado: 'aceptado',
+        estado_sunat: 'ACEPTADO',
+        aceptada_sunat: true,
+        sunat_description: 'La Factura numero F001-12, ha sido aceptada',
+        anulado: false,
+      });
+      expect(repo.buscarPorId).not.toHaveBeenCalled();
+      expect((await servicio.obtenerEstado(50)).estado).toBe((await servicio.obtenerPorId(50)).estado);
+    });
+
+    it('anulado gana; pendiente y error se muestran tal cual; sin aceptación es emitido', async () => {
+      const { servicio, repo } = crear();
+      for (const [parcial, esperado] of [
+        [{ anulado: true }, 'anulado'],
+        [{ estado: 'pendiente', aceptada_sunat: false, estado_sunat: 'NO_ENVIADO' }, 'pendiente'],
+        [{ estado: 'error', aceptada_sunat: false }, 'error'],
+        [{ aceptada_sunat: false, estado_sunat: null, sunat_description: null }, 'emitido'],
+      ] as [Record<string, unknown>, string][]) {
+        repo.estadoDe.mockResolvedValueOnce(fila(parcial));
+        expect((await servicio.obtenerEstado(50)).estado).toBe(esperado);
+      }
+    });
+
+    it('404 si el comprobante no existe', async () => {
+      const { servicio, repo } = crear();
+      repo.estadoDe.mockResolvedValue(null);
+
+      await expect(servicio.obtenerEstado(999)).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
 
   describe('detalle', () => {
     it('trae el emisor con el que se firmó (envío guardado), QR, hash, hora, envío, archivos y acciones', async () => {

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, Post, Query, StreamableFile, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Header, Param, ParseIntPipe, Patch, Post, Query, StreamableFile, UseGuards } from '@nestjs/common';
 import { CajaSesionBussnies } from '../../bussnies/Bussnies/caja-sesion.bussnies';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
@@ -8,8 +8,10 @@ import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import { CajaTurnosBussnies } from '../../bussnies/Bussnies/caja-turnos.bussnies';
 import {
   AbrirCajaRequest,
+  ActualizarCajaRequest,
   AperturasCajaQuery,
   CerrarCajaRequest,
+  CrearCajaRequest,
   ResumenSucursalesPdfQuery,
   ResumenSucursalesQuery,
 } from '../../models/model/caja.request';
@@ -33,8 +35,26 @@ export class CajaSesionController {
   }
 
   @Get('disponibles')
-  disponibles() {
-    return this.service.disponibles();
+  disponibles(@UsuarioActual() usuario: UsuarioToken) {
+    return this.service.disponibles(usuario);
+  }
+
+  /** Crea una caja en un local (solo admin: el `@Roles` del método sustituye al del controlador). */
+  @Post('cajas')
+  @Roles('admin')
+  crearCaja(@Body() body: CrearCajaRequest, @UsuarioActual() usuario: UsuarioToken) {
+    return this.service.crearCaja(body, usuario);
+  }
+
+  /** Renombra o (des)activa una caja (solo admin). */
+  @Patch('cajas/:id')
+  @Roles('admin')
+  actualizarCaja(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: ActualizarCajaRequest,
+    @UsuarioActual() usuario: UsuarioToken,
+  ) {
+    return this.service.actualizarCaja(id, body, usuario);
   }
 
   /**

@@ -9,6 +9,7 @@ import { ALMACEN_ARCHIVOS } from '../../util/storage/almacen.interface';
 import type { AlmacenArchivos } from '../../util/storage/almacen.interface';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
+import { almacenamientoConfig } from '../../config/almacenamiento.config';
 
 /** productos.precio_compra es NUMERIC(10,2). */
 const PRECIO_COMPRA_MAXIMO = 99_999_999.99;
@@ -261,15 +262,18 @@ export class RecepcionBussnies {
     if (!obs) throw new NotFoundException('Observación no encontrada');
     if (!archivo?.buffer?.length) throw new BadRequestException('No se recibió imagen');
 
+    // Lista cerrada (la misma de las fotos de producto): un `image/svg+xml` con
+    // script, servido desde /archivos en el dominio de la API, ejecutaría JS.
     const mime = (archivo.mimetype || '').toLowerCase();
-    if (!mime.startsWith('image/')) {
-      throw new BadRequestException('Solo se permiten imágenes');
+    if (!almacenamientoConfig.tiposPermitidos.includes(mime)) {
+      throw new BadRequestException('Solo se permiten imágenes JPG, PNG, WebP, AVIF o GIF');
     }
 
     const subida = await this.archivos.guardar({
       buffer: archivo.buffer,
       nombre_original: archivo.originalname,
-      mime: archivo.mimetype,
+      // Se guarda el tipo ya validado, no el texto declarado por el cliente.
+      mime,
       carpeta: `recepcion/${idObservacion}`,
     });
 

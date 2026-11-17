@@ -8,6 +8,7 @@ import { jwtConfig } from '../config/jwt.config';
 import { Usuarios } from '../models/DBModel/usuarios.entity';
 import { VwUsuarioPermisos } from '../models/DBModel/vw-usuario-permisos.entity';
 import { normalizarRol } from '../config/roles.config';
+import { HashUtil } from '../util/jwt/hash.util';
 
 interface JwtPayload {
   sub: number;
@@ -15,6 +16,8 @@ interface JwtPayload {
   email: string;
   rol: string;
   permisos: string[];
+  /** Huella de la contraseña al emitir el token. Los tokens anteriores al cambio no la traen. */
+  pv?: string;
 }
 
 /** Lo que queda en `req.user` para guards y controladores. */
@@ -38,7 +41,7 @@ const CACHE_MAX_ENTRADAS = 500;
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
 
-  private readonly cache = new Map<number, { valor: UsuarioValidado; expira: number }>();
+  private readonly cache = new Map<number, { valor: UsuarioValidado; pv?: string; expira: number }>();
 
   constructor(
     @InjectRepository(Usuarios, 'pgConnection')
@@ -64,7 +67,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     const ahora = Date.now();
     const enCache = this.cache.get(payload.sub);
-    if (enCache && enCache.expira > ahora) {
+    // Con huella distinta de la cacheada no se decide con la caché: puede ser el
+    // token recién emitido tras cambiar la contraseña (y la caché, la vieja) o un
+    // token viejo. Se relee de la base y ella decide.
+    if (enCache && enCache.expira > ahora && (!payload.pv || payload.pv === enCache.pv)) {
       return this.copiar(enCache.valor);
     }
 
@@ -90,8 +96,16 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       permisos: filas.map((f) => f.permiso),
     };
 
+    const pv = HashUtil.huella(usuario.password);
+
     if (this.cache.size >= CACHE_MAX_ENTRADAS) this.cache.clear();
-    this.cache.set(payload.sub, { valor, expira: ahora + CACHE_TTL_MS });
+    this.cache.set(payload.sub, { valor, pv, expira: ahora + CACHE_TTL_MS });
+
+    // Token emitido con otra contraseña: la cambiaron después, ya no vale.
+    // Un token sin `pv` (anterior a esta versión) se acepta hasta que caduque.
+    if (payload.pv && payload.pv !== pv) {
+      throw new UnauthorizedException('La contraseña cambió. Inicie sesión de nuevo');
+    }
 
     return this.copiar(valor);
   }

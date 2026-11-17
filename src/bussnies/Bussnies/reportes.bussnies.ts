@@ -45,6 +45,7 @@ import {
 } from '../../util/fecha-lima';
 import { TIPO_NOTA_CREDITO, TIPO_NOTA_DEBITO } from '../../util/fiscal/tipos-comprobante';
 import { Dinero } from '../../caja/dominio/dinero';
+import { CacheTtl } from '../../sunat/config/cache-ttl';
 import {
   AVISO_ESTRUCTURA_RVIE,
   construirCsvRvie,
@@ -70,10 +71,28 @@ interface OpcionesReporte {
   limiteClientes?: number;
 }
 
+/** Parámetros ya validados y resueltos de un reporte de ventas. */
+interface ParametrosReporte {
+  periodoNormalizado: string;
+  rango: RangoReporte;
+  idTipoFiltro: number | undefined;
+  limiteProductos: number;
+  limiteClientes: number;
+}
+
 const LIMITE_PRODUCTOS_PANTALLA = 10;
 const LIMITE_PRODUCTOS_EXPORT = 50;
 const LIMITE_CLIENTES_PANTALLA = 5;
 const LIMITE_CLIENTES_EXPORT = 20;
+
+/**
+ * Caché de lo que pide el Inicio cada minuto (`reportes/ventas` y `ventas-por-hora`): 45 s, sin
+ * invalidación (un total con 45 s de retraso es aceptable ahí). Las exportaciones y los demás
+ * reportes NO pasan por ella.
+ */
+const TTL_REPORTES_INICIO_MS = 45_000;
+/** `CacheTtl` no purga lo vencido: pasado este número de claves distintas se vacía todo (rangos libres, memoria acotada). */
+const MAX_CLAVES_CACHE_REPORTES = 40;
 
 /**
  * Qué cuenta en el reporte de ventas y con qué signo.
@@ -361,6 +380,8 @@ const PLANES: Record<string, string> = {
 @Injectable()
 export class ReportesBussnies implements IReportesBussniees {
   private readonly logger = new Logger(ReportesBussnies.name);
+  private readonly cacheReportes = new CacheTtl<unknown>(TTL_REPORTES_INICIO_MS);
+  private readonly clavesCacheReportes = new Set<string>();
 
   constructor(
     private readonly repo: ReportesRepository,
@@ -378,6 +399,48 @@ export class ReportesBussnies implements IReportesBussniees {
     filters: ReportesFilters,
     opciones: OpcionesReporte = {},
   ): Promise<ReporteVentasNeto> {
+    const p = this.prepararReporte(periodo, filters, opciones);
+    // La clave lleva TODO lo que cambia la salida: periodo, el rango ya resuelto (así «hoy» cambia de
+    // clave a medianoche de Lima), cliente, moneda, tipo y los dos límites de los rankings.
+    const clave = JSON.stringify([
+      'reporteVentas',
+      p.periodoNormalizado,
+      p.rango.desde.getTime(),
+      p.rango.hasta.getTime(),
+      p.rango.fin.getTime(),
+      String(filters.id_cliente ?? ''),
+      String(filters.id_moneda ?? ''),
+      p.idTipoFiltro ?? '',
+      p.limiteProductos,
+      p.limiteClientes,
+    ]);
+    return this.conCacheInicio(clave, () => this.calcularReporteVentas(p, filters));
+  }
+
+  /** Lo mismo que `reporteVentas` pero siempre recalculado: lo usan las exportaciones y el reporte por categoría. */
+  private async reporteVentasSinCache(
+    periodo: string,
+    filters: ReportesFilters,
+    opciones: OpcionesReporte = {},
+  ): Promise<ReporteVentasNeto> {
+    return this.calcularReporteVentas(this.prepararReporte(periodo, filters, opciones), filters);
+  }
+
+  /**
+   * Valor cacheado 45 s por clave, con carga única si llegan varias peticiones a la vez. Un error
+   * no se guarda. Siempre se entrega una copia: quien la reciba puede modificarla sin alterar lo cacheado.
+   */
+  private async conCacheInicio<T>(clave: string, cargar: () => Promise<T>): Promise<T> {
+    if (!this.clavesCacheReportes.has(clave) && this.clavesCacheReportes.size >= MAX_CLAVES_CACHE_REPORTES) {
+      this.cacheReportes.invalidar();
+      this.clavesCacheReportes.clear();
+    }
+    this.clavesCacheReportes.add(clave);
+    return structuredClone((await this.cacheReportes.obtener(clave, cargar)) as T);
+  }
+
+  /** Valida el periodo y resuelve todo lo que decide la salida del reporte (los errores 400 salen aquí, antes de cualquier caché). */
+  private prepararReporte(periodo: string, filters: ReportesFilters, opciones: OpcionesReporte): ParametrosReporte {
     const periodoNormalizado = (periodo || 'diario').toLowerCase().trim();
     if (!filters.fecha_inicio && !filters.fecha_fin && !PERIODOS_VALIDOS.has(periodoNormalizado)) {
       throw new BadRequestException(
@@ -387,14 +450,20 @@ export class ReportesBussnies implements IReportesBussniees {
         ),
       );
     }
-
     const rango = this.resolverRango(periodoNormalizado, filters);
     const limiteProductos = opciones.limiteProductos ?? LIMITE_PRODUCTOS_PANTALLA;
     const limiteClientes = opciones.limiteClientes ?? LIMITE_CLIENTES_PANTALLA;
     // Solo un id entero y positivo filtra por tipo; cualquier otra cosa (NaN, 0) es «todos los tipos».
     const idTipoFiltro =
       Number.isInteger(filters.id_tipo) && Number(filters.id_tipo) > 0 ? Number(filters.id_tipo) : undefined;
+    return { periodoNormalizado, rango, idTipoFiltro, limiteProductos, limiteClientes };
+  }
 
+  /** El cálculo de siempre de `reporteVentas`, sin caché. */
+  private async calcularReporteVentas(
+    { periodoNormalizado, rango, idTipoFiltro, limiteProductos, limiteClientes }: ParametrosReporte,
+    filters: ReportesFilters,
+  ): Promise<ReporteVentasNeto> {
     // El tipo se filtra aquí y no en SQL: así se puede repartir lo vendido entre TODOS los tipos.
     const lista = await this.repo.obtenerVentasPorPeriodo(rango.desde, rango.hasta, {
       id_cliente: filters.id_cliente,
@@ -710,8 +779,11 @@ export class ReportesBussnies implements IReportesBussniees {
     const dia = texto || hoyLima();
     const anterior = sumarDiasYmd(dia, -7);
 
-    const [actual, comparacion] = await Promise.all([this.horasDelDia(dia), this.horasDelDia(anterior)]);
-    return { fecha: dia, horas: actual, comparacion: { fecha: anterior, horas: comparacion } };
+    // Su único parámetro es el día ya resuelto (el «hoy» cambia de clave a medianoche de Lima).
+    return this.conCacheInicio(JSON.stringify(['ventasPorHora', dia]), async () => {
+      const [actual, comparacion] = await Promise.all([this.horasDelDia(dia), this.horasDelDia(anterior)]);
+      return { fecha: dia, horas: actual, comparacion: { fecha: anterior, horas: comparacion } };
+    });
   }
 
   private async horasDelDia(ymd: string): Promise<VentasPorHora[]> {
@@ -934,7 +1006,7 @@ export class ReportesBussnies implements IReportesBussniees {
   }
 
   async reportePorCategoria(filters: any = {}) {
-    const report = await this.reporteVentas(filters?.periodo || 'mensual', filters);
+    const report = await this.reporteVentasSinCache(filters?.periodo || 'mensual', filters);
     return {
       ...report,
       tipo: 'reporte_por_categoria',
@@ -946,7 +1018,7 @@ export class ReportesBussnies implements IReportesBussniees {
   /** Excel profesional del reporte (varias hojas). Respeta periodo, rango y tipo de comprobante. */
   async exportVentasExcel(periodo: string, filters: ReportesFilters = {}): Promise<{ buffer: Buffer; filename: string }> {
     try {
-      const report = await this.reporteVentas(periodo, filters, {
+      const report = await this.reporteVentasSinCache(periodo, filters, {
         limiteProductos: LIMITE_PRODUCTOS_EXPORT,
         limiteClientes: LIMITE_CLIENTES_EXPORT,
       });
@@ -970,7 +1042,7 @@ export class ReportesBussnies implements IReportesBussniees {
   /** PDF profesional del reporte. Respeta periodo, rango y tipo de comprobante. */
   async exportVentasPdf(periodo: string, filters: ReportesFilters = {}): Promise<{ buffer: Buffer; filename: string }> {
     try {
-      const report = await this.reporteVentas(periodo, filters, {
+      const report = await this.reporteVentasSinCache(periodo, filters, {
         limiteProductos: LIMITE_PRODUCTOS_PANTALLA,
         limiteClientes: LIMITE_CLIENTES_PANTALLA * 2,
       });

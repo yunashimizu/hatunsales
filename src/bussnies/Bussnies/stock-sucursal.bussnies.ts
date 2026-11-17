@@ -4,6 +4,9 @@ import { ProductoRepository } from '../../repository/Repository/producto.reposit
 import { SucursalRepository } from '../../repository/Repository/sucursal.repository';
 import { MovimientoInventarioRepository } from '../../repository/Repository/movimiento-inventario.repository';
 
+export const MENSAJE_ESCRITURA_LEGADA =
+  'Use Inventario › Ajuste o Transferencia (quedan en el kardex).';
+
 @Injectable()
 export class StockSucursalBussnies {
   constructor(
@@ -25,85 +28,17 @@ export class StockSucursalBussnies {
     };
   }
 
-  async actualizarStock(id_producto: number, id_sucursal: number, cantidad: number) {
-    if (cantidad < 0) throw new BadRequestException('El stock no puede ser negativo');
-
-    const producto = await this.productoRepo.getById(id_producto);
-    if (!producto) throw new NotFoundException('Producto no encontrado');
-    const sucursal = await this.sucursalRepo.getById(id_sucursal);
-    if (!sucursal) throw new NotFoundException('Sucursal no encontrada');
-
-    const existente = await this.stockRepo.buscarPorProductoYSucursal(id_producto, id_sucursal);
-    if (existente) {
-      const anterior = existente.stock ?? 0;
-      await this.stockRepo.update(existente.id_stock, { stock: cantidad, stock_comprometido: Math.max(0, existente.stock_comprometido ?? 0) } as any);
-      await this.movimientoRepo.create({
-        producto: { id_producto } as any,
-        tipo: 'ajuste',
-        cantidad: Math.abs(cantidad - anterior),
-        sucursal_origen: undefined,
-        sucursal_destino: { id_sucursal } as any,
-        descripcion: `Ajuste de stock a ${cantidad}`,
-      } as any);
-      return this.obtenerStockProductoEnSucursal(id_producto, id_sucursal);
-    }
-
-    const nuevo = await this.stockRepo.create({ producto: { id_producto } as any, sucursal: { id_sucursal } as any, stock: cantidad, stock_comprometido: 0 } as any);
-    await this.movimientoRepo.create({
-      producto: { id_producto } as any,
-      tipo: 'entrada',
-      cantidad: cantidad,
-      sucursal_destino: { id_sucursal } as any,
-      descripcion: 'Creación de stock inicial',
-    } as any);
-    return {
-      id_stock: nuevo.id_stock,
-      id_producto: id_producto,
-      id_sucursal: id_sucursal,
-      stock: nuevo.stock,
-      stock_comprometido: nuevo.stock_comprometido,
-    };
+  /**
+   * Escrituras legadas de `/stock`: tocaban `stock_sucursal` (tabla que el POS no usa)
+   * sin transacción ni kardex. El stock real se cambia solo desde Inventario, como
+   * `InventarioBussnies.update`. Las lecturas de esta clase siguen igual.
+   */
+  async actualizarStock(): Promise<never> {
+    throw new BadRequestException(MENSAJE_ESCRITURA_LEGADA);
   }
 
-  async transferirStock(id_producto: number, from_sucursal: number, to_sucursal: number, cantidad: number) {
-    if (cantidad <= 0) throw new BadRequestException('La cantidad debe ser mayor a cero');
-    if (from_sucursal === to_sucursal) throw new BadRequestException('Sucursales iguales');
-
-    const producto = await this.productoRepo.getById(id_producto);
-    if (!producto) throw new NotFoundException('Producto no encontrado');
-
-    const origen = await this.stockRepo.buscarPorProductoYSucursal(id_producto, from_sucursal);
-    if (!origen) throw new NotFoundException('Stock de origen no encontrado');
-    if ((origen.stock ?? 0) < cantidad) throw new BadRequestException('Stock insuficiente en origen');
-
-    const destino = await this.stockRepo.buscarPorProductoYSucursal(id_producto, to_sucursal);
-
-    await this.stockRepo.update(origen.id_stock, { stock: (origen.stock ?? 0) - cantidad } as any);
-
-    if (destino) {
-      await this.stockRepo.update(destino.id_stock, { stock: (destino.stock ?? 0) + cantidad } as any);
-    } else {
-      await this.stockRepo.create({ producto: { id_producto } as any, sucursal: { id_sucursal: to_sucursal } as any, stock: cantidad, stock_comprometido: 0 } as any);
-    }
-
-    await this.movimientoRepo.create({
-      producto: { id_producto } as any,
-      tipo: 'transferencia',
-      cantidad,
-      sucursal_origen: { id_sucursal: from_sucursal } as any,
-      sucursal_destino: { id_sucursal: to_sucursal } as any,
-      descripcion: 'Transferencia entre sucursales',
-    } as any);
-
-    return {
-      success: true,
-      id_producto,
-      from_sucursal,
-      to_sucursal,
-      cantidad,
-      stock_origen: (origen.stock ?? 0) - cantidad,
-      stock_destino: (destino?.stock ?? 0) + cantidad,
-    };
+  async transferirStock(): Promise<never> {
+    throw new BadRequestException(MENSAJE_ESCRITURA_LEGADA);
   }
 
   async listarBajoStock(threshold = 10) {

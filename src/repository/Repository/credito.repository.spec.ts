@@ -1,3 +1,5 @@
+import { ConflictException } from '@nestjs/common';
+import { CreditoBussnies } from '../../bussnies/Bussnies/credito.bussnies';
 import { CreditoRepository } from './credito.repository';
 
 /** Repositorio con un DataSource falso que anota el SQL y los parámetros, sin tocar ninguna base de datos. */
@@ -124,5 +126,78 @@ describe('CreditoRepository · Fase F0', () => {
     pendientes[0]([{ cuentas: 1, total: '10.00' }]);
     pendientes[1]([]);
     await expect(promesa).resolves.toMatchObject({ cuentas: 1, total: 10, mayores: [] });
+  });
+});
+
+/** Abono con `saldo_esperado` (Fase A, A8): un doble envío no cobra dos veces. */
+describe('CreditoRepository.registrarAbono · saldo esperado', () => {
+  function armarAbono(saldo: string, estado = 'parcial') {
+    const query = jest.fn(async (sql: string, _params: unknown[] = []) =>
+      sql.includes('FOR UPDATE') ? [{ id_cxc: 5, estado, saldo }] : []);
+    const dataSource = {
+      transaction: jest.fn(async (fn: (m: unknown) => unknown) => fn({ query })),
+      query: jest.fn(async (sql: string) => (sql.includes('FROM abonos_credito') ? [] : [{ id_cxc: 5, saldo }])),
+    };
+    const esquema = { exigir: jest.fn().mockResolvedValue(undefined), tiene: jest.fn().mockResolvedValue(true) };
+    const repo = new CreditoRepository(dataSource as any, esquema as any);
+    const escrituras = () => query.mock.calls.filter((c) => /^\s*(INSERT|UPDATE)/.test(String(c[0])));
+    return { repo, query, escrituras };
+  }
+
+  it('saldo distinto del esperado (más de medio céntimo) → CxC_DESACTUALIZADA:<saldo> sin escribir', async () => {
+    const { repo, escrituras } = armarAbono('30.00');
+
+    await expect(repo.registrarAbono({ id_cxc: 5, monto: 20, saldo_esperado: 50 })).rejects.toThrow('CxC_DESACTUALIZADA:30.00');
+    expect(escrituras()).toEqual([]);
+  });
+
+  it('una cuenta ya pagada por el primer envío también responde desactualizada, no «cerrada»', async () => {
+    const { repo, escrituras } = armarAbono('0.00', 'pagado');
+
+    await expect(repo.registrarAbono({ id_cxc: 5, monto: 50, saldo_esperado: 50 })).rejects.toThrow('CxC_DESACTUALIZADA:0.00');
+    expect(escrituras()).toEqual([]);
+  });
+
+  it('igual al esperado (o sin él) registra el abono y actualiza el saldo', async () => {
+    const igual = armarAbono('50.00');
+    await igual.repo.registrarAbono({ id_cxc: 5, monto: 20, saldo_esperado: 50.004 });
+    expect(igual.escrituras().map((c) => String(c[0]).trim().split(/\s+/).slice(0, 2).join(' '))).toEqual([
+      'INSERT INTO',
+      'UPDATE cuentas_por_cobrar',
+    ]);
+
+    const sinEsperado = armarAbono('50.00');
+    await sinEsperado.repo.registrarAbono({ id_cxc: 5, monto: 20 });
+    expect(sinEsperado.escrituras()).toHaveLength(2);
+  });
+
+  it('el negocio pasa saldo_esperado y lo traduce a 409 CXC_DESACTUALIZADA con el saldo actual', async () => {
+    const repo = { registrarAbono: jest.fn().mockRejectedValue(new Error('CxC_DESACTUALIZADA:30.00')) };
+    const negocio = new CreditoBussnies(repo as any);
+
+    const error: any = await negocio
+      .abonar(5, { monto: 20, saldo_esperado: 50 } as any, { id_usuario: 4, rol: 'caja' } as any)
+      .catch((e) => e);
+
+    expect(repo.registrarAbono).toHaveBeenCalledWith(expect.objectContaining({ id_cxc: 5, monto: 20, saldo_esperado: 50 }));
+    expect(error).toBeInstanceOf(ConflictException);
+    expect(error.getResponse()).toEqual({
+      codigo: 'CXC_DESACTUALIZADA',
+      saldo_actual: 30,
+      message: 'El saldo de esta cuenta cambió (ahora S/ 30.00): ya se registró otro abono. Recargue antes de abonar de nuevo.',
+    });
+  });
+});
+
+describe('CreditoRepository.listar · comodines escritos por el usuario (B8)', () => {
+  it('`%`, `_` y `\\` se buscan tal cual: van escapados y cada LIKE lleva ESCAPE', async () => {
+    const { repo, consultas } = armar([[{ total: 0 }], []]);
+
+    await repo.listar({ texto: ' 100%_A\\b ' });
+
+    expect(consultas[0].params[0]).toBe('%100\\%\\_a\\\\b%');
+    for (const { sql } of consultas) {
+      expect(sql.match(/LIKE \$1 ESCAPE '\\'/g)).toHaveLength(3);
+    }
   });
 });

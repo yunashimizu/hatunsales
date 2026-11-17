@@ -128,3 +128,122 @@ describe('VentaRepository.efectosDeAnulacion (S9.3)', () => {
     expect(dataSource.query).not.toHaveBeenCalled();
   });
 });
+
+describe('VentaRepository.registrar: candados y caja (Fase A)', () => {
+  const LINEA = {
+    id_producto: 7, descripcion: 'CEMENTO', cantidad: 1, precio_unitario: 10, descuento: 0, subtotal: 8.47, igv: 1.53, total: 10,
+    precio_lista_unitario: 10, descuento_unitario_aplicado: 0, descuento_total_linea: 0, precio_unitario_final: 10, id_regla_mayorista: null,
+  };
+  const DATOS = { id_usuario: 4, subtotal: 8.47, igv: 1.53, descuento: 0, total: 10, origen: 'mostrador' };
+
+  /**
+   * Transacción simulada: responde según el texto de cada consulta. `aperturas` y `cierres` son
+   * las respuestas, en orden, a la elección de la caja y a la relectura de su cierre.
+   */
+  function crearRegistro(opciones: { aperturas?: unknown[][]; cierres?: unknown[][] } = {}) {
+    const aperturas = [...(opciones.aperturas ?? [[{ id_apertura: 30, id_caja: 3 }]])];
+    const cierres = [...(opciones.cierres ?? [[]])];
+    const manager = {
+      query: jest.fn(async (sql: string, _params?: any): Promise<any[]> => {
+        if (sql.includes('FROM aperturas_caja a')) return aperturas.shift() ?? [];
+        if (sql.includes('FROM cierres_caja WHERE id_apertura = $1')) return cierres.shift() ?? [];
+        if (sql.includes('FROM inventario') && sql.includes('FOR UPDATE')) {
+          return [{ id_inventario: 1, id_producto: 7, id_almacen: 2, stock: '10' }];
+        }
+        if (sql.includes('FROM clientes c')) return [{ credito_activo: true, limite_credito: '1000' }];
+        if (sql.includes('SUM(saldo)')) return [{ deuda: '0' }];
+        if (sql.includes('INSERT INTO ventas')) return [{ id_venta: 50 }];
+        return [];
+      }),
+    };
+    const esquema = {
+      snapshot: jest.fn(async () => ({ tieneColumna: () => false })),
+      tiene: jest.fn(async () => false),
+    };
+    const dataSource = { query: jest.fn(), transaction: jest.fn(async (fn: (m: unknown) => unknown) => fn(manager)) };
+    const repo = new VentaRepository(dataSource as never, esquema as never);
+    const sqls = () => manager.query.mock.calls.map((c: unknown[]) => String(c[0]));
+    return { repo, manager, sqls };
+  }
+
+  it('a crédito: bloquea al deudor con FOR NO KEY UPDATE después del inventario y antes del INSERT de la venta', async () => {
+    const { repo, sqls } = crearRegistro();
+
+    await repo.registrar(
+      { ...DATOS, id_cliente: 17, credito: { monto: 10, dias: 15, id_cliente: 17 } },
+      [LINEA], [], { descontarStock: true, idAlmacenPreferido: 2 },
+    );
+
+    const todas = sqls();
+    const inventario = todas.findIndex((s) => s.includes('FROM inventario') && s.includes('FOR UPDATE'));
+    const deudor = todas.findIndex((s) => s.includes('FROM clientes c'));
+    const caja = todas.findIndex((s) => s.includes('FROM aperturas_caja a'));
+    const venta = todas.findIndex((s) => s.includes('INSERT INTO ventas'));
+    const cuenta = todas.findIndex((s) => s.includes('INSERT INTO cuentas_por_cobrar'));
+    expect(todas[deudor]).toContain('FOR NO KEY UPDATE');
+    expect(todas[deudor]).not.toMatch(/FOR UPDATE/);
+    expect(inventario).toBeGreaterThanOrEqual(0);
+    expect(inventario).toBeLessThan(deudor);
+    expect(deudor).toBeLessThan(caja);
+    expect(caja).toBeLessThan(venta);
+    // La cuenta por cobrar necesita el id de la venta: se queda después.
+    expect(venta).toBeLessThan(cuenta);
+  });
+
+  it('elige la caja en el servidor: descarta la de otra sucursal, toma FOR KEY SHARE y fecha con clock_timestamp()', async () => {
+    const { repo, manager, sqls } = crearRegistro();
+
+    await expect(repo.registrar(DATOS, [LINEA], [], { descontarStock: true, idAlmacenPreferido: 2 }))
+      .resolves.toEqual({ id_venta: 50, existente: false });
+
+    const eleccion = sqls().find((s) => s.includes('FROM aperturas_caja a'))!;
+    expect(eleccion).toContain('SELECT a.id_apertura, a.id_caja');
+    expect(eleccion).toContain('LEFT JOIN almacenes al ON al.id_almacen = $2::int');
+    // Una caja de sucursal conocida y distinta de la del almacén solo vale si es la del propio cajero.
+    expect(eleccion).toMatch(/AND \(COALESCE\(a\.id_usuario = \$1::int, FALSE\)\s+OR al\.id_sucursal IS NULL OR c\.id_sucursal IS NULL\s+OR al\.id_sucursal = c\.id_sucursal\)/);
+    expect(eleccion).toMatch(/FOR KEY SHARE OF a$/);
+    const llamadaEleccion = manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('FROM aperturas_caja a'))!;
+    expect(llamadaEleccion[1]).toEqual([4, 2]);
+
+    const insert = manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('INSERT INTO ventas'))!;
+    expect(String(insert[0])).toContain('clock_timestamp()');
+    expect(String(insert[0])).not.toContain('NOW()');
+    expect(insert[1][1]).toBe(3);
+  });
+
+  it('relee el cierre en otra sentencia: si la caja se cerró mientras esperaba, elige otra', async () => {
+    const { repo, manager, sqls } = crearRegistro({
+      aperturas: [[{ id_apertura: 30, id_caja: 3 }], [{ id_apertura: 31, id_caja: 5 }]],
+      cierres: [[{ '?column?': 1 }], []],
+    });
+
+    await repo.registrar(DATOS, [LINEA], [], { descontarStock: true, idAlmacenPreferido: 2 });
+
+    const relecturas = manager.query.mock.calls.filter((c: unknown[]) => String(c[0]).includes('FROM cierres_caja WHERE id_apertura = $1'));
+    expect(relecturas.map((c: unknown[]) => c[1])).toEqual([[30], [31]]);
+    expect(sqls().filter((s) => s.includes('FROM aperturas_caja a'))).toHaveLength(2);
+    const insert = manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('INSERT INTO ventas'))!;
+    expect(insert[1][1]).toBe(5);
+  });
+
+  it('si la segunda caja también se cerró: CAJA_CERRANDO y no se inserta la venta', async () => {
+    const { repo, sqls } = crearRegistro({
+      aperturas: [[{ id_apertura: 30, id_caja: 3 }], [{ id_apertura: 31, id_caja: 5 }]],
+      cierres: [[{ '?column?': 1 }], [{ '?column?': 1 }]],
+    });
+
+    await expect(repo.registrar(DATOS, [LINEA], [], { descontarStock: true, idAlmacenPreferido: 2 }))
+      .rejects.toThrow('CAJA_CERRANDO');
+    expect(sqls().some((s) => s.includes('INSERT INTO ventas'))).toBe(false);
+  });
+
+  it('sin caja abierta la venta queda sin caja y no relee cierres', async () => {
+    const { repo, manager, sqls } = crearRegistro({ aperturas: [[]] });
+
+    await repo.registrar(DATOS, [LINEA], [], { descontarStock: true, idAlmacenPreferido: 2 });
+
+    expect(sqls().some((s) => s.includes('FROM cierres_caja WHERE id_apertura = $1'))).toBe(false);
+    const insert = manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('INSERT INTO ventas'))!;
+    expect(insert[1][1]).toBeNull();
+  });
+});

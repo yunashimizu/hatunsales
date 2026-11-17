@@ -25,6 +25,7 @@ import {
   ResumenFiscal,
 } from '../../util/fiscal/calculo-fiscal';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
+import { esErrorDeBaseDatos } from '../../util/http/errores/traductor-errores-bd';
 import { pasarelaConfig } from '../../config/pasarela.config';
 import { CajaSesionBussnies } from './caja-sesion.bussnies';
 import { NotaCreditoBussnies } from './nota-credito.bussnies';
@@ -269,7 +270,7 @@ export class VentaBussnies {
         {
           id_cliente: receptor.id_cliente,
           id_empresa: receptor.id_empresa,
-          id_caja: dto.id_caja,
+          // dto.id_caja se ignora: la caja la elige el servidor (la del cajero o la de su local).
           id_usuario: usuario?.id_usuario,
           subtotal: resumen.total_gravada + resumen.total_exonerada + resumen.total_inafecta,
           igv: resumen.total_igv,
@@ -284,7 +285,8 @@ export class VentaBussnies {
         lineas,
         pagos,
         {
-          descontarStock: dto.descontar_stock ?? true,
+          // Vender sin mover stock es solo de administración; el pedido de otro rol se ignora.
+          descontarStock: !(dto.descontar_stock === false && normalizarRol(usuario?.rol) === 'admin'),
           idAlmacenPreferido: idAlmacen,
         },
       );
@@ -462,6 +464,7 @@ export class VentaBussnies {
    */
   private async ventaYaRegistrada(idVenta: number, dto: CrearVentaRequest): Promise<VentaResponse> {
     const venta = await this.obtener(idVenta);
+    this.assertMismoCarrito(venta, dto);
     if (dto.emitir_comprobante === false) return venta;
     // obtener() trae primero el comprobante principal vigente, si lo hay.
     if (this.comprobantePrincipalVigente(venta.comprobante ? [venta.comprobante] : [])) return venta;
@@ -469,6 +472,33 @@ export class VentaBussnies {
     venta.comprobante_error ??=
       'La venta ya estaba registrada y no tiene comprobante electrónico: emítalo desde Ventas («Emitir comprobante»).';
     return venta;
+  }
+
+  /**
+   * La misma clave de idempotencia solo vale para el mismo carrito: si el cajero cambió los
+   * productos o las cantidades y reintentó, devolver la venta anterior como si fuera la nueva
+   * escondería lo que no se cobró. Se comparan cantidades por producto; ni precios ni pagos
+   * (el recargo por tarjeta no está en los ítems guardados).
+   */
+  private assertMismoCarrito(venta: VentaResponse, dto: CrearVentaRequest): void {
+    const sumar = (lineas: { id_producto: unknown; cantidad: unknown }[]) => {
+      const suma = new Map<number, number>();
+      for (const l of lineas) {
+        const id = Number(l.id_producto);
+        suma.set(id, (suma.get(id) ?? 0) + (Number(l.cantidad) || 0));
+      }
+      return suma;
+    };
+    const pedido = sumar(dto.items ?? []);
+    const guardado = sumar(venta.items ?? []);
+    const ids = new Set([...pedido.keys(), ...guardado.keys()]);
+    const igual = [...ids].every((id) => Math.abs((pedido.get(id) ?? 0) - (guardado.get(id) ?? 0)) <= 0.0005);
+    if (igual) return;
+    throw new ConflictException({
+      codigo: 'VENTA_CLAVE_REUTILIZADA',
+      id_venta: venta.id_venta,
+      message: `Esta venta ya se había registrado (venta N.º ${venta.id_venta} por S/ ${Number(venta.total ?? 0).toFixed(2)}) con otros productos. No se registró de nuevo: revísela en Ventas y, si falta algo, cóbrelo como una venta nueva.`,
+    });
   }
 
   /** Factura o boleta de la venta que no está anulada ni en error (emitida o con su envío en curso). */
@@ -802,6 +832,15 @@ export class VentaBussnies {
     let pagos = (dto.pagos ?? []).filter((p) => Number(p.monto) > 0);
     if (!pagos.length) pagos = [{ monto: total }];
 
+    // Dos líneas del mismo medio violan venta_pago_pkey al guardar: se avisa antes, en claro.
+    const medios = pagos.filter((p) => p.id_metodo != null).map((p) => Number(p.id_metodo));
+    if (new Set(medios).size !== medios.length) {
+      throw new BadRequestException({
+        codigo: 'PAGOS_METODO_REPETIDO',
+        message: 'Hay dos pagos con el mismo medio: júntelos en una sola línea.',
+      });
+    }
+
     const suma = redondear(pagos.reduce((acumulado, p) => acumulado + Number(p.monto), 0));
     if (Math.abs(suma - total) > 0.05) {
       throw new BadRequestException(
@@ -1066,7 +1105,16 @@ export class VentaBussnies {
   }
 
   private traducirErrorDeStock(error: any, items: { id_producto: number; descripcion: string }[]) {
+    // Los de la base salen tal cual: el filtro global los traduce (p. ej. «intente de nuevo» en un interbloqueo).
+    if (esErrorDeBaseDatos(error)) return error;
     const mensaje = String(error?.message ?? '');
+
+    if (mensaje === 'CAJA_CERRANDO') {
+      return new ConflictException({
+        codigo: 'CAJA_CERRANDO',
+        message: 'La caja se estaba cerrando en ese momento. No se registró la venta: vuelva a cobrar.',
+      });
+    }
 
     if (mensaje === 'COTIZACION_NO_ENCONTRADA') {
       return new NotFoundException(cuerpoError(CodigoError.COTIZACION_NO_ENCONTRADA, 'La cotización ya no existe'));

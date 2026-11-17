@@ -18,7 +18,9 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "fiscal:preparar-local": "node scripts/preparar-fiscal-local.cjs"
+    "fiscal:preparar-local": "node scripts/preparar-fiscal-local.cjs",
+    "respaldo:base": "node scripts/respaldo-base.cjs respaldar",
+    "respaldo:probar": "node scripts/respaldo-base.cjs probar"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",

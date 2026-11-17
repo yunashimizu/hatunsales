@@ -151,7 +151,8 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
       const r = bd.registro;
       expect(posicion(r, 'preparar:BB01-5')).toBeLessThan(posicion(r, 'BEGIN'));
       expect(posicion(r, 'BEGIN')).toBeLessThan(posicion(r, 'tx:lock:cpe-venta:9'));
-      expect(posicion(r, 'tx:lock:cpe-venta:9')).toBeLessThan(posicion(r, 'tx:vigente:9'));
+      expect(posicion(r, 'tx:lock:cpe-venta:9')).toBeLessThan(posicion(r, 'tx:estado-venta:9'));
+      expect(posicion(r, 'tx:estado-venta:9')).toBeLessThan(posicion(r, 'tx:vigente:9'));
       expect(posicion(r, 'tx:vigente:9')).toBeLessThan(posicion(r, 'tx:lock:comprobante:BB01'));
       expect(posicion(r, 'tx:lock:comprobante:BB01')).toBeLessThan(posicion(r, 'tx:max:BB01'));
       expect(posicion(r, 'tx:max:BB01')).toBeLessThan(posicion(r, 'tx:insert:comprobantes'));
@@ -527,6 +528,38 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
       expect(emision.registrarEnvio).not.toHaveBeenCalled();
     });
 
+    it('venta anulada mientras se firmaba: tras el candado cpe-venta responde 409 VENTA_ANULADA sin numerar ni insertar', async () => {
+      const bd = crearBdFalsa({ estadosVenta: { 9: 'anulada' } });
+      const { servicio, emision } = crearMotor({ bd });
+
+      const error = await servicio.generar(boleta()).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toEqual({
+        codigo: 'VENTA_ANULADA',
+        message: 'La venta 9 está anulada: no se le emite comprobante.',
+      });
+      const r = bd.registro;
+      expect(posicion(r, 'tx:lock:cpe-venta:9')).toBeLessThan(posicion(r, 'tx:estado-venta:9'));
+      // Lectura simple: sin FOR UPDATE sobre la venta.
+      const lectura = bd.consultas.find((c) => /FROM ventas v/.test(c.sql))!;
+      expect(lectura.sql).not.toMatch(/FOR UPDATE/);
+      expect(lectura.sql).toContain("to_jsonb(v) ->> 'estado'");
+      expect(r).toContain('ROLLBACK');
+      expect(r.some((e) => e.startsWith('tx:lock:comprobante:'))).toBe(false);
+      expect(r).not.toContain('tx:insert:comprobantes');
+      expect(emision.registrarEnvio).not.toHaveBeenCalled();
+    });
+
+    it('sin la columna ventas.estado (esquema antiguo) la venta cuenta como activa', async () => {
+      const bd = crearBdFalsa({ estadosVenta: { 9: null } });
+      const { servicio } = crearMotor({ bd });
+
+      await servicio.generar(boleta());
+
+      expect(bd.registro).toContain('tx:insert:comprobantes');
+    });
+
     it('sin venta no toma el candado de la venta', async () => {
       const bd = crearBdFalsa();
       const { servicio } = crearMotor({ bd });
@@ -534,6 +567,7 @@ describe('ComprobanteBussnies: emisión directa por el contrato EmisionDirecta',
       await servicio.generar(boleta({ id_venta: undefined }));
 
       expect(bd.registro.some((e) => e.includes('cpe-venta'))).toBe(false);
+      expect(bd.registro.some((e) => e.includes('estado-venta'))).toBe(false);
       expect(bd.registro).toContain('tx:lock:comprobante:BB01');
     });
   });

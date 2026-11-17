@@ -72,7 +72,12 @@ export class ComprobanteController {
     return this.service.previsualizar(body);
   }
 
+  /**
+   * Emite a SUNAT con ítems y precios libres, sin venta detrás: solo un administrador.
+   * Caja y vendedor emiten desde la venta (`POST /venta/:id/emitir-comprobante`).
+   */
   @Post('generar')
+  @Roles('admin')
   generar(@Body() body: GenerarComprobanteRequest, @UsuarioActual() usuario?: UsuarioToken) {
     return this.service.generar(body, usuario?.id_usuario ?? null);
   }
@@ -187,6 +192,15 @@ export class ComprobanteController {
   async detalle(@Param('id', ParseIntPipe) id: number) {
     const detalle = await this.service.obtenerDetalle(id);
     return { ...detalle, correo: await this.correo.estadoResumen(detalle) };
+  }
+
+  /**
+   * Estado liviano (un SELECT, sin ítems ni relaciones) para el seguimiento del envío diferido.
+   * Antes de `GET :id`, mismos roles. 404 si no existe.
+   */
+  @Get(':id/estado')
+  estado(@Param('id', ParseIntPipe) id: number) {
+    return this.service.obtenerEstado(id);
   }
 
   /** Reenvía el comprobante (PDF y XML) por correo; sin destino usa el del comprobante. Máximo 3 por hora. */

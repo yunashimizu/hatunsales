@@ -150,6 +150,16 @@ const ESTADOS_EN_RESUMEN: ReadonlySet<string> = new Set(['POR_RESUMIR', 'TICKET_
 const PATRON_ESTADO_SUNAT = /^[A-Z_]{2,30}$/;
 
 /** Opciones internas de emisión (no viajan en el DTO HTTP). */
+/** Respuesta de `GET /comprobante/:id/estado` (seguimiento liviano del envío diferido). */
+export interface ComprobanteEstadoResponse {
+  id_comprobante: number;
+  estado: string;
+  estado_sunat: string | null;
+  aceptada_sunat: boolean;
+  sunat_description: string | null;
+  anulado: boolean;
+}
+
 export interface OpcionesGenerar {
   /** Total que DEBE dar el comprobante (venta ya cobrada): si difiere, 400 sin reservar número. */
   totalExigido?: number;
@@ -392,6 +402,8 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
       antesDeNumerar: idVenta
         ? async (tx) => {
             await this.repo.bloquear(tx, `cpe-venta:${idVenta}`);
+            // La anulación toma este mismo candado primero: tras él, una venta anulada ya se ve anulada.
+            await this.exigirVentaNoAnulada(idVenta, tx);
             await this.exigirVentaSinComprobante(idVenta, tx);
           }
         : undefined,
@@ -704,6 +716,23 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     const c = await this.repo.buscarPorId(id_comprobante);
     if (!c) throw new NotFoundException('Comprobante no encontrado');
     return this.mapComprobante(c);
+  }
+
+  /**
+   * Estado liviano para el seguimiento del envío diferido: un solo SELECT de seis columnas (sin
+   * relaciones ni ítems). `estado` es el mismo valor visible que devuelve `GET /comprobante/:id`.
+   */
+  async obtenerEstado(id_comprobante: number): Promise<ComprobanteEstadoResponse> {
+    const f = await this.repo.estadoDe(id_comprobante);
+    if (!f) throw new NotFoundException('Comprobante no encontrado');
+    return {
+      id_comprobante: f.id_comprobante,
+      estado: this.estadoVisible({ estado: f.estado, aceptada_sunat: f.aceptada_sunat, anulado: f.anulado }),
+      estado_sunat: f.estado_sunat,
+      aceptada_sunat: Boolean(f.aceptada_sunat),
+      sunat_description: f.sunat_description,
+      anulado: Boolean(f.anulado),
+    };
   }
 
   /** Detalle completo, con líneas, totales, envío, notas y guías enlazadas, para reimprimir o revisar. */
@@ -1086,6 +1115,23 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     );
     // El mostrador no lo ve como «comprobante pendiente de revisar» (envio_diferido evita el aviso de la venta).
     return { ...respuesta, error: undefined, envio_diferido: true, por_resumen: true };
+  }
+
+  /**
+   * 409 si la venta ya está anulada. Lectura simple (sin FOR UPDATE), dentro de la transacción y
+   * después del candado `cpe-venta`. La columna se lee como JSON: sin `ventas.estado` (esquema
+   * antiguo) no falla y la venta cuenta como activa.
+   */
+  private async exigirVentaNoAnulada(idVenta: number, consultor: EntityManager): Promise<void> {
+    const filas: { estado: string | null }[] = await consultor.query(
+      `SELECT to_jsonb(v) ->> 'estado' AS estado FROM ventas v WHERE v.id_venta = $1`,
+      [idVenta],
+    );
+    if (String(filas[0]?.estado ?? '').trim().toLowerCase() !== 'anulada') return;
+    throw new ConflictException({
+      codigo: 'VENTA_ANULADA',
+      message: `La venta ${idVenta} está anulada: no se le emite comprobante.`,
+    });
   }
 
   private async exigirVentaSinComprobante(idVenta: number, consultor?: EntityManager): Promise<void> {
@@ -2091,7 +2137,7 @@ export class ComprobanteBussnies implements IComprobanteBussniees, EmisorNotasCr
     return respaldo;
   }
 
-  private estadoVisible(c: Comprobante): string {
+  private estadoVisible(c: { estado?: string | null; aceptada_sunat?: boolean | null; anulado?: boolean | null }): string {
     if (c.anulado) return 'anulado';
     if (c.estado === 'error' || c.estado === 'pendiente') return c.estado;
     return c.aceptada_sunat ? 'aceptado' : 'emitido';

@@ -41,6 +41,36 @@ function sqlStateDe(error: ErrorPgCrudo): string | undefined {
   return pareceDePg ? codigo : undefined;
 }
 
+function esConsultaFallida(error: unknown): error is QueryFailedError & { driverError?: ErrorPgCrudo } {
+  return error instanceof QueryFailedError || String((error as { name?: unknown })?.name ?? '') === 'QueryFailedError';
+}
+
+/**
+ * SQLSTATE de un error de PostgreSQL, venga envuelto por TypeORM (`QueryFailedError.driverError`)
+ * o crudo del driver. undefined si no es un error de la base (o es un código de red de Node).
+ */
+export function sqlStateDeError(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  if (esConsultaFallida(error)) {
+    const fallida = error as QueryFailedError & { driverError?: ErrorPgCrudo };
+    return sqlStateDe(fallida.driverError ?? (fallida as ErrorPgCrudo));
+  }
+  return sqlStateDe(error as ErrorPgCrudo);
+}
+
+/**
+ * true si el error viene de la base (consulta fallida, SQLSTATE o conexión caída): los negocios
+ * lo relanzan tal cual para que el filtro global responda con su mensaje y su código HTTP, en vez
+ * de disfrazarlo de 400 con el texto crudo de PostgreSQL.
+ */
+export function esErrorDeBaseDatos(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  if (esConsultaFallida(error)) return true;
+  if (SIN_CONEXION_TYPEORM.has(String((error as { name?: unknown }).name ?? ''))) return true;
+  if (sqlStateDeError(error)) return true;
+  return esFallaDeConexion(error as ErrorPgCrudo);
+}
+
 /** INSERT / UPDATE / DELETE / SELECT de la sentencia (también detrás de un WITH). */
 export function sentenciaDe(sql: string | undefined): string | undefined {
   const limpio = String(sql ?? '').trim();

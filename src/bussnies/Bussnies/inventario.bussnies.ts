@@ -9,6 +9,7 @@ import {
 } from '../../models/model/inventario.request';
 import { InventarioResponse } from '../../models/model/inventario.response';
 import { IInventarioBussniees } from '../Ibussnies/IInventarioBussniees';
+import { esErrorDeBaseDatos } from '../../util/http/errores/traductor-errores-bd';
 
 const ETIQUETA_MOTIVO: Record<string, string> = {
   compra: 'Ingreso por compra',
@@ -138,18 +139,10 @@ export class InventarioBussnies implements IInventarioBussniees {
         dto.stock_esperado === undefined || dto.stock_esperado === null ? undefined : Number(dto.stock_esperado),
       );
     } catch (error: any) {
+      // Los de la base salen tal cual: el filtro global los traduce (p. ej. «intente de nuevo»).
+      if (esErrorDeBaseDatos(error)) throw error;
       const mensaje = String(error?.message ?? '');
-      if (mensaje.startsWith('STOCK_DESACTUALIZADO:')) {
-        // 409 con código para que el panel recargue el stock y deje la ficha abierta.
-        const stockActual = Number(mensaje.split(':')[1]);
-        throw new ConflictException({
-          codigo: 'STOCK_DESACTUALIZADO',
-          stock_actual: stockActual,
-          message:
-            `El stock de este producto en ese almacén cambió mientras lo editaba: ahora hay ${stockActual}. ` +
-            'Recargue la ficha y vuelva a intentar.',
-        });
-      }
+      if (mensaje.startsWith('STOCK_DESACTUALIZADO:')) throw this.stockDesactualizado(mensaje);
       if (mensaje.startsWith('STOCK_NEGATIVO:')) {
         const disponible = mensaje.split(':')[1];
         throw new BadRequestException(
@@ -174,10 +167,15 @@ export class InventarioBussnies implements IInventarioBussniees {
         dto.id_almacen_destino,
         dto.cantidad,
         descripcion,
+        dto.stock_origen_esperado === undefined || dto.stock_origen_esperado === null
+          ? undefined
+          : Number(dto.stock_origen_esperado),
       );
       return { transferido: true };
     } catch (error: any) {
+      if (esErrorDeBaseDatos(error)) throw error;
       const mensaje = String(error?.message ?? '');
+      if (mensaje.startsWith('STOCK_DESACTUALIZADO:')) throw this.stockDesactualizado(mensaje);
       if (mensaje.startsWith('STOCK_INSUFICIENTE:')) {
         throw new BadRequestException(
           `El almacén de origen solo tiene ${mensaje.split(':')[1]} unidades disponibles`,
@@ -185,6 +183,18 @@ export class InventarioBussnies implements IInventarioBussniees {
       }
       throw new BadRequestException(traducirErrorStock(mensaje) || 'No se pudo transferir el stock');
     }
+  }
+
+  /** 409 con código para que el panel recargue el stock y deje la ficha abierta (ajuste y transferencia). */
+  private stockDesactualizado(mensaje: string): ConflictException {
+    const stockActual = Number(mensaje.split(':')[1]);
+    return new ConflictException({
+      codigo: 'STOCK_DESACTUALIZADO',
+      stock_actual: stockActual,
+      message:
+        `El stock de este producto en ese almacén cambió mientras lo editaba: ahora hay ${stockActual}. ` +
+        'Recargue la ficha y vuelva a intentar.',
+    });
   }
 
   async fijarStockMinimo(idInventario: number, minimo: number) {

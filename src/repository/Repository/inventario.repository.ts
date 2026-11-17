@@ -3,6 +3,8 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, EntityManager } from 'typeorm';
 import { Inventario } from '../../models/DBModel/inventario.entity';
 import { CrudRepository } from '../Irepository/GenericIRepository/crud.Irepository';
+import { reintentarSiHuboConflicto } from '../../util/reintento-bd';
+import { patronContiene } from './venta-documentos.repository';
 
 export interface FiltroInventario {
   texto?: string;
@@ -132,11 +134,12 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     const parametros: any[] = [];
 
     if (filtro.texto?.trim()) {
-      parametros.push(`%${filtro.texto.trim().toLowerCase()}%`);
+      // `%`, `_` y `\` del usuario se buscan tal cual, no como comodines.
+      parametros.push(patronContiene(filtro.texto.trim().toLowerCase()));
       condiciones.push(
-        `(LOWER(p.nombre) LIKE $${parametros.length}
-          OR LOWER(COALESCE(p.sku, '')) LIKE $${parametros.length}
-          OR LOWER(COALESCE(p.codigo_barras, '')) LIKE $${parametros.length})`,
+        `(LOWER(p.nombre) LIKE $${parametros.length} ESCAPE '\\'
+          OR LOWER(COALESCE(p.sku, '')) LIKE $${parametros.length} ESCAPE '\\'
+          OR LOWER(COALESCE(p.codigo_barras, '')) LIKE $${parametros.length} ESCAPE '\\')`,
       );
     }
     if (filtro.id_almacen) {
@@ -344,9 +347,10 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     // Con `manager` el ajuste entra en la transacción de quien llama (alta de
     // producto con stock inicial); sin él abre la suya.
     if (manager) return this.ajustarCon(manager, idProducto, idAlmacen, cantidad, descripcion, stockEsperado);
-    return this.dataSource.transaction((m) =>
+    // Solo la transacción propia se repite tras un interbloqueo: la de quien llama ya quedó abortada.
+    return reintentarSiHuboConflicto(() => this.dataSource.transaction((m) =>
       this.ajustarCon(m, idProducto, idAlmacen, cantidad, descripcion, stockEsperado),
-    );
+    ), { operacion: 'Ajustar stock' });
   }
 
   private async ajustarCon(
@@ -418,31 +422,43 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     return filas.length > 0;
   }
 
+  /**
+   * Mueve stock entre dos almacenes. Las dos filas se bloquean en UNA sentencia y en orden fijo
+   * (id_almacen, id_inventario): dos transferencias opuestas del mismo producto (A→B y B→A) ya no
+   * se interbloquean. `stockOrigenEsperado`: el stock de origen que vio quien transfiere; si el
+   * real es otro, `STOCK_DESACTUALIZADO:<actual>` sin escribir nada (doble envío o venta entre medio).
+   */
   async transferir(
     idProducto: number,
     idOrigen: number,
     idDestino: number,
     cantidad: number,
     descripcion: string,
+    stockOrigenEsperado?: number,
   ): Promise<void> {
-    await this.dataSource.transaction(async (manager) => {
-      const origen = await manager.query(
-        'SELECT id_inventario, stock FROM inventario WHERE id_producto = $1 AND id_almacen = $2 FOR UPDATE',
-        [idProducto, idOrigen],
+    await reintentarSiHuboConflicto(() => this.dataSource.transaction(async (manager) => {
+      const bloqueadas: { id_inventario: unknown; id_almacen: unknown; stock: unknown }[] = await manager.query(
+        `SELECT id_inventario, id_almacen, stock
+           FROM inventario
+          WHERE id_producto = $1 AND id_almacen = ANY($2::int[])
+          ORDER BY id_almacen, id_inventario
+            FOR UPDATE`,
+        [idProducto, [idOrigen, idDestino]],
       );
+      const origen = bloqueadas.filter((f) => Number(f.id_almacen) === Number(idOrigen));
+      const destino = bloqueadas.filter((f) => Number(f.id_almacen) === Number(idDestino));
 
       const disponible = Number(origen[0]?.stock ?? 0);
+      if (stockOrigenEsperado !== undefined && stockOrigenEsperado !== null
+        && Math.round(disponible * 1000) !== Math.round(Number(stockOrigenEsperado) * 1000)) {
+        throw new Error(`STOCK_DESACTUALIZADO:${disponible}`);
+      }
       if (disponible < cantidad) throw new Error(`STOCK_INSUFICIENTE:${disponible}`);
 
       await manager.query('UPDATE inventario SET stock = stock - $1 WHERE id_inventario = $2', [
         cantidad,
         origen[0].id_inventario,
       ]);
-
-      const destino = await manager.query(
-        'SELECT id_inventario, stock FROM inventario WHERE id_producto = $1 AND id_almacen = $2 FOR UPDATE',
-        [idProducto, idDestino],
-      );
 
       if (Number(destino[0]?.stock ?? 0) + cantidad > STOCK_MAXIMO_BD) {
         throw new Error(`STOCK_FUERA_DE_RANGO:${STOCK_MAXIMO_BD}`);
@@ -486,7 +502,7 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
            FROM productos p WHERE p.id_producto = $1`,
         [idProducto, cantidad],
       );
-    });
+    }), { operacion: 'Transferir stock' });
   }
 
   async fijarStockMinimo(idInventario: number, minimo: number): Promise<void> {

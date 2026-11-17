@@ -23,8 +23,24 @@ export type CajaDisponible = {
   id_sucursal: number | null;
   sucursal_nombre: string | null;
   ocupada: boolean;
+  /** false = caja desactivada (no se puede abrir). Sin columna `estado`, toda caja es activa. */
+  activa: boolean;
   /** Efectivo contado (monto_conteo) en el último cierre de esta caja; null si no hay o no existe la columna. */
   sugerido_inicial: number | null;
+};
+
+/** Un local (fila de `sucursales`) tal como lo ve el tablero de Caja. */
+export type LocalCaja = {
+  id_sucursal: number;
+  nombre: string;
+  direccion: string | null;
+};
+
+/** Quién tiene abierta una caja (GET /caja/disponibles, dato informativo). */
+export type OcupanteCaja = {
+  id_usuario: number | null;
+  usuario_nombre: string | null;
+  abierta_en: string | null;
 };
 
 /** Filtros de turnos (aperturas). Las fechas son AAAA-MM-DD en días de Lima, ya validadas. */
@@ -86,7 +102,7 @@ type MetaCierre = {
   tieneIdUsuario: boolean;
   tieneMontoFinal: boolean;
 };
-type MetaCaja = { exprNombre: string; tieneSucursal: boolean };
+type MetaCaja = { exprNombre: string; tieneNombre: boolean; tieneSucursal: boolean; tieneEstado: boolean };
 
 interface MetaSesion {
   snapshot: SnapshotEsquema;
@@ -96,6 +112,9 @@ interface MetaSesion {
 }
 
 const CANDADO_APERTURA_USUARIO = 'caja:apertura:usuario:';
+
+/** Nombres de caja se comparan sin distinguir mayúsculas ni espacios de los extremos. */
+const normalizarNombre = (n: string) => n.trim().toLowerCase();
 /** Instante UTC de una columna `timestamp` sin zona que guarda hora UTC. */
 const ISO_UTC = `'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'`;
 
@@ -146,7 +165,9 @@ export class CajaSesionRepository {
           : colsCaja.has('descripcion')
             ? `COALESCE(c.descripcion, 'Caja ' || c.id_caja::text)`
             : `'Caja ' || c.id_caja::text`,
+        tieneNombre: colsCaja.has('nombre'),
         tieneSucursal: colsCaja.has('id_sucursal'),
+        tieneEstado: colsCaja.has('estado'),
       },
     };
     return this.meta;
@@ -262,12 +283,14 @@ export class CajaSesionRepository {
     return v != null && v !== '' ? Dinero.desdeBd(v).aNumero() : null;
   }
 
-  async listarDisponibles(): Promise<CajaDisponible[]> {
+  /** Cajas con su local, si están ocupadas y su sugerido; `idCaja` limita a una sola. */
+  private async consultarCajas(q: Pick<DataSource, 'query'>, idCaja?: number): Promise<CajaDisponible[]> {
     const m = await this.metaSesion();
-    const filas = await this.dataSource.query(
+    const filas = await q.query(
       `SELECT c.id_caja,
               ${m.caja.exprNombre} AS nombre,
               ${m.caja.tieneSucursal ? 'c.id_sucursal, s.nombre AS sucursal_nombre' : 'NULL::int AS id_sucursal, NULL::text AS sucursal_nombre'},
+              ${m.caja.tieneEstado ? 'COALESCE(c.estado, TRUE)' : 'TRUE'} AS activa,
               EXISTS (
                 SELECT 1 FROM aperturas_caja a
                  WHERE a.id_caja = c.id_caja
@@ -278,7 +301,9 @@ export class CajaSesionRepository {
               ${this.sqlSugerido(m, 'c.id_caja')} AS sugerido_inicial
          FROM cajas c
          ${m.caja.tieneSucursal ? 'LEFT JOIN sucursales s ON s.id_sucursal = c.id_sucursal' : ''}
+        ${idCaja != null ? 'WHERE c.id_caja = $1' : ''}
         ORDER BY c.id_caja ASC`,
+      idCaja != null ? [idCaja] : [],
     );
 
     return (filas as any[]).map((f) => ({
@@ -287,8 +312,161 @@ export class CajaSesionRepository {
       id_sucursal: f.id_sucursal != null ? Number(f.id_sucursal) : null,
       sucursal_nombre: f.sucursal_nombre != null ? String(f.sucursal_nombre) : null,
       ocupada: f.ocupada === true || f.ocupada === 't' || f.ocupada === 1,
+      activa: !(f.activa === false || f.activa === 'f' || f.activa === 0),
       sugerido_inicial: f.sugerido_inicial != null && f.sugerido_inicial !== '' ? Dinero.desdeBd(f.sugerido_inicial).aNumero() : null,
     }));
+  }
+
+  async listarDisponibles(): Promise<CajaDisponible[]> {
+    return this.consultarCajas(this.dataSource);
+  }
+
+  /** Una caja con la forma de `listarDisponibles` (null si no existe). */
+  async cajaDisponible(idCaja: number, manager?: EntityManager): Promise<CajaDisponible | null> {
+    return (await this.consultarCajas(manager ?? this.dataSource, idCaja))[0] ?? null;
+  }
+
+  /** Todos los locales (`sucursales`), por nombre. Consulta aparte: quien la llama decide qué hacer si falla. */
+  async listarLocales(): Promise<LocalCaja[]> {
+    const filas = await this.dataSource.query(
+      `SELECT id_sucursal, nombre, direccion
+         FROM sucursales
+        ORDER BY lower(nombre) ASC, id_sucursal ASC`,
+    );
+    return (filas as any[]).map((f) => ({
+      id_sucursal: Number(f.id_sucursal),
+      nombre: String(f.nombre ?? `Local ${f.id_sucursal}`),
+      direccion: f.direccion != null && String(f.direccion).trim() !== '' ? String(f.direccion) : null,
+    }));
+  }
+
+  /** Nombres de las cajas de un local (null = cajas sin local). Para elegir «Caja N» y detectar repetidos. */
+  private async nombresDeCajas(
+    manager: EntityManager,
+    idSucursal: number | null,
+    excluirIdCaja?: number,
+  ): Promise<string[]> {
+    const filas = await manager.query(
+      `SELECT nombre
+         FROM cajas
+        WHERE id_sucursal IS NOT DISTINCT FROM $1::int
+          AND ($2::int IS NULL OR id_caja <> $2::int)`,
+      [idSucursal, excluirIdCaja ?? null],
+    );
+    return (filas as any[]).map((f) => String(f.nombre ?? ''));
+  }
+
+  /**
+   * Crea una caja en un local. Bloquea la fila del local antes de leer los nombres e insertar,
+   * así dos altas a la vez no repiten nombre ni número. Errores: SUCURSAL_NO_ENCONTRADA,
+   * CAJA_NOMBRE_REPETIDO, CAJA_ESQUEMA_NO_SOPORTA.
+   */
+  async crearCaja(params: { idSucursal: number; nombre?: string | null }): Promise<CajaDisponible> {
+    const m = await this.metaSesion();
+    if (!m.caja.tieneNombre || !m.caja.tieneSucursal) throw new Error('CAJA_ESQUEMA_NO_SOPORTA');
+
+    return this.dataSource.transaction(async (manager) => {
+      const local = await manager.query(
+        `SELECT id_sucursal FROM sucursales WHERE id_sucursal = $1 FOR UPDATE`,
+        [params.idSucursal],
+      );
+      if (!local[0]) throw new Error('SUCURSAL_NO_ENCONTRADA');
+
+      const usados = new Set((await this.nombresDeCajas(manager, params.idSucursal)).map((n) => normalizarNombre(n)));
+      let nombre = (params.nombre ?? '').trim();
+      if (nombre === '') {
+        let n = 1;
+        while (usados.has(normalizarNombre(`Caja ${n}`))) n += 1;
+        nombre = `Caja ${n}`;
+      } else if (usados.has(normalizarNombre(nombre))) {
+        throw new Error('CAJA_NOMBRE_REPETIDO');
+      }
+
+      const filas = await manager.query(
+        `INSERT INTO cajas (id_sucursal, nombre) VALUES ($1, $2) RETURNING id_caja`,
+        [params.idSucursal, nombre],
+      );
+      const creada = await this.cajaDisponible(Number(filas[0]?.id_caja), manager);
+      if (!creada) throw new Error('CAJA_NO_ENCONTRADA');
+      return creada;
+    });
+  }
+
+  /**
+   * Renombra y/o (des)activa una caja. Orden de candados fijo: fila del local → fila de la caja
+   * (el mismo `FOR UPDATE` que `abrir`). Errores: CAJA_NO_ENCONTRADA, CAJA_NOMBRE_REPETIDO,
+   * CAJA_CON_TURNO_ABIERTO, CAJA_ESQUEMA_NO_SOPORTA.
+   */
+  async actualizarCaja(idCaja: number, cambios: { nombre?: string; activa?: boolean }): Promise<CajaDisponible> {
+    const m = await this.metaSesion();
+    const renombra = cambios.nombre !== undefined;
+    const cambiaEstado = cambios.activa !== undefined;
+    if (renombra && !m.caja.tieneNombre) throw new Error('CAJA_ESQUEMA_NO_SOPORTA');
+    if (cambiaEstado && !m.caja.tieneEstado) throw new Error('CAJA_ESQUEMA_NO_SOPORTA');
+
+    return this.dataSource.transaction(async (manager) => {
+      const previa = await this.cajaDisponible(idCaja, manager);
+      if (!previa) throw new Error('CAJA_NO_ENCONTRADA');
+
+      if (renombra && previa.id_sucursal != null) {
+        await manager.query(`SELECT id_sucursal FROM sucursales WHERE id_sucursal = $1 FOR UPDATE`, [previa.id_sucursal]);
+      }
+      const bloqueada = await manager.query(`SELECT id_caja FROM cajas WHERE id_caja = $1 FOR UPDATE`, [idCaja]);
+      if (!bloqueada[0]) throw new Error('CAJA_NO_ENCONTRADA');
+
+      if (renombra) {
+        const nombre = (cambios.nombre ?? '').trim();
+        const usados = await this.nombresDeCajas(manager, previa.id_sucursal, idCaja);
+        if (usados.some((n) => normalizarNombre(n) === normalizarNombre(nombre))) {
+          throw new Error('CAJA_NOMBRE_REPETIDO');
+        }
+        await manager.query(`UPDATE cajas SET nombre = $1 WHERE id_caja = $2`, [nombre, idCaja]);
+      }
+
+      if (cambiaEstado) {
+        if (cambios.activa === false && (await this.cajaOcupada(idCaja, manager))) {
+          throw new Error('CAJA_CON_TURNO_ABIERTO');
+        }
+        await manager.query(`UPDATE cajas SET estado = $1 WHERE id_caja = $2`, [cambios.activa === true, idCaja]);
+      }
+
+      const actual = await this.cajaDisponible(idCaja, manager);
+      if (!actual) throw new Error('CAJA_NO_ENCONTRADA');
+      return actual;
+    });
+  }
+
+  /**
+   * Quién tiene cada caja ahora: turnos sin cierre, uno por caja (el más reciente si hubiera más).
+   * Dato informativo para el tablero de Caja; usa las mismas expresiones de nombre y fecha que
+   * `listarTurnos`, así que no supone ninguna columna nueva.
+   */
+  async ocupantesDeCajas(): Promise<Map<number, OcupanteCaja>> {
+    const m = await this.metaSesion();
+    const selFecha = m.apertura.colFecha ? `a.${m.apertura.colFecha}` : 'NULL::timestamp';
+    const orden = m.apertura.colFecha ? `a.id_caja, ${selFecha} DESC, a.id_apertura DESC` : 'a.id_caja, a.id_apertura DESC';
+    const filas = await this.dataSource.query(
+      `SELECT DISTINCT ON (a.id_caja)
+              a.id_caja,
+              a.id_usuario,
+              NULLIF(TRIM(CONCAT_WS(' ', u.nombre, u.apellido_paterno)), '') AS usuario_nombre,
+              to_char(${selFecha}, ${ISO_UTC}) AS abierta_en
+         FROM aperturas_caja a
+         LEFT JOIN usuarios u ON u.id_usuario = a.id_usuario
+        WHERE NOT EXISTS (
+                SELECT 1 FROM cierres_caja ci WHERE ci.id_apertura = a.id_apertura
+              )
+        ORDER BY ${orden}`,
+    );
+    const mapa = new Map<number, OcupanteCaja>();
+    for (const f of filas as any[]) {
+      mapa.set(Number(f.id_caja), {
+        id_usuario: f.id_usuario != null ? Number(f.id_usuario) : null,
+        usuario_nombre: f.usuario_nombre != null ? String(f.usuario_nombre) : null,
+        abierta_en: f.abierta_en ?? null,
+      });
+    }
+    return mapa;
   }
 
   // ── Turnos para el arqueo por sucursal ───────────────────────
@@ -438,7 +616,13 @@ export class CajaSesionRepository {
       await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `${CANDADO_APERTURA_USUARIO}${params.idUsuario}`,
       ]);
-      await manager.query(`SELECT id_caja FROM cajas WHERE id_caja = $1 FOR UPDATE`, [params.idCaja]);
+      const bloqueada = await manager.query(
+        `SELECT id_caja${m.caja.tieneEstado ? ', COALESCE(estado, TRUE) AS activa' : ''} FROM cajas WHERE id_caja = $1 FOR UPDATE`,
+        [params.idCaja],
+      );
+      if (bloqueada?.[0] && (bloqueada[0].activa === false || bloqueada[0].activa === 'f')) {
+        throw new Error('CAJA_DESACTIVADA');
+      }
 
       if (await this.tieneAperturaAbiertaUsuario(params.idUsuario, manager)) {
         throw new Error('CAJA_YA_ABIERTA_USUARIO');
@@ -454,11 +638,11 @@ export class CajaSesionRepository {
         vals.push(Dinero.desdeNumeroRedondeado(Number(params.montoInicial)).aTexto());
       }
       const placeholders = vals.map((_, i) => `$${i + 1}`);
-      // La fecha la pone la BD (NOW()), igual que ventas.fecha: el turno y sus ventas
-      // se comparan con el mismo reloj.
+      // La fecha la pone la BD con clock_timestamp() (hora real, tras los candados), igual que
+      // ventas.fecha y el cierre: así apertura ≤ venta < cierre y dos turnos seguidos no se solapan.
       if (m.apertura.colFecha) {
         cols.push(m.apertura.colFecha);
-        placeholders.push('NOW()');
+        placeholders.push('clock_timestamp()');
       }
 
       const insertadas = await manager.query(
@@ -563,9 +747,11 @@ export class CajaSesionRepository {
         vals.push(prep.montoFinal);
       }
       const placeholders = vals.map((_, i) => `$${i + 1}`);
+      // clock_timestamp() y no NOW(): la hora de cerrar, no la de empezar la transacción (que pudo
+      // esperar el candado detrás de una venta). Así la venta que esperaba queda dentro del turno.
       if (m.cierre.colFecha) {
         cols.push(m.cierre.colFecha);
-        placeholders.push('NOW()');
+        placeholders.push('clock_timestamp()');
       }
 
       let idCierre: number | null = null;

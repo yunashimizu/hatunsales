@@ -5,7 +5,8 @@ import type { ConsumoLimite } from './almacen-limites';
 
 /**
  * Cubetas de límite por IP:
- *  - auth: login, registro, Google y alta pública de clientes (bcrypt cuesta CPU; fuerza bruta).
+ *  - auth: login, registro, Google, alta pública de clientes y PUT /auth/perfil
+ *    (bcrypt cuesta CPU; fuerza bruta de la contraseña actual).
  *  - auth_cuenta: además, login por IP + correo (frena la fuerza bruta contra una cuenta).
  *  - documentos: consultas DNI/RUC (cuota de pago de ApiPeru).
  *  - consulta_publica: consulta pública de comprobantes (/cpe/*).
@@ -80,11 +81,14 @@ interface Regla {
 
 const CUALQUIERA: ReadonlySet<string> = new Set();
 const SOLO_POST: ReadonlySet<string> = new Set(['POST']);
+const SOLO_PUT: ReadonlySet<string> = new Set(['PUT']);
 const ESCRITURAS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /** La primera regla que coincide decide la cubeta; sin coincidencia → general. */
 const REGLAS: readonly Regla[] = [
   { cubeta: 'auth', metodos: SOLO_POST, exactas: ['/auth/login', '/auth/register', '/auth/google', '/cliente/registro'] },
+  // Cambiar contraseña o correo compara con bcrypt la contraseña actual: mismo freno.
+  { cubeta: 'auth', metodos: SOLO_PUT, exactas: ['/auth/perfil'] },
   { cubeta: 'consulta_publica', metodos: CUALQUIERA, prefijos: ['/cpe'] },
   {
     cubeta: 'documentos',
