@@ -12,7 +12,8 @@ import { AlmacenArchivos, ArchivoEntrada, ArchivoGuardado } from './almacen.inte
  *
  * Las miniaturas no se generan ni se almacenan: se piden por URL con las
  * transformaciones `f_auto,q_auto`, que además convierten a WebP o AVIF según
- * lo que soporte el navegador. Eso es lo que hace que las imágenes carguen
+ * lo que soporte el navegador. La miniatura usa `c_limit` (cabe dentro de 480×480 sin
+ * recortar): `c_fill` cortaba los bordes de toda foto que no fuera cuadrada. Eso es lo que hace que las imágenes carguen
  * rápido sin trabajo del servidor.
  */
 @Injectable()
@@ -54,7 +55,7 @@ export class CloudinaryAlmacen implements AlmacenArchivos {
 
       return {
         url: this.urlTransformada(data.public_id, data.format, 'f_auto,q_auto,w_1200,c_limit'),
-        thumb_url: this.urlTransformada(data.public_id, data.format, 'f_auto,q_auto,w_400,h_400,c_fill'),
+        thumb_url: this.urlTransformada(data.public_id, data.format, 'f_auto,q_auto,w_480,h_480,c_limit'),
         clave: data.public_id,
         mime: entrada.mime,
         size: Number(data.bytes ?? entrada.buffer.length),

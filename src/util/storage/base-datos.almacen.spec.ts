@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import { BaseDatosAlmacen } from './base-datos.almacen';
 
 /**
@@ -38,5 +39,30 @@ describe('BaseDatosAlmacen.eliminar · archivo compartido por hash', () => {
     const { almacen } = armar(jest.fn().mockRejectedValue(new Error('relation "pedido_items" does not exist')));
 
     await expect(almacen.eliminar('7')).resolves.toBeUndefined();
+  });
+});
+
+describe('BaseDatosAlmacen.guardar · medidas de la foto', () => {
+  const entrada = (buffer: Buffer) => ({ buffer, nombre_original: 'foto.png', mime: 'image/png', carpeta: '3' });
+  // El hash ya existe: guardar() reutiliza la fila y no inserta.
+  const yaGuardada = () => jest.fn().mockResolvedValue([{ id_archivo: 9 }]);
+
+  it('devuelve el ancho y el alto reales de la imagen', async () => {
+    const { almacen } = armar(yaGuardada());
+    const png = await sharp({ create: { width: 64, height: 32, channels: 3, background: '#fff' } }).png().toBuffer();
+
+    const guardada = await almacen.guardar(entrada(png));
+
+    expect(guardada).toMatchObject({ url: '/archivos/9', clave: '9', proveedor: 'base_datos', width: 64, height: 32 });
+  });
+
+  it('si no puede leer las medidas igual guarda la foto, sin ellas', async () => {
+    const { almacen } = armar(yaGuardada());
+
+    const guardada = await almacen.guardar(entrada(Buffer.from('no es una imagen')));
+
+    expect(guardada.url).toBe('/archivos/9');
+    expect(guardada.width).toBeUndefined();
+    expect(guardada.height).toBeUndefined();
   });
 });

@@ -244,7 +244,7 @@ export class CatalogoRepository {
 
   async obtenerImagenes(idProducto: number): Promise<any[]> {
     return this.manager.query(
-      `SELECT id_imagen, url, thumb_url, COALESCE(is_primary, FALSE) AS is_primary
+      `SELECT id_imagen, url, thumb_url, descripcion, width, height, COALESCE(is_primary, FALSE) AS is_primary
        FROM productos_imagenes
        WHERE id_producto = $1
        ORDER BY is_primary DESC NULLS LAST, COALESCE(orden, 0) ASC, id_imagen ASC`,

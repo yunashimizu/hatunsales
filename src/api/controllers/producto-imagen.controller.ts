@@ -66,6 +66,14 @@ export class ProductoImagenController {
     return this.service.setPrimary(Number(id), Number(imgId));
   }
 
+  /** Texto opcional de una foto («vista lateral»). Vacío lo quita. */
+  @Patch(':id/images/:imgId')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin', 'vendedor')
+  actualizarTexto(@Param('id') id: string, @Param('imgId') imgId: string, @Body() body: { descripcion?: string | null }) {
+    return this.service.actualizarDescripcion(Number(id), Number(imgId), body?.descripcion);
+  }
+
   /** Nuevo orden de la galería tras arrastrar las miniaturas. */
   @Put(':id/images/orden')
   @UseGuards(JwtGuard, RolesGuard)

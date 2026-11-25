@@ -156,6 +156,7 @@ import { CloudinaryAlmacen } from './util/storage/cloudinary.almacen';
 import { BaseDatosAlmacen } from './util/storage/base-datos.almacen';
 import { DiscoAlmacen } from './util/storage/disco.almacen';
 import { almacenProvider } from './util/storage/almacen.provider';
+import { RedimensionadorImagen } from './util/storage/redimensionador-imagen';
 import { ArchivoController } from './api/controllers/archivo.controller';
 // Registros por dominio (sunat/registro/*, caja/registro/*, registro/plataforma.registro.ts)
 import { REGISTROS } from './registro/registros';
@@ -207,7 +208,7 @@ import { REGISTROS } from './registro/registros';
    VentaRepository, VentaBussnies, CreditoRepository, CreditoBussnies, CajaPagosRepository, CajaPagosBussnies,
    CajaSesionRepository, CajaSesionBussnies,
    RecepcionRepository, RecepcionBussnies,
-   CloudinaryAlmacen, BaseDatosAlmacen, DiscoAlmacen, almacenProvider,
+   CloudinaryAlmacen, BaseDatosAlmacen, DiscoAlmacen, almacenProvider, RedimensionadorImagen,
    ...REGISTROS.proveedores],
 })
 export class AppModule {}

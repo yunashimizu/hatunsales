@@ -14,6 +14,9 @@ export interface ArchivoSubido {
   size: number;
 }
 
+/** Largo máximo del texto de una foto: es un rótulo, no una descripción larga. */
+export const MAXIMO_TEXTO_FOTO = 120;
+
 /** Cuántas fotos de un mismo lote se mandan al almacén a la vez. */
 const SUBIDAS_SIMULTANEAS = 3;
 
@@ -182,6 +185,22 @@ export class ProductoImagenBussnies {
     }
 
     await this.repo.marcarPrincipal(id_producto, id_imagen);
+    return this.repo.findByProducto(id_producto);
+  }
+
+  /** Pone o quita el texto de una foto. Vacío = sin texto. */
+  async actualizarDescripcion(id_producto: number, id_imagen: number, texto: unknown) {
+    const imagen = await this.repo.findOneById(id_imagen);
+    if (!imagen || imagen.producto?.id_producto !== id_producto) {
+      throw new NotFoundException('Imagen no encontrada');
+    }
+
+    const limpio = typeof texto === 'string' ? texto.replace(/\s+/g, ' ').trim() : '';
+    if (limpio.length > MAXIMO_TEXTO_FOTO) {
+      throw new BadRequestException(`El texto de la foto admite hasta ${MAXIMO_TEXTO_FOTO} caracteres`);
+    }
+
+    await this.repo.actualizarDescripcion(id_imagen, limpio || null);
     return this.repo.findByProducto(id_producto);
   }
 

@@ -101,6 +101,11 @@ export class ProductoImagenRepository extends CrudRepository<ProductoImagen> {
     });
   }
 
+  /** Texto corto de la foto («vista lateral», «etiqueta»); `null` lo quita. */
+  async actualizarDescripcion(id_imagen: number, descripcion: string | null): Promise<void> {
+    await this.imagenRepo.update(id_imagen, { descripcion: descripcion as unknown as string });
+  }
+
   async eliminar(id_imagen: number): Promise<void> {
     await this.imagenRepo.delete(id_imagen);
   }

@@ -33,6 +33,11 @@ export class ImagenResponse {
   id_imagen!: number;
   url!: string;
   thumb_url?: string;
+  /** Rótulo opcional de la foto («vista lateral»). */
+  descripcion?: string;
+  /** Medidas reales: permiten reservar el espacio antes de que cargue. */
+  width?: number;
+  height?: number;
   is_primary!: boolean;
 }
 

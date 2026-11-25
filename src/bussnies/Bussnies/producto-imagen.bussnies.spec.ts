@@ -352,3 +352,49 @@ describe('ProductoImagenBussnies.reemplazar', () => {
     expect(repo.actualizarArchivo).not.toHaveBeenCalled();
   });
 });
+
+describe('ProductoImagenBussnies.actualizarDescripcion', () => {
+  function armarTexto() {
+    const repo = {
+      findOneById: jest.fn().mockResolvedValue({ id_imagen: 5, producto: { id_producto: 3 } }),
+      actualizarDescripcion: jest.fn().mockResolvedValue(undefined),
+      findByProducto: jest.fn().mockResolvedValue([{ id_imagen: 5 }]),
+    };
+    return { servicio: new ProductoImagenBussnies(repo as any, {} as any, {} as any), repo };
+  }
+
+  it('guarda el texto sin espacios de más y devuelve la galería', async () => {
+    const { servicio, repo } = armarTexto();
+
+    await expect(servicio.actualizarDescripcion(3, 5, '  Vista   lateral \n derecha ')).resolves.toEqual([{ id_imagen: 5 }]);
+
+    expect(repo.actualizarDescripcion).toHaveBeenCalledWith(5, 'Vista lateral derecha');
+  });
+
+  it('un texto vacío o que no es texto quita el rótulo', async () => {
+    const { servicio, repo } = armarTexto();
+
+    await servicio.actualizarDescripcion(3, 5, '   ');
+    await servicio.actualizarDescripcion(3, 5, undefined);
+    await servicio.actualizarDescripcion(3, 5, 42);
+
+    expect(repo.actualizarDescripcion).toHaveBeenNthCalledWith(1, 5, null);
+    expect(repo.actualizarDescripcion).toHaveBeenNthCalledWith(2, 5, null);
+    expect(repo.actualizarDescripcion).toHaveBeenNthCalledWith(3, 5, null);
+  });
+
+  it('rechaza un texto de más de 120 caracteres sin guardar nada', async () => {
+    const { servicio, repo } = armarTexto();
+
+    await expect(servicio.actualizarDescripcion(3, 5, 'x'.repeat(121))).rejects.toThrow(/120 caracteres/);
+    expect(repo.actualizarDescripcion).not.toHaveBeenCalled();
+  });
+
+  it('no deja cambiar el texto de la foto de otro producto', async () => {
+    const { servicio, repo } = armarTexto();
+
+    await expect(servicio.actualizarDescripcion(99, 5, 'hola')).rejects.toThrow('Imagen no encontrada');
+    expect(repo.actualizarDescripcion).not.toHaveBeenCalled();
+  });
+});
+

@@ -3,6 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { createHash } from 'crypto';
 import { AlmacenArchivos, ArchivoEntrada, ArchivoGuardado } from './almacen.interface';
+import { medirImagen } from './redimensionador-imagen';
 
 /**
  * Borra la fila solo si nadie más la usa. $1 = id_archivo, $2 = URL pública
@@ -53,6 +54,8 @@ export class BaseDatosAlmacen implements AlmacenArchivos {
       : await this.insertar(entrada, hash);
 
     const url = `/archivos/${idArchivo}`;
+    // Las medidas permiten reservar el espacio de la foto antes de que cargue.
+    const { width, height } = await medirImagen(entrada.buffer);
 
     return {
       url,
@@ -60,6 +63,8 @@ export class BaseDatosAlmacen implements AlmacenArchivos {
       clave: String(idArchivo),
       mime: entrada.mime,
       size: entrada.buffer.length,
+      width,
+      height,
       proveedor: this.nombre,
     };
   }
