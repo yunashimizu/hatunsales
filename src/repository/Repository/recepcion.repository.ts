@@ -1,7 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 import { filasDe } from '../../caja/bd/resultado-consulta';
+import { EsquemaCajaService } from '../../caja/esquema/esquema-caja.service';
 
 export interface LineaRecepcionInput {
   id_producto: number;
@@ -37,6 +38,22 @@ export interface RecepcionRegistrada {
   repetida: boolean;
 }
 
+/** Recepción ya registrada con la misma guía del mismo proveedor (Fase 8.4). */
+export interface RecepcionConGuia {
+  id_recepcion: number;
+  nro_guia: string;
+  fecha: string;
+  id_almacen: number;
+  almacen: string;
+  id_usuario: number | null;
+  usuario: string | null;
+  lineas: number;
+  unidades_ok: number;
+}
+
+/** Índice único opcional de fase21 (bloque 3, comentado): con él activo una guía repetida nunca entra. */
+export const INDICE_GUIA_UNICA = 'uq_recepciones_proveedor_guia';
+
 export type ResultadoRevision =
   | { resultado: 'revisada'; observacion: any }
   | { resultado: 'no_existe' }
@@ -55,6 +72,8 @@ export class RecepcionRepository {
   constructor(
     @InjectDataSource('pgConnection')
     private readonly dataSource: DataSource,
+    /** Capacidad `recepcionCosto` (fase19): costo por ítem. Sin él la recepción se guarda como antes. */
+    @Optional() private readonly esquema?: EsquemaCajaService,
   ) {}
 
   async asegurarSchema(): Promise<void> {
@@ -77,7 +96,8 @@ export class RecepcionRepository {
         id_producto          INTEGER NOT NULL REFERENCES productos(id_producto),
         cantidad_ok          NUMERIC(12,3) NOT NULL DEFAULT 0,
         cantidad_observada   NUMERIC(12,3) NOT NULL DEFAULT 0,
-        nota                 TEXT NOT NULL DEFAULT ''
+        nota                 TEXT NOT NULL DEFAULT '',
+        precio_compra        NUMERIC(12,4) NULL
       );
       CREATE TABLE IF NOT EXISTS recepcion_observaciones (
         id_observacion       SERIAL PRIMARY KEY,
@@ -119,10 +139,44 @@ export class RecepcionRepository {
     );
   }
 
+  /** Lo mínimo del proveedor guardado (hoy: su RUC), para saber si una edición lo cambió. */
+  async obtenerProveedor(id: number): Promise<{ id_proveedor: number; ruc: string } | null> {
+    const filas = await this.dataSource.query(
+      `SELECT id_proveedor, COALESCE(ruc,'') AS ruc FROM proveedores WHERE id_proveedor = $1`,
+      [id],
+    );
+    return filasDe(filas)[0] ?? null;
+  }
+
+  /**
+   * Fase 9.5: corre `fn` en una transacción con un candado consultivo por RUC (`proveedor-ruc:<ruc>`), para
+   * que dos altas simultáneas con el mismo RUC no pasen las dos la comprobación.
+   */
+  async conCandadoProveedorRuc<T>(ruc: string, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
+    return this.dataSource.transaction(async (manager) => {
+      await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`proveedor-ruc:${ruc.trim()}`]);
+      return fn(manager);
+    });
+  }
+
+  /** Fase 9.5: otro proveedor con ese RUC (comparado sin espacios al borde), o null. */
+  async proveedorConRuc(ruc: string, excluirId?: number, manager?: EntityManager): Promise<{ id_proveedor: number; nombre: string } | null> {
+    const filas = await (manager ?? this.dataSource).query(
+      `SELECT id_proveedor, COALESCE(nombre, '') AS nombre
+         FROM proveedores
+        WHERE BTRIM(ruc) = BTRIM($1::text)
+          AND ($2::int IS NULL OR id_proveedor <> $2::int)
+        ORDER BY id_proveedor
+        LIMIT 1`,
+      [ruc, excluirId ?? null],
+    );
+    return filasDe<{ id_proveedor: number; nombre: string }>(filas)[0] ?? null;
+  }
+
   async crearProveedor(data: {
     nombre: string; ruc?: string; telefono?: string; email?: string; direccion?: string;
-  }) {
-    const filas = await this.dataSource.query(
+  }, manager?: EntityManager) {
+    const filas = await (manager ?? this.dataSource).query(
       `INSERT INTO proveedores (nombre, ruc, telefono, email, direccion)
        VALUES ($1,$2,$3,$4,$5)
        RETURNING id_proveedor, nombre, ruc, telefono, email, direccion`,
@@ -139,8 +193,8 @@ export class RecepcionRepository {
 
   async actualizarProveedor(id: number, data: {
     nombre: string; ruc?: string; telefono?: string; email?: string; direccion?: string;
-  }) {
-    const filas = await this.dataSource.query(
+  }, manager?: EntityManager) {
+    const filas = await (manager ?? this.dataSource).query(
       `UPDATE proveedores
           SET nombre = $2, ruc = $3, telefono = $4, email = $5, direccion = $6
         WHERE id_proveedor = $1
@@ -247,9 +301,15 @@ export class RecepcionRepository {
   async registrarRecepcion(
     params: NuevaRecepcion & { clave?: string | null },
     aplicarStock: (manager: EntityManager, creada: { id_recepcion: number }) => Promise<void>,
+    /**
+     * Fase 8.4: corre dentro de la transacción, DESPUÉS de reconocer un reintento idempotente (que devuelve la
+     * recepción ya registrada sin pasar por aquí) y ANTES de insertar. Si lanza, no se escribe nada.
+     */
+    antesDeInsertar?: (manager: EntityManager) => Promise<void>,
   ): Promise<RecepcionRegistrada> {
     await this.asegurarSchema();
     const clave = params.clave && (await this.admiteClaveIdempotencia()) ? params.clave : null;
+    const conCosto = (await this.esquema?.tiene('recepcionCosto')) === true;
 
     try {
       return await this.dataSource.transaction(async (manager): Promise<RecepcionRegistrada> => {
@@ -258,7 +318,8 @@ export class RecepcionRepository {
           const previa = await this.buscarPorClave(clave, manager);
           if (previa) return previa;
         }
-        const creada = await this.insertarRecepcion(manager, params, clave);
+        if (antesDeInsertar) await antesDeInsertar(manager);
+        const creada = await this.insertarRecepcion(manager, params, clave, conCosto);
         await aplicarStock(manager, { id_recepcion: creada.id_recepcion });
         return creada;
       });
@@ -276,6 +337,7 @@ export class RecepcionRepository {
     manager: EntityManager,
     params: NuevaRecepcion,
     clave: string | null,
+    conCosto = false,
   ): Promise<RecepcionRegistrada> {
     const columnas = ['id_proveedor', 'id_almacen', 'nro_guia', 'nro_documento', 'observaciones', 'estado', 'id_usuario'];
     const valores: unknown[] = [
@@ -301,8 +363,14 @@ export class RecepcionRepository {
     const observacionesCreadas: ObservacionCreada[] = [];
 
     for (const item of params.items) {
+      // fase19: el costo que llegó en la línea (el mismo que se copia a productos.precio_compra), o NULL.
       const filasItem = await manager.query(
-        `INSERT INTO recepcion_items
+        conCosto
+          ? `INSERT INTO recepcion_items
+           (id_recepcion, id_producto, cantidad_ok, cantidad_observada, nota, precio_compra)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         RETURNING id_item`
+          : `INSERT INTO recepcion_items
            (id_recepcion, id_producto, cantidad_ok, cantidad_observada, nota)
          VALUES ($1,$2,$3,$4,$5)
          RETURNING id_item`,
@@ -312,6 +380,7 @@ export class RecepcionRepository {
           item.cantidad_ok || 0,
           item.cantidad_observada || 0,
           item.nota?.trim() || '',
+          ...(conCosto ? [item.precio_compra ?? null] : []),
         ],
       );
       const idItem = Number(filasItem[0].id_item);
@@ -344,6 +413,47 @@ export class RecepcionRepository {
     }
 
     return { id_recepcion: idRecepcion, observaciones: observacionesCreadas, repetida: false };
+  }
+
+  /**
+   * Fase 8.4: la recepción más reciente del proveedor con esa guía (sin espacios en los bordes y sin distinguir
+   * mayúsculas, igual que el diagnóstico y el índice opcional de fase21). null si no hay o la guía está vacía.
+   * Con `manager` toma antes un candado consultivo por proveedor y guía: dos confirmaciones simultáneas de la
+   * misma guía se ordenan y la segunda ve a la primera.
+   */
+  async recepcionConGuia(idProveedor: number, nroGuia: string, manager?: EntityManager): Promise<RecepcionConGuia | null> {
+    const guia = String(nroGuia ?? '').trim().toUpperCase();
+    if (!guia || !(Number(idProveedor) > 0)) return null;
+    if (!manager) await this.asegurarSchema();
+    const q = manager ?? this.dataSource;
+    if (manager) await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`recepcion-guia:${Number(idProveedor)}:${guia}`]);
+    const filas = filasDe<any>(await q.query(
+      `SELECT r.id_recepcion, r.nro_guia, r.creado_en AS fecha, r.id_almacen, COALESCE(a.nombre, '') AS almacen,
+              r.id_usuario, u.nombre AS usuario,
+              (SELECT COUNT(*)::int FROM recepcion_items i WHERE i.id_recepcion = r.id_recepcion) AS lineas,
+              (SELECT COALESCE(SUM(i.cantidad_ok), 0)::float FROM recepcion_items i WHERE i.id_recepcion = r.id_recepcion) AS unidades_ok
+         FROM recepciones r
+         LEFT JOIN almacenes a ON a.id_almacen = r.id_almacen
+         LEFT JOIN usuarios u ON u.id_usuario = r.id_usuario
+        WHERE r.id_proveedor = $1
+          AND UPPER(BTRIM(r.nro_guia)) = $2
+        ORDER BY r.id_recepcion DESC
+        LIMIT 1`,
+      [Number(idProveedor), guia],
+    ));
+    const f = filas[0];
+    if (!f) return null;
+    return {
+      id_recepcion: Number(f.id_recepcion),
+      nro_guia: String(f.nro_guia ?? ''),
+      fecha: f.fecha,
+      id_almacen: Number(f.id_almacen),
+      almacen: String(f.almacen ?? ''),
+      id_usuario: f.id_usuario === null || f.id_usuario === undefined ? null : Number(f.id_usuario),
+      usuario: f.usuario ?? null,
+      lineas: Number(f.lineas ?? 0),
+      unidades_ok: Number(f.unidades_ok ?? 0),
+    };
   }
 
   /** Precio de compra de la recepción, dentro de su transacción. */

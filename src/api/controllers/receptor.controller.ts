@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   ConflictException,
   Controller,
@@ -76,7 +77,16 @@ export class ReceptorController {
 
   @Put('empresa/:id')
   actualizarEmpresa(@Param('id') id: string, @Body() body: Record<string, any>) {
-    return this.repo.actualizarEmpresa(Number(id), this.soloCamposEmpresa(body));
+    const campos = this.soloCamposEmpresa(body);
+    // Fase 3.4: el correo es nuevo aquí; se valida para no guardar basura en la ficha de la empresa.
+    if (campos.email !== undefined && campos.email !== null) {
+      const correo = String(campos.email).trim().toLowerCase();
+      if (correo && (correo.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo))) {
+        throw new BadRequestException('El correo no es válido. Revíselo e intente de nuevo.');
+      }
+      campos.email = correo || null;
+    }
+    return this.repo.actualizarEmpresa(Number(id), campos);
   }
 
   /** Solo admin: borrar empresa sin historial de ventas/crédito. */
@@ -117,7 +127,7 @@ export class ReceptorController {
   }
 
   private soloCamposEmpresa(body: Record<string, any>) {
-    const permitidos = ['razon_social', 'nombre_comercial', 'telefonos', 'direccion', 'departamento', 'provincia', 'distrito'];
+    const permitidos = ['razon_social', 'nombre_comercial', 'telefonos', 'email', 'direccion', 'departamento', 'provincia', 'distrito'];
     return this.filtrar(body, permitidos);
   }
 

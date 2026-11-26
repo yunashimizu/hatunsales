@@ -3,6 +3,7 @@ import { ConteoEfectivo, DENOMINACIONES_PEN } from '../dominio/denominaciones';
 import { EfectivoEsperado, EsperadoCaja, LineaMetodoEsperado } from '../dominio/esperado-caja';
 import { describirDiferencia, LineaConciliada, ResultadoConciliacion } from '../dominio/conciliacion';
 import { CategoriaMetodo } from '../dominio/metodo-pago';
+import { CategoriaGasto, ETIQUETA_CATEGORIA_GASTO } from '../configuracion/control-caja';
 import type { ArqueoGuardado, MovimientoGuardado, TurnoArqueo } from '../../repository/Irepository/ICajaArqueoRepository';
 import type {
   ArqueoDetalleResponse,
@@ -253,5 +254,9 @@ export function movimientoResponse(m: MovimientoGuardado): MovimientoCajaRespons
     fecha: m.fecha.toISOString(),
     id_usuario: m.id_usuario,
     usuario_nombre: m.usuario_nombre,
+    id_venta: m.id_venta ?? null,
+    categoria: m.categoria ?? null,
+    categoria_etiqueta: m.categoria ? (ETIQUETA_CATEGORIA_GASTO[m.categoria as CategoriaGasto] ?? m.categoria) : null,
+    nro_comprobante: m.nro_comprobante ?? null,
   };
 }

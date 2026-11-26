@@ -1,5 +1,8 @@
 import { NotFoundException } from '@nestjs/common';
 import { ArchivoController } from './archivo.controller';
+import sharp from 'sharp';
+import { createHash } from 'crypto';
+import { RedimensionadorImagen } from '../../util/storage/redimensionador-imagen';
 
 /** GET /archivos/:id es público y se sirve en el dominio de la API (B1). */
 function armar(archivo: { contenido: Buffer; mime: string; hash: string } | null) {
@@ -151,5 +154,41 @@ describe('ArchivoController · GET /archivos/:id', () => {
       expect(res.cabeceras['content-type']).toBe('application/octet-stream');
       expect(res.cabeceras['content-disposition']).toBe('attachment');
     });
+  });
+});
+
+describe('ArchivoController · original y mejorada son dos archivos (mejora de fotos, §8 del plan)', () => {
+  // Con el redimensionador de verdad y dos fotos de verdad: la mejorada es OTRA fila de `archivos`, con
+  // otro id y otro hash, así que el navegador nunca puede servir una por la otra desde su caché.
+  it('dos ids con contenidos distintos ⇒ ETag distintos y variantes ?w=480 distintas', async () => {
+    const foto = (color: string) => sharp({ create: { width: 1200, height: 900, channels: 3, background: color } }).jpeg().toBuffer();
+    const original = await foto('#8a5a2b');
+    const mejorada = await foto('#c48a52');
+    const porId: Record<string, { contenido: Buffer; mime: string; hash: string }> = {
+      '41': { contenido: original, mime: 'image/jpeg', hash: createHash('sha256').update(original).digest('hex') },
+      '57': { contenido: mejorada, mime: 'image/jpeg', hash: createHash('sha256').update(mejorada).digest('hex') },
+    };
+    const almacen = { leer: jest.fn(async (id: number) => porId[String(id)] ?? null) };
+    const controlador = new ArchivoController(almacen as never, new RedimensionadorImagen());
+    const pedir = async (id: string, w?: string) => {
+      const r: any = { cabeceras: {} as Record<string, string>, enviado: undefined as unknown };
+      r.setHeader = (n: string, v: string) => { r.cabeceras[n.toLowerCase()] = v; };
+      r.status = () => r;
+      r.end = () => undefined;
+      r.send = (c: unknown) => { r.enviado = c; };
+      await controlador.servir(id, '', r, w, 'image/webp');
+      return r;
+    };
+
+    const [a, b, aw, bw] = [await pedir('41'), await pedir('57'), await pedir('41', '480'), await pedir('57', '480')];
+
+    expect(a.cabeceras.etag).not.toBe(b.cabeceras.etag);
+    expect(aw.cabeceras.etag).not.toBe(bw.cabeceras.etag);
+    expect(aw.cabeceras.etag).toMatch(/-w480p"$/);
+    expect(Buffer.compare(aw.enviado, bw.enviado)).not.toBe(0);
+    expect((await sharp(aw.enviado).metadata()).width).toBe(480);
+    // Pedir otra vez la variante de la original devuelve la misma (caché por huella), no la de la mejorada.
+    const aw2 = await pedir('41', '480');
+    expect(Buffer.compare(aw2.enviado, aw.enviado)).toBe(0);
   });
 });

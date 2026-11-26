@@ -247,3 +247,207 @@ describe('VentaRepository.registrar: candados y caja (Fase A)', () => {
     expect(insert[1][1]).toBeNull();
   });
 });
+
+describe('VentaRepository: autor y costo de la venta (fase19, Fase 6.1)', () => {
+  const LINEA = {
+    id_producto: 7, descripcion: 'CEMENTO', cantidad: 1, precio_unitario: 10, descuento: 0, subtotal: 8.47, igv: 1.53, total: 10,
+    precio_lista_unitario: 10, descuento_unitario_aplicado: 0, descuento_total_linea: 0, precio_unitario_final: 10, id_regla_mayorista: null,
+  };
+  const DATOS = { id_usuario: 4, subtotal: 8.47, igv: 1.53, descuento: 0, total: 10, origen: 'mostrador' };
+
+  function crearCon(capacidades: string[]) {
+    const manager = {
+      query: jest.fn(async (sql: string, _params?: any): Promise<any[]> => {
+        if (sql.includes('FROM aperturas_caja a')) return [{ id_apertura: 30, id_caja: 3 }];
+        if (sql.includes('FROM inventario') && sql.includes('FOR UPDATE')) {
+          return [{ id_inventario: 1, id_producto: 7, id_almacen: 2, stock: '10' }, { id_inventario: 2, id_producto: 8, id_almacen: 2, stock: '10' }];
+        }
+        if (sql.includes('INSERT INTO ventas')) return [{ id_venta: 50 }];
+        return [];
+      }),
+    };
+    const esquema = {
+      snapshot: jest.fn(async () => ({ tieneColumna: () => false })),
+      tiene: jest.fn(async (c: string) => capacidades.includes(c)),
+    };
+    const dataSource = { query: jest.fn(), transaction: jest.fn(async (fn: (m: unknown) => unknown) => fn(manager)) };
+    const repo = new VentaRepository(dataSource as never, esquema as never);
+    const llamada = (texto: string) => manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes(texto))!;
+    return { repo, llamada };
+  }
+
+  it('con las columnas guarda quién vendió, el almacén del POS y el costo de cada línea (NULL si no tiene costo)', async () => {
+    const { repo, llamada } = crearCon(['ventaAutor', 'ventaCosto']);
+
+    await repo.registrar(
+      DATOS,
+      [{ ...LINEA, costo_unitario: 7.5 }, { ...LINEA, id_producto: 8, costo_unitario: null }],
+      [],
+      { descontarStock: true, idAlmacenPreferido: 2 },
+    );
+
+    const [sqlVenta, valores] = llamada('INSERT INTO ventas');
+    expect(String(sqlVenta)).toContain('id_usuario, id_almacen');
+    expect(valores.slice(-2)).toEqual([4, 2]);
+    const [sqlDetalle, params] = llamada('INSERT INTO detalle_venta');
+    expect(String(sqlDetalle)).toContain('id_regla_mayorista, costo_unitario)');
+    expect(String(sqlDetalle)).toContain('$13::numeric[]');
+    expect(params[12]).toEqual([7.5, null]);
+  });
+
+  it('sin almacén elegido toma el único del que salió el stock; costo 0 se guarda como NULL (sin costo)', async () => {
+    const { repo, llamada } = crearCon(['ventaAutor', 'ventaCosto']);
+
+    await repo.registrar(DATOS, [{ ...LINEA, costo_unitario: 0 }], [], { descontarStock: true });
+
+    expect(llamada('INSERT INTO ventas')[1].slice(-2)).toEqual([4, 2]);
+    expect(llamada('INSERT INTO detalle_venta')[1][12]).toEqual([null]);
+  });
+
+  it('con ventaReferencia guarda el precio de catálogo de cada línea (NULL si no hay), detrás del costo', async () => {
+    const { repo, llamada } = crearCon(['ventaAutor', 'ventaCosto', 'ventaReferencia']);
+
+    await repo.registrar(
+      DATOS,
+      [{ ...LINEA, costo_unitario: 7.5, precio_referencia: 10 }, { ...LINEA, id_producto: 8, costo_unitario: null, precio_referencia: null }],
+      [],
+      { descontarStock: true, idAlmacenPreferido: 2 },
+    );
+
+    const [sqlDetalle, params] = llamada('INSERT INTO detalle_venta');
+    expect(String(sqlDetalle)).toContain('id_regla_mayorista, costo_unitario, precio_referencia)');
+    expect(String(sqlDetalle)).toContain('$13::numeric[], $14::numeric[]');
+    expect(String(sqlDetalle)).toContain('id_regla, costo, referencia, n)');
+    expect(params[12]).toEqual([7.5, null]);
+    expect(params[13]).toEqual([10, null]);
+  });
+
+  it('solo ventaReferencia (sin ventaCosto): la referencia va en $13', async () => {
+    const { repo, llamada } = crearCon(['ventaReferencia']);
+
+    await repo.registrar(DATOS, [{ ...LINEA, precio_referencia: 9.999 }], [], { descontarStock: true, idAlmacenPreferido: 2 });
+
+    const [sqlDetalle, params] = llamada('INSERT INTO detalle_venta');
+    expect(String(sqlDetalle)).toContain('id_regla_mayorista, precio_referencia)');
+    expect(String(sqlDetalle)).not.toContain('costo_unitario');
+    expect(String(sqlDetalle)).toContain('$12::bigint[], $13::numeric[]');
+    expect(params).toHaveLength(13);
+    expect(params[12]).toEqual([10]);
+  });
+
+  it('sin las columnas (fase19 sin correr) la venta se guarda exactamente como antes', async () => {
+    const { repo, llamada } = crearCon([]);
+
+    await repo.registrar(DATOS, [{ ...LINEA, costo_unitario: 7.5 }], [], { descontarStock: true, idAlmacenPreferido: 2 });
+
+    const [sqlVenta, valores] = llamada('INSERT INTO ventas');
+    expect(String(sqlVenta)).not.toContain('id_usuario');
+    expect(String(sqlVenta)).not.toContain('id_almacen');
+    expect(valores).toHaveLength(6);
+    const [sqlDetalle, params] = llamada('INSERT INTO detalle_venta');
+    expect(String(sqlDetalle)).not.toContain('costo_unitario');
+    expect(String(sqlDetalle)).not.toContain('precio_referencia');
+    expect(params).toHaveLength(12);
+  });
+
+  it('cargarProductos trae el precio de compra (interno); 0 o vacío es «sin costo»', async () => {
+    const { repo, dataSource } = crear();
+    dataSource.query.mockResolvedValue([
+      { id_producto: 7, nombre: 'CEMENTO', precio_venta: '10.00', descuento: '0', reglas_mayoristas: [], stock_disponible: '5', codigo_sunat: null, precio_compra: '7.50' },
+      { id_producto: 8, nombre: 'CLAVO', precio_venta: '1.00', descuento: '0', reglas_mayoristas: [], stock_disponible: '5', codigo_sunat: null, precio_compra: '0.00' },
+      { id_producto: 9, nombre: 'ARENA', precio_venta: '1.00', descuento: '0', reglas_mayoristas: [], stock_disponible: '5', codigo_sunat: null, precio_compra: null },
+    ]);
+
+    const productos = await repo.cargarProductos([7, 8, 9]);
+
+    expect(String(dataSource.query.mock.calls[0][0])).toContain('p.precio_compra');
+    expect(productos.get(7)?.precio_compra).toBe(7.5);
+    expect(productos.get(8)?.precio_compra).toBeNull();
+    expect(productos.get(9)?.precio_compra).toBeNull();
+  });
+});
+
+describe('VentaRepository: rastro de los movimientos (Fase 8.1, fase21)', () => {
+  const LINEA = {
+    id_producto: 7, descripcion: 'CEMENTO', cantidad: 1, precio_unitario: 10, descuento: 0, subtotal: 8.47, igv: 1.53, total: 10,
+    precio_lista_unitario: 10, descuento_unitario_aplicado: 0, descuento_total_linea: 0, precio_unitario_final: 10, id_regla_mayorista: null,
+  };
+  const DATOS = { id_usuario: 4, subtotal: 8.47, igv: 1.53, descuento: 0, total: 10, origen: 'mostrador' };
+  const TODAS = ['movimientoUsuario', 'movimientoAlmacen', 'movimientoDocumento'];
+
+  function crearCon(capacidades: string[], extra: (sql: string) => any[] | undefined = () => undefined) {
+    const manager = {
+      query: jest.fn(async (sql: string, _params?: any): Promise<any[]> => {
+        const propio = extra(sql);
+        if (propio) return propio;
+        if (sql.includes('FROM aperturas_caja a')) return [{ id_apertura: 30, id_caja: 3 }];
+        if (sql.includes('FROM inventario') && sql.includes('FOR UPDATE')) return [{ id_inventario: 1, id_producto: 7, id_almacen: 2, stock: '10' }];
+        if (sql.includes('INSERT INTO ventas')) return [{ id_venta: 50 }];
+        return [];
+      }),
+    };
+    const esquema = {
+      snapshot: jest.fn(async () => ({ tieneColumna: () => false })),
+      tiene: jest.fn(async (c: string) => capacidades.includes(c)),
+      exigir: jest.fn(async () => undefined),
+    };
+    const dataSource = { query: jest.fn(), transaction: jest.fn(async (fn: (m: unknown) => unknown) => fn(manager)) };
+    const repo = new VentaRepository(dataSource as never, esquema as never);
+    const sqls = () => manager.query.mock.calls.map((c: unknown[]) => String(c[0]));
+    const llamada = (texto: string) => manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes(texto))!;
+    return { repo, manager, sqls, llamada };
+  }
+
+  it('venta con fase21: el movimiento va DESPUÉS de la cabecera, con la venta, el vendedor y el almacén de cada salida', async () => {
+    const { repo, sqls, llamada } = crearCon(TODAS);
+
+    await repo.registrar(DATOS, [LINEA], [], { descontarStock: true, idAlmacenPreferido: 2 });
+
+    const todas = sqls();
+    const descuento = todas.findIndex((s) => s.includes('UPDATE inventario AS i'));
+    const venta = todas.findIndex((s) => s.includes('INSERT INTO ventas'));
+    const movimiento = todas.findIndex((s) => s.includes('INSERT INTO movimientos_inventario'));
+    // El descuento del stock no cambia de lugar: sigue antes de la venta.
+    expect(descuento).toBeLessThan(venta);
+    expect(venta).toBeLessThan(movimiento);
+    expect(todas.filter((s) => s.includes('INSERT INTO movimientos_inventario'))).toHaveLength(1);
+    const [sql, params] = llamada('INSERT INTO movimientos_inventario');
+    expect(String(sql)).toContain('fecha, id_usuario, id_almacen, tipo_documento, id_documento)');
+    expect(String(sql)).toContain('NOW(), $5::int, m.id_almacen, $6::varchar, $7::int');
+    expect(params).toEqual([[7], [2], [1], 'Venta en mostrador', 4, 'venta', 50]);
+  });
+
+  it('venta sin fase21: el movimiento va como siempre, antes de la cabecera y sin columnas nuevas', async () => {
+    const { repo, sqls, llamada } = crearCon([]);
+
+    await repo.registrar(DATOS, [LINEA], [], { descontarStock: true, idAlmacenPreferido: 2 });
+
+    const todas = sqls();
+    expect(todas.findIndex((s) => s.includes('INSERT INTO movimientos_inventario'))).toBeLessThan(todas.findIndex((s) => s.includes('INSERT INTO ventas')));
+    const [sql, params] = llamada('INSERT INTO movimientos_inventario');
+    expect(String(sql)).not.toContain('id_usuario');
+    expect(params).toEqual([[7], [2], [1], 'Venta en mostrador']);
+  });
+
+  it('venta sin descontar stock (admin): no hay movimiento, con o sin fase21', async () => {
+    const { repo, sqls } = crearCon(TODAS);
+    await repo.registrar(DATOS, [LINEA], [], { descontarStock: false, idAlmacenPreferido: 2 });
+    expect(sqls().some((s) => s.includes('INSERT INTO movimientos_inventario'))).toBe(false);
+  });
+
+  it('anulación con fase21: por defecto el documento es la anulación de esa venta; quien llama puede pasar el suyo', async () => {
+    const extra = (sql: string) => {
+      if (sql.includes('FROM ventas WHERE id_venta = $1 FOR UPDATE')) return [{ id_venta: 50, estado: 'activa' }];
+      if (sql.includes('FROM venta_stock_salida')) return [{ id_producto: 7, id_almacen: 2, cantidad: '1', cantidad_devuelta: '0' }];
+      if (sql.includes('SELECT id_inventario FROM inventario')) return [{ id_inventario: 1 }];
+      return undefined;
+    };
+    const sinRastro = crearCon([...TODAS, 'ventaStockSalida', 'ventaStockDevuelto'], extra);
+    await sinRastro.repo.anularVentaCompleta(50);
+    expect(sinRastro.llamada('INSERT INTO movimientos_inventario')[1].slice(4)).toEqual([null, 'anulacion', 50]);
+
+    const conNota = crearCon([...TODAS, 'ventaStockSalida', 'ventaStockDevuelto'], extra);
+    await conNota.repo.anularVentaCompleta(50, { rastro: { tipo_documento: 'nota_credito', id_documento: 70 } });
+    expect(conNota.llamada('INSERT INTO movimientos_inventario')[1].slice(4)).toEqual([null, 'nota_credito', 70]);
+  });
+});

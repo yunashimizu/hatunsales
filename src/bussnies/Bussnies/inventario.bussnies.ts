@@ -1,5 +1,8 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
+import { BitacoraService } from '../../bitacora/bitacora.service';
+import { ACCIONES_BITACORA } from '../../bitacora/bitacora.acciones';
+import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import { InventarioRepository, FiltroInventario } from '../../repository/Repository/inventario.repository';
 import { ProductoRepository } from '../../repository/Repository/producto.repository';
 import {
@@ -10,6 +13,8 @@ import {
 import { InventarioResponse } from '../../models/model/inventario.response';
 import { IInventarioBussniees } from '../Ibussnies/IInventarioBussniees';
 import { esErrorDeBaseDatos } from '../../util/http/errores/traductor-errores-bd';
+import { LocalesUsuarioService } from '../../stock/locales-usuario.service';
+import type { RastroMovimiento } from '../../stock/rastro-movimiento';
 
 const ETIQUETA_MOTIVO: Record<string, string> = {
   compra: 'Ingreso por compra',
@@ -44,6 +49,10 @@ export class InventarioBussnies implements IInventarioBussniees {
   constructor(
     private readonly repo: InventarioRepository,
     private readonly productoRepo: ProductoRepository,
+    /** Bitácora (Fase 6.3): quién ajustó el stock. Nunca hace fallar el ajuste. */
+    @Optional() private readonly bitacora?: BitacoraService,
+    /** Fase 8.5: usuarios atados a locales. Sin él (pruebas antiguas) nadie queda restringido. */
+    @Optional() private readonly locales?: LocalesUsuarioService,
   ) {}
 
   async getAll(): Promise<InventarioResponse[]> {
@@ -78,8 +87,10 @@ export class InventarioBussnies implements IInventarioBussniees {
     return this.repo.resumen();
   }
 
-  almacenes() {
-    return this.repo.almacenes();
+  /** Fase 8.5: un usuario atado a locales solo ve los almacenes de sus locales (admin y sin asignar: todos). */
+  async almacenes(usuario?: UsuarioToken) {
+    const lista = await this.repo.almacenes();
+    return this.locales ? this.locales.filtrar(usuario, lista) : lista;
   }
 
   /** Stock del producto en cada almacén (los que no tienen fila salen con 0 y `registrado: false`). */
@@ -95,15 +106,40 @@ export class InventarioBussnies implements IInventarioBussniees {
     return this.repo.movimientos(idProducto, limite);
   }
 
+  /** Fase 8.1: historial del producto con quién, cuándo, dónde y por qué (paginado). */
+  movimientosDeProducto(idProducto: number, opciones: { pagina?: number; por_pagina?: number; id_almacen?: number }) {
+    return this.repo.movimientosDeProducto(idProducto, opciones);
+  }
+
   /** Corrige el stock dejando escrito el motivo en el kardex. */
-  async ajustar(dto: AjustarStockRequest) {
+  async ajustar(dto: AjustarStockRequest, usuario?: UsuarioToken) {
     this.validarCantidad(dto);
 
     const producto = await this.productoRepo.getById(dto.id_producto);
     if (!producto) throw new NotFoundException(`Producto ${dto.id_producto} no encontrado`);
+    // Fase 8.5: fuera de sus locales → 403 (admin y usuarios sin locales asignados: como hoy).
+    await this.locales?.exigirAlmacen(usuario, dto.id_almacen, 'ajustar');
 
-    const stock = await this.aplicarAjuste(dto);
+    // Fase 8.1: el movimiento guarda quién ajustó (el motivo de lista ya lo exige el DTO).
+    const stock = await this.aplicarAjuste(dto, undefined, { id_usuario: usuario?.id_usuario ?? null, tipo_documento: 'ajuste', id_documento: null });
+    // Fase 6.3: el ajuste ya está confirmado (el repositorio abre y cierra su transacción); la bitácora no lo frena.
+    await this.bitacora?.registrarCon(() => ({
+      accion: ACCIONES_BITACORA.INVENTARIO_AJUSTE,
+      id_usuario: usuario?.id_usuario ?? null,
+      rol: usuario?.rol ?? null,
+      id_almacen: dto.id_almacen,
+      entidad: 'producto',
+      id_entidad: dto.id_producto,
+      antes: { stock: stock - Number(dto.cantidad) },
+      despues: { stock, cantidad: Number(dto.cantidad), motivo: dto.motivo },
+      motivo: [ETIQUETA_MOTIVO[dto.motivo] ?? dto.motivo, dto.comentario?.trim()].filter(Boolean).join(' · '),
+    }));
     return { id_producto: dto.id_producto, id_almacen: dto.id_almacen, stock };
+  }
+
+  /** Fase 8.5: la ficha de producto también ajusta stock; la misma regla que POST /inventario/ajuste. */
+  async exigirAlmacenParaAjuste(usuario: UsuarioToken | undefined, idAlmacen: number): Promise<void> {
+    await this.locales?.exigirAlmacen(usuario, idAlmacen, 'ajustar');
   }
 
   /**
@@ -111,9 +147,9 @@ export class InventarioBussnies implements IInventarioBussniees {
    * observación): si algo posterior falla, el stock vuelve atrás junto con lo demás. Quien
    * llama ya validó que el producto existe (y la FK lo exige igual).
    */
-  async ajustarEnTransaccion(manager: EntityManager, dto: AjustarStockRequest): Promise<number> {
+  async ajustarEnTransaccion(manager: EntityManager, dto: AjustarStockRequest, rastro?: RastroMovimiento): Promise<number> {
     this.validarCantidad(dto);
-    return this.aplicarAjuste(dto, manager);
+    return this.aplicarAjuste(dto, manager, rastro);
   }
 
   private validarCantidad(dto: AjustarStockRequest): void {
@@ -124,7 +160,7 @@ export class InventarioBussnies implements IInventarioBussniees {
     }
   }
 
-  private async aplicarAjuste(dto: AjustarStockRequest, manager?: EntityManager): Promise<number> {
+  private async aplicarAjuste(dto: AjustarStockRequest, manager?: EntityManager, rastro?: RastroMovimiento): Promise<number> {
     const descripcion = [ETIQUETA_MOTIVO[dto.motivo] ?? dto.motivo, dto.comentario]
       .filter(Boolean)
       .join(' · ');
@@ -137,6 +173,7 @@ export class InventarioBussnies implements IInventarioBussniees {
         descripcion,
         manager,
         dto.stock_esperado === undefined || dto.stock_esperado === null ? undefined : Number(dto.stock_esperado),
+        rastro,
       );
     } catch (error: any) {
       // Los de la base salen tal cual: el filtro global los traduce (p. ej. «intente de nuevo»).
@@ -153,10 +190,12 @@ export class InventarioBussnies implements IInventarioBussniees {
     }
   }
 
-  async transferir(dto: TransferirStockRequest) {
+  async transferir(dto: TransferirStockRequest, usuario?: UsuarioToken) {
     if (dto.id_almacen_origen === dto.id_almacen_destino) {
       throw new BadRequestException('El almacén de origen y el de destino deben ser distintos');
     }
+    // Fase 8.5: el stock solo puede SALIR de un almacén de sus locales (enviar a otro local sí se puede).
+    await this.locales?.exigirAlmacen(usuario, dto.id_almacen_origen, 'transferir');
 
     const descripcion = ['Transferencia entre almacenes', dto.comentario].filter(Boolean).join(' · ');
 
@@ -170,6 +209,8 @@ export class InventarioBussnies implements IInventarioBussniees {
         dto.stock_origen_esperado === undefined || dto.stock_origen_esperado === null
           ? undefined
           : Number(dto.stock_origen_esperado),
+        // Fase 8.1: quién transfirió.
+        { id_usuario: usuario?.id_usuario ?? null },
       );
       return { transferido: true };
     } catch (error: any) {

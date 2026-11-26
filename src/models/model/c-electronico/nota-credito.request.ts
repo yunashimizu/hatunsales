@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsString,
   Matches,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -68,6 +69,17 @@ export class EmitirNotaCreditoRequest {
   @IsOptional()
   @IsBoolean({ message: 'reingresar_stock debe ser verdadero o falso' })
   reingresar_stock?: boolean;
+
+  /**
+   * Fase 7.1: efectivo que el cajero confirma haber devuelto. En una devolución parcial (la venta sigue activa)
+   * genera un egreso en su turno; si la nota anula la venta, la misma regla que al anular. No puede superar el
+   * total de la nota. Sin este campo, todo como antes. Ver GET caja/devolucion/:id_venta.
+   */
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 }, { message: 'El reembolso en efectivo debe ser un número con hasta 2 decimales' })
+  @Min(0, { message: 'El reembolso en efectivo no puede ser negativo' })
+  @Max(10_000_000, { message: 'El reembolso en efectivo es demasiado alto' })
+  reembolso_efectivo?: number;
 }
 
 /**

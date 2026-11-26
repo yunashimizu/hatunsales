@@ -1,7 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Comprobante } from '../../models/DBModel/c-electronico/comprobante.entity';
+import { EsquemaCajaService } from '../../caja/esquema/esquema-caja.service';
+import { ACCIONES_BITACORA } from '../../bitacora/bitacora.acciones';
 import { aTimestampUtc } from '../../util/fecha-lima';
 import { TIPO_BOLETA, TIPO_FACTURA, TIPO_NOTA_CREDITO, TIPO_NOTA_DEBITO } from '../../util/fiscal/tipos-comprobante';
 
@@ -35,6 +37,31 @@ export interface FilaRentabilidadProducto {
   costo: string | number | null;
   ultima_venta: Date | string | null;
   sin_costo: boolean | null;
+  /**
+   * Alguna línea usó el precio de compra VIGENTE porque la venta no guardó su costo (ventas anteriores a
+   * fase19, notas sin venta enlazada). Sin fase19 todo el costo es estimado.
+   */
+  costo_estimado?: boolean | null;
+}
+
+/**
+ * Ventas de un vendedor en un local (Fase 6.2). `id_usuario` NULL = venta sin autor (anterior a fase19, o
+ * web: `canal` = 'tienda'). Numéricos tal como los devuelve Postgres.
+ */
+export interface FilaVentasPorVendedor {
+  id_usuario: number | null;
+  usuario: string | null;
+  canal: 'mostrador' | 'tienda';
+  id_sucursal: number | null;
+  sucursal: string | null;
+  ventas: string | number | null;
+  total: string | number | null;
+  descuentos: string | number | null;
+  rebajas_sobre_tope: string | number | null;
+  /** Soles rebajados sobre el precio de catálogo (detalle_venta.precio_referencia); 0 sin la capacidad. */
+  rebajas_monto: string | number | null;
+  anuladas: string | number | null;
+  total_anulado: string | number | null;
 }
 
 /** Producto activo con existencias y sin ventas recientes (Fase F1). */
@@ -137,6 +164,8 @@ export class ReportesRepository {
   constructor(
     @InjectRepository(Comprobante, 'pgConnection')
     private readonly comprobanteRepo: Repository<Comprobante>,
+    /** Columnas de fase19 (costo por línea, autor de la venta). Sin él los reportes leen como antes. */
+    @Optional() private readonly esquema?: EsquemaCajaService,
   ) {}
 
   /**
@@ -275,6 +304,24 @@ export class ReportesRepository {
    */
   async obtenerRentabilidadProductos(idsComprobante: number[], limite: number): Promise<FilaRentabilidadProducto[]> {
     if (!idsComprobante.length) return [];
+    // fase19 (Fase 6.2): el costo es el que guardó la venta de ese comprobante para ese producto; si no lo
+    // guardó (venta anterior, nota sin venta), el precio de compra vigente, y la fila avisa costo_estimado.
+    // La nota de crédito lleva el id_venta de su comprobante de origen (comprobante.bussnies.ts, al emitirla),
+    // así que resta con el mismo costo con que se vendió.
+    const conCosto = (await this.esquema?.tiene('ventaCosto')) === true;
+    const costoLinea = conCosto ? 'COALESCE(dv.costo_unitario, pr.precio_compra, 0)' : 'COALESCE(pr.precio_compra, 0)';
+    const joinCosto = conCosto
+      ? `LEFT JOIN LATERAL (
+                SELECT d.costo_unitario
+                  FROM detalle_venta d
+                 WHERE d.id_venta = c.id_venta AND d.id_producto = ci.id_producto AND d.costo_unitario IS NOT NULL
+                 ORDER BY d.id_detalle
+                 LIMIT 1
+              ) dv ON TRUE`
+      : '';
+    const estimado = conCosto
+      ? 'BOOL_OR(dv.costo_unitario IS NULL AND COALESCE(pr.precio_compra, 0) > 0)'
+      : 'BOOL_OR(COALESCE(pr.precio_compra, 0) > 0)';
     return this.comprobanteRepo.manager.query(
       `SELECT MAX(ci.id_producto) AS id_producto,
               COALESCE(MAX(NULLIF(pr.sku, '')), MAX(NULLIF(pr.codigo_barras, '')), MAX(NULLIF(ci.codigo, '')), '') AS codigo,
@@ -284,18 +331,88 @@ export class ReportesRepository {
               SUM((CASE WHEN c.id_tipo = $2 THEN -1 ELSE 1 END) * COALESCE(ci.total, 0)) AS ingreso,
               SUM((CASE WHEN c.id_tipo = $2 THEN -1 ELSE 1 END) * COALESCE(ci.total, 0)
                   * COALESCE((c.total - COALESCE(c.total_igv, 0)) / NULLIF(c.total, 0), 1)) AS ingreso_sin_igv,
-              SUM((CASE WHEN c.id_tipo = $2 THEN -1 ELSE 1 END) * COALESCE(ci.cantidad, 0) * COALESCE(pr.precio_compra, 0)) AS costo,
+              SUM((CASE WHEN c.id_tipo = $2 THEN -1 ELSE 1 END) * COALESCE(ci.cantidad, 0) * ${costoLinea}) AS costo,
               MAX(c.creado_en) FILTER (WHERE c.id_tipo <> $2) AS ultima_venta,
-              BOOL_OR(COALESCE(pr.precio_compra, 0) = 0) AS sin_costo
+              BOOL_OR(${costoLinea} = 0) AS sin_costo,
+              ${estimado} AS costo_estimado
          FROM comprobante_items ci
          JOIN comprobantes c ON c.id_comprobante = ci.id_comprobante
          LEFT JOIN productos pr ON pr.id_producto = ci.id_producto
          LEFT JOIN categorias cat ON cat.id_categoria = pr.id_categoria
+         ${joinCosto}
         WHERE ci.id_comprobante = ANY($1::int[])
         GROUP BY COALESCE(ci.id_producto::text, NULLIF(ci.codigo, ''), ci.descripcion)
         ORDER BY ingreso_sin_igv DESC, cantidad DESC
         LIMIT $3`,
       [idsComprobante, TIPO_NOTA_CREDITO, limite],
+    );
+  }
+
+  /**
+   * Ventas por vendedor y por local (Fase 6.2) con `ventas.fecha` en [desde, hasta) (instantes UTC de días de
+   * Lima; la columna es timestamp sin zona en UTC). El local es la sucursal del almacén de la venta y, si no lo
+   * guardó, la de su caja. Sin fase19 (ventaAutor) todas las ventas salen sin autor. Las anuladas se cuentan
+   * aparte y no suman a `ventas` ni a `total`. `rebajas_sobre_tope` cuenta las ventas con al menos una anotación
+   * `venta.rebaja_sobre_tope` en la bitácora (las registra la Tanda B2 con entidad 'venta'). `rebajas_monto` suma,
+   * por línea, (precio_referencia − precio final) × cantidad cuando es positiva (capacidad ventaReferencia; sin
+   * ella, 0). Solo lectura.
+   */
+  async obtenerVentasPorVendedor(desde: Date, hasta: Date, idSucursal?: number): Promise<FilaVentasPorVendedor[]> {
+    const [conAutor, conEstado, conDescuento, conBitacora, conReferencia] = this.esquema
+      ? await Promise.all([
+          this.esquema.tiene('ventaAutor'),
+          this.esquema.tiene('ventaEstado'),
+          this.esquema.tiene('ventaDescuento'),
+          this.esquema.tiene('bitacora'),
+          this.esquema.tiene('ventaReferencia'),
+        ])
+      : [false, false, false, false, false];
+    const usuario = conAutor ? 'v.id_usuario' : 'NULL::int';
+    const sucursal = conAutor ? 'COALESCE(al.id_sucursal, cj.id_sucursal)' : 'cj.id_sucursal';
+    const joinAlmacen = conAutor ? 'LEFT JOIN almacenes al ON al.id_almacen = v.id_almacen' : '';
+    const estado = conEstado ? "COALESCE(v.estado, 'activa')" : "'activa'";
+    const descuento = conDescuento ? 'COALESCE(v.total_descuento, 0)' : '0';
+    const rebaja = conBitacora
+      ? `EXISTS (SELECT 1 FROM bitacora_acciones b
+                  WHERE b.entidad = 'venta' AND b.id_entidad = v.id_venta AND b.accion = '${ACCIONES_BITACORA.VENTA_REBAJA_SOBRE_TOPE}')`
+      : 'FALSE';
+    // Rebaja en soles: lo cobrado por debajo del precio de catálogo neto que calculó el servidor (por línea).
+    const rebajaMonto = conReferencia
+      ? `(SELECT COALESCE(SUM(GREATEST(dv.precio_referencia - COALESCE(dv.precio_unitario_final, dv.precio), 0) * dv.cantidad), 0)
+            FROM detalle_venta dv
+           WHERE dv.id_venta = v.id_venta AND dv.precio_referencia IS NOT NULL)`
+      : '0';
+    return this.comprobanteRepo.manager.query(
+      `WITH vv AS (
+         SELECT v.id_venta, v.total, ${usuario} AS id_usuario,
+                CASE WHEN COALESCE(v.origen, 'mostrador') = 'tienda' THEN 'tienda' ELSE 'mostrador' END AS canal,
+                ${sucursal} AS id_sucursal,
+                ${estado} AS estado,
+                ${descuento} AS descuento,
+                ${rebaja} AS con_rebaja,
+                ${rebajaMonto} AS rebaja_monto
+           FROM ventas v
+           LEFT JOIN cajas cj ON cj.id_caja = v.id_caja
+           ${joinAlmacen}
+          WHERE v.fecha >= $1 AND v.fecha < $2
+       )
+       SELECT vv.id_usuario, vv.canal, vv.id_sucursal,
+              NULLIF(TRIM(CONCAT_WS(' ', MAX(u.nombre), MAX(u.apellido_paterno))), '') AS usuario,
+              MAX(s.nombre) AS sucursal,
+              COUNT(*) FILTER (WHERE vv.estado <> 'anulada') AS ventas,
+              COALESCE(SUM(vv.total) FILTER (WHERE vv.estado <> 'anulada'), 0) AS total,
+              COALESCE(SUM(vv.descuento) FILTER (WHERE vv.estado <> 'anulada'), 0) AS descuentos,
+              COUNT(*) FILTER (WHERE vv.estado <> 'anulada' AND vv.con_rebaja) AS rebajas_sobre_tope,
+              ROUND(COALESCE(SUM(vv.rebaja_monto) FILTER (WHERE vv.estado <> 'anulada'), 0), 2) AS rebajas_monto,
+              COUNT(*) FILTER (WHERE vv.estado = 'anulada') AS anuladas,
+              COALESCE(SUM(vv.total) FILTER (WHERE vv.estado = 'anulada'), 0) AS total_anulado
+         FROM vv
+         LEFT JOIN usuarios u ON u.id_usuario = vv.id_usuario
+         LEFT JOIN sucursales s ON s.id_sucursal = vv.id_sucursal
+        WHERE ($3::int IS NULL OR vv.id_sucursal = $3::int)
+        GROUP BY vv.id_usuario, vv.canal, vv.id_sucursal
+        ORDER BY total DESC, ventas DESC`,
+      [aTimestampUtc(desde), aTimestampUtc(hasta), idSucursal ?? null],
     );
   }
 

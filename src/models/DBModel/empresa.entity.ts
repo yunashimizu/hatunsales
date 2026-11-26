@@ -19,6 +19,10 @@ export class Empresa {
   @Column({ nullable: true })
   telefonos!: string;
 
+  /** Correo de la empresa (columna existente, VARCHAR(100)). Fase 3.4: «recordar este correo» desde el POS. */
+  @Column({ nullable: true })
+  email!: string;
+
   @Column({ nullable: true })
   tipo!: string;
 

@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { Producto } from '../../models/DBModel/producto.entity';
+import { patronSku } from '../../util/codigo-sku';
 import { CrudRepository } from '../Irepository/GenericIRepository/crud.Irepository';
 
 /** Producto activo sin código SUNAT, para la tarjeta de carga del panel. */
@@ -282,4 +283,126 @@ export class ProductoRepository extends CrudRepository<Producto> {
     ) as Array<{ id_producto: number }>;
     return filas.map((f) => Number(f.id_producto));
   }
+
+  /** Fase 2.8: nombre de la categoría (null si no existe). */
+  async nombreCategoria(idCategoria: number): Promise<string | null> {
+    const filas = filasConsulta(await this.productoRepo.query('SELECT nombre FROM categorias WHERE id_categoria = $1', [idCategoria]));
+    return filas.length ? String(filas[0].nombre ?? '') : null;
+  }
+
+  /** Fase 2.8: el mayor correlativo usado por los SKU con ese prefijo (0 si ninguno). Solo lectura. */
+  async mayorCorrelativoSku(prefijo: string): Promise<number> {
+    const patron = patronSku(prefijo);
+    const filas = filasConsulta(await this.productoRepo.query(
+      `SELECT COALESCE(MAX((substring(UPPER(BTRIM(sku)) FROM $1))::bigint), 0) AS mayor
+         FROM productos
+        WHERE BTRIM(sku) ~* $1`,
+      [patron],
+    ));
+    return Number(filas[0]?.mayor ?? 0);
+  }
+
+  /** Fase 2.8: ¿ese texto ya es SKU o código de barras de algún producto? (sin distinguir mayúsculas). */
+  async codigoEnUso(codigo: string): Promise<boolean> {
+    const filas = filasConsulta(await this.productoRepo.query(
+      `SELECT 1 FROM productos
+        WHERE LOWER(BTRIM(sku)) = LOWER($1) OR LOWER(BTRIM(codigo_barras)) = LOWER($1)
+        LIMIT 1`,
+      [codigo],
+    ));
+    return filas.length > 0;
+  }
+
+  /**
+   * Fase 9.3: borra el producto SOLO si no tiene historial, en una transacción con la fila bloqueada
+   * (`FOR UPDATE`: una venta que quiera usarlo a la vez espera y después falla por la llave foránea).
+   * Si tiene historial no borra nada y devuelve el conteo. Si no lo tiene, quita antes sus filas de
+   * configuración (inventario en cero, reglas mayoristas, impuestos, proveedores) que de otro modo
+   * impedirían el borrado por llave foránea.
+   */
+  async eliminarSiNoTieneHistorial(id: number): Promise<{ borrados: number; historial: HistorialProducto | null }> {
+    return this.productoRepo.manager.transaction(async (manager) => {
+      const existe = await manager.query('SELECT id_producto FROM productos WHERE id_producto = $1 FOR UPDATE', [id]);
+      if (!filasConsulta(existe).length) return { borrados: 0, historial: null };
+
+      const historial = await contarHistorialProducto(manager, id);
+      if (historial.total > 0) return { borrados: 0, historial };
+
+      const tablas = await tablasExistentes(manager, LIMPIEZA_SIN_HISTORIAL);
+      for (const tabla of LIMPIEZA_SIN_HISTORIAL) {
+        if (!tablas.has(tabla)) continue;
+        // Nombres de tabla de una lista fija del código (nunca del usuario).
+        await manager.query(`DELETE FROM ${tabla} WHERE id_producto = $1`, [id]);
+      }
+      const borrado = await manager.query('DELETE FROM productos WHERE id_producto = $1 RETURNING id_producto', [id]);
+      return { borrados: filasConsulta(borrado).length, historial };
+    });
+  }
+}
+
+/** Conteo de lo que impide borrar un producto (Fase 9.3). `detalle`: etiqueta → cantidad (solo las > 0). */
+export interface HistorialProducto {
+  total: number;
+  detalle: Record<string, number>;
+}
+
+/**
+ * Qué cuenta como historial: documentos (ventas, comprobantes, pedidos web, cotizaciones, recepciones,
+ * compras, guías), movimientos de stock, stock en existencia y fotos (sus archivos no se borran aquí).
+ * Las tablas que no existan en la base se saltan.
+ */
+const HISTORIAL_PRODUCTO: Array<{ tabla: string; etiqueta: string; condicion?: string }> = [
+  { tabla: 'detalle_venta', etiqueta: 'ventas' },
+  { tabla: 'comprobante_items', etiqueta: 'comprobantes' },
+  { tabla: 'pedido_items', etiqueta: 'pedidos web' },
+  { tabla: 'proformas_items', etiqueta: 'cotizaciones' },
+  { tabla: 'recepcion_items', etiqueta: 'recepciones' },
+  { tabla: 'recepcion_observaciones', etiqueta: 'observaciones de recepción' },
+  { tabla: 'detalle_compra', etiqueta: 'compras' },
+  { tabla: 'guias_remision_items', etiqueta: 'guías de remisión' },
+  { tabla: 'movimientos_inventario', etiqueta: 'movimientos de stock' },
+  { tabla: 'kardex', etiqueta: 'kardex' },
+  { tabla: 'inventario', etiqueta: 'stock', condicion: 'COALESCE(stock, 0) <> 0' },
+  { tabla: 'productos_imagenes', etiqueta: 'fotos' },
+];
+
+/** Filas de configuración que se quitan junto con un producto sin historial (todas sin datos de negocio). */
+const LIMPIEZA_SIN_HISTORIAL = ['inventario', 'producto_descuento_mayorista', 'producto_impuesto', 'producto_proveedor'];
+
+function filasConsulta(resultado: unknown): any[] {
+  if (Array.isArray(resultado) && resultado.length === 2 && Array.isArray(resultado[0]) && typeof resultado[1] === 'number') {
+    return resultado[0];
+  }
+  return Array.isArray(resultado) ? resultado : [];
+}
+
+async function tablasExistentes(manager: EntityManager, tablas: string[]): Promise<Set<string>> {
+  const filas = await manager.query(
+    `SELECT c.relname AS tabla FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname = ANY($1::text[])`,
+    [tablas],
+  );
+  return new Set(filasConsulta(filas).map((f: any) => String(f.tabla)));
+}
+
+export async function contarHistorialProducto(manager: EntityManager, id: number): Promise<HistorialProducto> {
+  const tablas = await tablasExistentes(manager, HISTORIAL_PRODUCTO.map((h) => h.tabla));
+  const presentes = HISTORIAL_PRODUCTO.filter((h) => tablas.has(h.tabla));
+  if (!presentes.length) return { total: 0, detalle: {} };
+  // Una sola consulta; cada conteo se corta en 1 000 (basta para el mensaje y no recorre tablas enteras).
+  const partes = presentes.map((h, i) =>
+    `SELECT ${i} AS i, (SELECT COUNT(*) FROM (SELECT 1 FROM ${h.tabla} WHERE id_producto = $1${h.condicion ? ` AND ${h.condicion}` : ''} LIMIT 1000) x)::int AS n`,
+  );
+  const filas = filasConsulta(await manager.query(partes.join(' UNION ALL '), [id]));
+  const detalle: Record<string, number> = {};
+  let total = 0;
+  for (const f of filas) {
+    const n = Number(f.n ?? 0);
+    if (n > 0) {
+      const etiqueta = presentes[Number(f.i)].etiqueta;
+      detalle[etiqueta] = (detalle[etiqueta] ?? 0) + n;
+      total += n;
+    }
+  }
+  return { total, detalle };
 }

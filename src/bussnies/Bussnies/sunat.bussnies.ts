@@ -8,6 +8,7 @@ import { ISunatBussniees } from '../Ibussnies/ISunatBussniees';
 import { Cliente } from '../../models/DBModel/cliente.entity';
 import { Empresa } from '../../models/DBModel/empresa.entity';
 import { Proveedor } from '../../models/DBModel/proveedor.entity';
+import { esRucValido } from '../../sunat/nucleo/documentos-identidad';
 
 /**
  * Solo dígitos: el número va dentro de la URL de ApiPeru, y con solo contar el
@@ -23,6 +24,15 @@ export function validarRuc(ruc: unknown): void {
   if (typeof ruc !== 'string' || !/^\d{11}$/.test(ruc)) {
     throw new BadRequestException('El RUC debe tener 11 dígitos');
   }
+}
+
+/**
+ * Dígito verificador y prefijo del RUC (módulo 11). Se exige DESPUÉS de buscar en la
+ * base local y ANTES de llamar a ApiPeru: un RUC ya guardado se sigue devolviendo aunque
+ * su dígito esté mal, pero uno nuevo y mal escrito no gasta cuota de la consulta externa.
+ */
+export function exigirDigitoRuc(ruc: string): void {
+  if (!esRucValido(ruc)) throw new BadRequestException('RUC no válido');
 }
 
 @Injectable()
@@ -103,6 +113,7 @@ export class SunatBussnies implements ISunatBussniees {
 
     const enBD = await this.sunatRepo.buscarEmpresaPorRuc(ruc);
     if (enBD) return this.mapEmpresa(enBD);
+    exigirDigitoRuc(ruc);
 
     try {
       const { data } = await axios.get(
@@ -145,6 +156,7 @@ export class SunatBussnies implements ISunatBussniees {
 
     const enBD = await this.sunatRepo.buscarEmpresaPorRuc(dto.ruc);
     if (enBD) return this.mapEmpresa(enBD);
+    exigirDigitoRuc(dto.ruc);
 
     try {
       const { data } = await axios.get(
@@ -188,6 +200,7 @@ export class SunatBussnies implements ISunatBussniees {
 
     const enBD = await this.sunatRepo.buscarProveedorPorRuc(dto.ruc);
     if (enBD) return this.mapProveedor(enBD);
+    exigirDigitoRuc(dto.ruc);
 
     try {
       const { data } = await axios.get(

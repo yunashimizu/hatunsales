@@ -68,4 +68,21 @@ export class CheckoutRepository {
     );
     return filasDe(resultado).length > 0;
   }
+
+  /**
+   * Fase 8.2: resta un uso (UPDATE condicional, nunca por debajo de 0). false si el cupón no existe o ya
+   * estaba en 0 (por ejemplo, el contador se corrigió a mano).
+   */
+  async devolverUsoCupon(idCupon: number, manager?: { query: (sql: string, p?: any[]) => Promise<any> }): Promise<boolean> {
+    const q = manager ?? this.cuponRepo.manager;
+    const resultado = await q.query(
+      `UPDATE cupones
+          SET usos_actuales = COALESCE(usos_actuales, 0) - 1
+        WHERE id_cupon = $1
+          AND COALESCE(usos_actuales, 0) > 0
+        RETURNING id_cupon`,
+      [idCupon],
+    );
+    return filasDe(resultado).length > 0;
+  }
 }

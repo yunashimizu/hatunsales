@@ -1,4 +1,5 @@
 import { IsString, IsEmail, IsInt, IsOptional, IsBoolean, MinLength, Min, ValidateIf } from 'class-validator';
+import { CONTRASENA_MINIMA, MENSAJE_CONTRASENA_MINIMA } from '../../../util/jwt/contrasena-minima';
 
 export class ActualizarEmpleadoRequest {
 
@@ -17,7 +18,7 @@ export class ActualizarEmpleadoRequest {
   /** Si no se envía o viene vacío, no se cambia la contraseña. */
   @ValidateIf((_, value) => value !== undefined && value !== null && String(value).trim() !== '')
   @IsString()
-  @MinLength(6)
+  @MinLength(CONTRASENA_MINIMA, { message: MENSAJE_CONTRASENA_MINIMA })
   password?: string;
 
   @IsInt()

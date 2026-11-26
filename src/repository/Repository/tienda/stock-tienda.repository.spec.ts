@@ -136,3 +136,52 @@ describe('StockTiendaRepository.devolver (E11 / E14)', () => {
     expect(reposiciones).toEqual([[3, 100], [2, 200]]);
   });
 });
+
+describe('StockTiendaRepository: rastro del movimiento del pedido (Fase 8.1, fase21)', () => {
+  function armarCon(capacidades: string[]) {
+    const dataSource = dataSourceCon({});
+    const esquema = { tiene: jest.fn(async (c: string) => capacidades.includes(c)) };
+    const repo = new StockTiendaRepository(dataSource as any, new ConfiguracionRepository(dataSource as any), esquema as any);
+    const manager = {
+      query: jest.fn(async (sql: string, _params: any[] = []) => {
+        if (/FROM inventario/.test(sql) && /FOR UPDATE/.test(sql)) return [{ id_inventario: 1, id_producto: 5, id_almacen: 2, stock: '9' }];
+        if (/FROM pedido_items/.test(sql)) return [{ id_producto: 5, id_almacen: 2, cantidad: '3' }];
+        if (/SELECT id_inventario FROM inventario/.test(sql)) return [{ id_inventario: 1 }];
+        if (/FROM almacenes/.test(sql)) return [{ id_sucursal: 1 }];
+        return [];
+      }),
+    };
+    const movimientos = () => manager.query.mock.calls.filter((c: any[]) => String(c[0]).includes('INSERT INTO movimientos_inventario'));
+    return { repo, manager, movimientos };
+  }
+
+  it('con fase21: la reserva guarda el almacén y el pedido (sin usuario: es una compra web)', async () => {
+    const { repo, manager, movimientos } = armarCon(['movimientoUsuario', 'movimientoAlmacen', 'movimientoDocumento']);
+
+    await repo.reservar([{ id_producto: 5, cantidad: 3 }], 2, 'exclusivo', manager as any, { tipo_documento: 'pedido', id_documento: 57 });
+
+    const [sql, params] = movimientos()[0];
+    expect(String(sql)).toContain('fecha, id_usuario, id_almacen, tipo_documento, id_documento)');
+    expect(params!.slice(6)).toEqual([null, 2, 'pedido', 57]);
+  });
+
+  it('con fase21: la devolución del pedido cancelado guarda el pedido aunque no se lo pasen', async () => {
+    const { repo, manager, movimientos } = armarCon(['movimientoAlmacen', 'movimientoDocumento']);
+
+    await repo.devolver(57, manager as any);
+
+    const [sql, params] = movimientos()[0];
+    expect(String(sql)).toContain('fecha, id_almacen, tipo_documento, id_documento)');
+    expect(params!.slice(6)).toEqual([2, 'pedido', 57]);
+  });
+
+  it('sin fase21 el INSERT es exactamente el de antes', async () => {
+    const { repo, manager, movimientos } = armarCon([]);
+
+    await repo.devolver(57, manager as any);
+
+    const [sql, params] = movimientos()[0];
+    expect(String(sql)).toMatch(/descripcion, fecha\)\s+VALUES \(\$1, \$2, \$3, \$4, \$5, \$6, NOW\(\)\)/);
+    expect(params).toHaveLength(6);
+  });
+});

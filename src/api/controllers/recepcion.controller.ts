@@ -39,6 +39,18 @@ export class RecepcionController {
     return this.service.listarObservaciones(estado);
   }
 
+  /**
+   * Fase 8.4: ¿esa guía de ese proveedor ya se recibió? Para avisar ANTES de confirmar. Va antes de ':id'.
+   * Respuesta: `{ repetida, modo, recepcion_previa, mensaje }`.
+   */
+  @Get('guia-repetida')
+  @Roles('admin', 'vendedor', 'caja')
+  guiaRepetida(@Query('id_proveedor') idProveedor?: string, @Query('nro_guia') nroGuia?: string) {
+    const proveedor = Number(idProveedor);
+    if (!Number.isSafeInteger(proveedor) || proveedor <= 0) throw new BadRequestException('Indique el proveedor (id_proveedor)');
+    return this.service.guiaRepetida(proveedor, String(nroGuia ?? ''));
+  }
+
   @Get(':id')
   @Roles('admin', 'vendedor', 'caja')
   detalle(@Param('id') id: string) {

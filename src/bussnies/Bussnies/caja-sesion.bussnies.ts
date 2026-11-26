@@ -4,7 +4,10 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { BitacoraService } from '../../bitacora/bitacora.service';
+import { ACCIONES_BITACORA } from '../../bitacora/bitacora.acciones';
 import { CajaSesionRepository } from '../../repository/Repository/caja-sesion.repository';
 import type { LocalCaja, OcupanteCaja } from '../../repository/Repository/caja-sesion.repository';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
@@ -21,6 +24,10 @@ import type { ResultadoPreparacionCierre } from '../Ibussnies/ICajaArqueoBussnie
 import { relanzarHttp } from '../../caja/http/errores-caja.http';
 import { Dinero } from '../../caja/dominio/dinero';
 import { CodigoErrorCaja, ErrorCaja } from '../../caja/dominio/errores-caja';
+import { ControlCajaService } from '../../caja/configuracion/control-caja.service';
+import { ocultaEsperadoA } from '../../caja/configuracion/control-caja';
+import { resumenTurnoCiego } from '../../caja/arqueo/arqueo-ciego';
+import type { ResumenTurno } from '../../repository/Repository/caja-sesion.repository';
 
 /** Tope del efectivo inicial de un turno (S/). */
 export const MONTO_INICIAL_MAXIMO = 9_999_999.99;
@@ -58,7 +65,21 @@ export class CajaSesionBussnies {
   constructor(
     private readonly repo: CajaSesionRepository,
     private readonly arqueos: CajaArqueoBussnies,
+    /** Bitácora (Fase 6.3): cierre del turno de otro usuario. Nunca hace fallar el cierre. */
+    @Optional() private readonly bitacora?: BitacoraService,
+    /** Fase 7.3 (arqueo ciego). Nest siempre lo inyecta; sin él, todo como antes. */
+    @Optional() private readonly controlCaja?: ControlCajaService,
   ) {}
+
+  /** Fase 7.3: con `arqueo_ciego` encendido, caja y vendedor no ven montos del turno hasta su conteo. Nunca lanza. */
+  private async ocultaEsperado(usuario?: UsuarioToken): Promise<boolean> {
+    if (!this.controlCaja) return false;
+    return ocultaEsperadoA(normalizarRol(usuario?.rol), await this.controlCaja.arqueoCiego());
+  }
+
+  private resumenVisible(resumen: ResumenTurno, oculto: boolean) {
+    return oculto ? resumenTurnoCiego(resumen) : resumen;
+  }
 
   /** GET /caja/sesion (dashboard y POS): modo y turno en paralelo. */
   async sesion(usuario: UsuarioToken) {
@@ -71,11 +92,14 @@ export class CajaSesionBussnies {
       return { modo, abierta: false, apertura: null, resumen: null };
     }
     const resumen = apertura ? await this.repo.resumenTurno(apertura) : null;
+    const oculto = resumen ? await this.ocultaEsperado(usuario) : false;
     return {
       modo,
       abierta: !!apertura,
       apertura,
-      resumen,
+      resumen: resumen ? this.resumenVisible(resumen, oculto) : null,
+      /** Fase 7.3: true = los montos del resumen van en null (arqueo ciego). */
+      resumen_oculto: oculto,
     };
   }
 
@@ -91,7 +115,8 @@ export class CajaSesionBussnies {
       );
     }
     const resumen = await this.repo.resumenTurno(apertura);
-    return { apertura, resumen };
+    const oculto = await this.ocultaEsperado(usuario);
+    return { apertura, resumen: this.resumenVisible(resumen, oculto), resumen_oculto: oculto };
   }
 
   /**
@@ -294,6 +319,7 @@ export class CajaSesionBussnies {
 
     try {
       const resumen = await this.repo.resumenTurno(apertura);
+      const ocultar = await this.ocultaEsperado(usuario);
       const info: { valor: ResultadoPreparacionCierre | null } = { valor: null };
       const cerrado = await this.repo.cerrar(
         {
@@ -306,21 +332,88 @@ export class CajaSesionBussnies {
           info.valor = await this.arqueos.prepararCierre(manager, idApertura, {
             idArqueo: body?.id_arqueo,
             montoConteoCuerpo: body?.monto_conteo,
+            ocultarEsperado: ocultar,
           });
           return info.valor.preparacion;
         },
       );
       const extra = info.valor;
+      // Fase 6.3: un administrador cerró el turno de otro usuario. Después del COMMIT; nunca frena el cierre.
+      if (apertura.id_usuario != null && apertura.id_usuario !== idUsuario) {
+        await this.bitacora?.registrarCon(() => ({
+          accion: ACCIONES_BITACORA.CAJA_CIERRE_AJENO,
+          id_usuario: idUsuario,
+          rol: usuario?.rol ?? null,
+          entidad: 'apertura_caja',
+          id_entidad: idApertura,
+          antes: { id_usuario_turno: apertura.id_usuario, id_caja: apertura.id_caja, caja: apertura.caja_nombre },
+          despues: {
+            monto_conteo: body?.monto_conteo ?? null,
+            efectivo_esperado: extra?.efectivo_esperado ?? null,
+            id_arqueo: extra?.arqueo?.id_arqueo ?? null,
+          },
+          motivo: body?.observacion ?? null,
+        }));
+      }
+      // Fase 7.3: con el arqueo ciego, quien cierra SIN conteo no recibe el esperado (con conteo, sí: ya contó).
+      const oculto = ocultar && cerrado.monto_conteo == null;
       return {
         ...cerrado,
-        resumen,
-        ...(extra?.efectivo_esperado != null ? { efectivo_esperado: extra.efectivo_esperado } : {}),
+        resumen: this.resumenVisible(resumen, oculto),
+        ...(extra?.efectivo_esperado != null && !oculto ? { efectivo_esperado: extra.efectivo_esperado } : {}),
+        ...(oculto ? { esperado_oculto: true } : {}),
         ...(extra?.arqueo ? { arqueo: extra.arqueo } : {}),
         ...(extra?.aviso ? { aviso: extra.aviso } : {}),
       };
     } catch (e: any) {
       this.mapError(e);
     }
+  }
+
+  /**
+   * Fase 7.4: cierra un turno olvidado (lo llama CierreAutomaticoTarea). Sin conteo: cierres_caja.monto_conteo
+   * queda NULL (el arqueo por sucursal lo muestra «sin dato», no como faltante) y monto_final guarda el esperado
+   * calculado al cerrar, igual que un cierre a mano. Si había un arqueo de cierre vigente sin usar, se toma su
+   * conteo (lo hizo el cajero). La observación dice que fue automático; con sql/fase20 además
+   * cierres_caja.automatico = TRUE. Devuelve false si el turno ya estaba cerrado (otra réplica o el cajero).
+   */
+  async cerrarAutomatico(idApertura: number, horas: number): Promise<boolean> {
+    const apertura = await this.repo.obtenerAperturaPorId(idApertura);
+    if (!apertura) return false;
+    const nota = `Cierre automático: el turno llevaba más de ${horas} h abierto y nadie lo cerró.`;
+    const info: { valor: ResultadoPreparacionCierre | null } = { valor: null };
+    let cerrado;
+    try {
+      cerrado = await this.repo.cerrar(
+        { idApertura, idUsuario: null, montoConteo: null, observacion: `${nota} Sin conteo de efectivo.`, automatico: true },
+        async (manager) => {
+          info.valor = await this.arqueos.prepararCierre(manager, idApertura, { montoConteoCuerpo: null });
+          const prep = info.valor.preparacion;
+          // La marca va siempre delante; si se usó el conteo de un arqueo de cierre, su observación se conserva detrás.
+          const conteo = prep.montoConteo != null ? 'Conteo tomado del último arqueo de cierre.' : 'Sin conteo de efectivo.';
+          return { ...prep, observacion: [nota, conteo, prep.observacion].filter(Boolean).join(' ') };
+        },
+      );
+    } catch (e: any) {
+      if (String(e?.message ?? e) === 'CAJA_YA_CERRADA') return false;
+      throw e;
+    }
+    await this.bitacora?.registrarCon(() => ({
+      accion: ACCIONES_BITACORA.CAJA_CIERRE_AUTOMATICO,
+      id_usuario: null,
+      entidad: 'apertura_caja',
+      id_entidad: idApertura,
+      antes: { id_usuario_turno: apertura.id_usuario, id_caja: apertura.id_caja, caja: apertura.caja_nombre, abierta_desde: apertura.fecha },
+      despues: {
+        id_cierre: cerrado.id_cierre,
+        monto_conteo: cerrado.monto_conteo,
+        efectivo_esperado: info.valor?.efectivo_esperado ?? null,
+        id_arqueo: info.valor?.arqueo?.id_arqueo ?? null,
+        horas,
+      },
+      motivo: nota,
+    }));
+    return true;
   }
 
   /** Para modo estricto en ventas (C4). */

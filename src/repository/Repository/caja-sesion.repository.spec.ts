@@ -465,3 +465,98 @@ describe('CajaSesionRepository · locales y cajas (Fase 7)', () => {
     expect(String(manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('FOR UPDATE'))?.[0])).toMatch(/COALESCE\(estado, TRUE\) AS activa/);
   });
 });
+
+/** Fase 7.4 y 7.6: cierre automático, turnos olvidados y ventas sin turno. */
+describe('CajaSesionRepository · Fase 7 (cierre automático y ventas sin turno)', () => {
+  function catalogo(conFase20: boolean, conAlmacen = true): SnapshotEsquema {
+    return new SnapshotEsquema(
+      new Map<string, Set<string>>([
+        ['ventas', new Set(['id_venta', 'id_caja', 'fecha', 'total', 'estado', 'origen', ...(conAlmacen ? ['id_almacen'] : [])])],
+        ['aperturas_caja', new Set(['id_apertura', 'id_caja', 'fecha', 'monto_inicial', 'id_usuario'])],
+        ['cierres_caja', new Set(['id_cierre', 'id_apertura', 'fecha', 'monto_conteo', 'monto_final', 'id_usuario', 'observacion', ...(conFase20 ? ['automatico'] : [])])],
+        ['cajas', new Set(['id_caja', 'nombre'])],
+      ]),
+      Date.now(),
+    );
+  }
+  function armarF7(conFase20: boolean, opciones: { candado?: boolean; conAlmacen?: boolean } = {}) {
+    const manager = {
+      query: jest.fn(async (sql: string, _p?: unknown[]) => {
+        if (sql.includes('pg_try_advisory_xact_lock')) return [{ ok: opciones.candado ?? true }];
+        if (sql.includes('INSERT INTO cierres_caja')) return [{ id_cierre: 41 }];
+        if (sql.includes('FOR UPDATE') && sql.includes('aperturas_caja')) return [{ id_apertura: 12 }];
+        if (sql.includes('NOT EXISTS') && sql.includes('make_interval')) return [{ id_apertura: 12 }, { id_apertura: 15 }];
+        return [];
+      }),
+    };
+    const dataSource = {
+      query: jest.fn(async () => [
+        { id_sucursal: 1, sucursal_nombre: 'Principal', cantidad: 2, monto: '150.50' },
+        { id_sucursal: null, sucursal_nombre: null, cantidad: 1, monto: '10.00' },
+      ]),
+      transaction: jest.fn(async (fn: (m: unknown) => unknown) => fn(manager)),
+    };
+    const esquema = { snapshot: jest.fn().mockResolvedValue(catalogo(conFase20, opciones.conAlmacen ?? true)) };
+    const repo = new CajaSesionRepository(dataSource as any, esquema as any, {} as any);
+    const insertCierre = () => manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('INSERT INTO cierres_caja')) as [string, unknown[]];
+    return { repo, manager, dataSource, insertCierre };
+  }
+
+  it('cierre automático con fase20: sin id_usuario (lo cerró el sistema), con automatico = TRUE y sin conteo', async () => {
+    const { repo, insertCierre } = armarF7(true);
+    await repo.cerrar({ idApertura: 12, idUsuario: null, montoConteo: null, observacion: 'Cierre automático', automatico: true });
+    const [sql, valores] = insertCierre();
+    expect(sql).toContain('automatico');
+    expect(sql).not.toMatch(/\bid_usuario\b/);
+    expect(sql).not.toContain('monto_conteo');
+    expect(valores).toEqual([12, true, 'Cierre automático']);
+  });
+
+  it('sin fase20 (columna ausente) el mismo cierre no nombra la columna; un cierre a mano no cambia', async () => {
+    const auto = armarF7(false);
+    await auto.repo.cerrar({ idApertura: 12, idUsuario: null, observacion: 'Cierre automático', automatico: true });
+    expect(auto.insertCierre()[0]).not.toContain('automatico');
+
+    const mano = armarF7(true);
+    await mano.repo.cerrar({ idApertura: 12, idUsuario: 3, montoConteo: 80 });
+    const [sql, valores] = mano.insertCierre();
+    expect(sql).not.toContain('automatico');
+    expect(sql).toContain('id_usuario');
+    expect(valores).toEqual([12, 3, '80.00']);
+  });
+
+  it('turnosOlvidados: con el candado, turnos sin cierre más viejos que N horas (parámetros, no texto)', async () => {
+    const { repo, manager } = armarF7(true);
+    expect(await repo.turnosOlvidados(16, 20)).toEqual([12, 15]);
+    const consulta = manager.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('make_interval')) as [string, unknown[]];
+    expect(consulta[0]).toContain('clock_timestamp()::timestamp - make_interval(hours => $1::int)');
+    expect(consulta[1]).toEqual([16, 20]);
+  });
+
+  it('turnosOlvidados: si otra réplica tiene el candado, no devuelve nada; con 0 horas ni consulta', async () => {
+    const ocupado = armarF7(true, { candado: false });
+    expect(await ocupado.repo.turnosOlvidados(16, 20)).toEqual([]);
+    const apagado = armarF7(true);
+    expect(await apagado.repo.turnosOlvidados(0, 20)).toEqual([]);
+    expect(apagado.manager.query).not.toHaveBeenCalled();
+  });
+
+  it('ventasSinTurno: ventas no anuladas de mostrador con id_caja nulo del día de Lima, por local del almacén', async () => {
+    const { repo, dataSource } = armarF7(true);
+    const filas = await repo.ventasSinTurno('2026-11-25');
+    const [sql, params] = dataSource.query.mock.calls[0] as unknown as [string, unknown[]];
+    expect(sql).toContain('v.id_caja IS NULL');
+    expect(sql).toContain("<> 'anulada'");
+    expect(sql).toContain("= 'mostrador'");
+    expect(sql).toContain('LEFT JOIN almacenes al ON al.id_almacen = v.id_almacen');
+    expect(params).toEqual(['2026-11-25']);
+    expect(filas.map((f) => [f.id_sucursal, f.cantidad, f.monto.aNumero()])).toEqual([[1, 2, 150.5], [null, 1, 10]]);
+  });
+
+  it('ventasSinTurno sin ventas.id_almacen (antes de fase19): todo «sin local», la consulta no nombra almacenes', async () => {
+    const { repo, dataSource } = armarF7(true, { conAlmacen: false });
+    await repo.ventasSinTurno('2026-11-25');
+    const [sql] = dataSource.query.mock.calls[0] as unknown as [string];
+    expect(sql).not.toContain('almacenes');
+  });
+});

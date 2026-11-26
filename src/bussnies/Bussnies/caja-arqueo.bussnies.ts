@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
 import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import { normalizarRol } from '../../config/roles.config';
@@ -38,6 +38,9 @@ import type {
   TurnoArqueoResponse,
 } from '../../models/model/caja-arqueo.response';
 import { FormatoArqueoPdf, generarArqueoPdf, nombreArchivoArqueo } from '../../util/documentos/arqueo-pdf';
+import { ControlCajaService } from '../../caja/configuracion/control-caja.service';
+import { ocultaEsperadoA } from '../../caja/configuracion/control-caja';
+import { ArqueoEsperadoConMarca, esperadoCiego } from '../../caja/arqueo/arqueo-ciego';
 import { obtenerLogoEmisor } from '../../util/documentos/logo-emisor';
 import { ICajaArqueoBussniees, ResultadoPreparacionCierre } from '../Ibussnies/ICajaArqueoBussniees';
 
@@ -66,21 +69,24 @@ export class CajaArqueoBussnies implements ICajaArqueoBussniees {
     private readonly creditoRepo: CreditoRepository,
     private readonly config: ConfiguracionRepository,
     private readonly esquema: EsquemaCajaService,
+    /** Fase 7 (arqueo ciego y categoría del gasto). Nest siempre lo inyecta; sin él, todo como antes. */
+    @Optional() private readonly controlCaja?: ControlCajaService,
   ) {}
 
   // ── Consultas ────────────────────────────────────────────────
 
-  async esperado(usuario: UsuarioToken, idApertura?: number): Promise<ArqueoEsperadoResponse> {
+  async esperado(usuario: UsuarioToken, idApertura?: number): Promise<ArqueoEsperadoConMarca> {
     try {
       await this.esquema.exigir('arqueo');
       const turno = await this.turnoAutorizado(usuario, idApertura);
-      const [esperado, metodos, tolerancia, ultimos] = await Promise.all([
+      const [esperado, metodos, tolerancia, ultimos, ciego] = await Promise.all([
         this.calcularEsperado(turno),
         this.creditoRepo.metodosConTipo(),
         this.tolerancia(),
         this.repo.listarPorTurno(turno.id_apertura, 1),
+        this.arqueoCiego(),
       ]);
-      return {
+      const respuesta: ArqueoEsperadoResponse = {
         apertura: turnoResponse(turno),
         efectivo: efectivoResponse(esperado.efectivo),
         otros_medios: esperado.otros_medios.map(metodoEsperadoResponse),
@@ -96,6 +102,9 @@ export class CajaArqueoBussnies implements ICajaArqueoBussniees {
         ultimo_arqueo: ultimos[0] ? arqueoResumenResponse(ultimos[0]) : null,
         generado_en: new Date().toISOString(),
       };
+      // Fase 7.3: con el arqueo ciego, caja y vendedor no reciben el esperado; lo verán al registrar su conteo.
+      const oculto = ocultaEsperadoA(normalizarRol(usuario?.rol), ciego);
+      return { ...(oculto ? esperadoCiego(respuesta) : respuesta), arqueo_ciego: ciego, esperado_oculto: oculto };
     } catch (error) {
       relanzarHttp(error);
     }
@@ -212,7 +221,13 @@ export class CajaArqueoBussnies implements ICajaArqueoBussniees {
       if (descripcion.length < 3) {
         throw ErrorCaja.datoInvalido('Indique el motivo del movimiento (mínimo 3 caracteres).', CodigoErrorCaja.CAJA_MOVIMIENTO_INVALIDO);
       }
+      const categoria = dto.categoria ?? null;
+      const nroComprobante = String(dto.nro_comprobante ?? '').trim().slice(0, 40) || null;
+      if (dto.tipo !== 'egreso' && (categoria || nroComprobante)) {
+        throw ErrorCaja.datoInvalido('La categoría y el número de comprobante solo aplican a egresos (gastos).', CodigoErrorCaja.CAJA_MOVIMIENTO_INVALIDO);
+      }
       const turnoInicial = await this.turnoAutorizado(usuario, dto.id_apertura);
+      const ocultar = dto.tipo === 'egreso' && ocultaEsperadoA(normalizarRol(usuario?.rol), await this.arqueoCiego());
 
       const { id, turno } = await this.repo.transaccion(async (manager) => {
         const turno = await this.turnoBloqueado(manager, turnoInicial.id_apertura);
@@ -224,7 +239,9 @@ export class CajaArqueoBussnies implements ICajaArqueoBussniees {
           if (monto.mayorQue(disponible)) {
             throw ErrorCaja.conflicto(
               CodigoErrorCaja.CAJA_EGRESO_EXCEDE_EFECTIVO,
-              `El egreso de ${monto.formatear()} supera el efectivo que debería haber en caja (${disponible.formatear()}).`,
+              ocultar
+                ? `El egreso de ${monto.formatear()} supera el efectivo que debería haber en caja.`
+                : `El egreso de ${monto.formatear()} supera el efectivo que debería haber en caja (${disponible.formatear()}).`,
             );
           }
         }
@@ -235,9 +252,13 @@ export class CajaArqueoBussnies implements ICajaArqueoBussniees {
           tipo: dto.tipo,
           monto,
           descripcion: descripcion.slice(0, 200),
+          categoria,
+          nro_comprobante: nroComprobante,
         });
         return { id, turno };
       });
+      // Sin sql/fase20 la categoría y el número no se guardan: la respuesta dice lo que quedó guardado.
+      const s = await this.esquema.snapshot();
 
       return movimientoResponse({
         id_movimiento: id,
@@ -249,6 +270,9 @@ export class CajaArqueoBussnies implements ICajaArqueoBussniees {
         fecha: new Date(),
         id_usuario: Number(usuario.id_usuario),
         usuario_nombre: usuario.nombre ?? null,
+        id_venta: null,
+        categoria: s.tieneColumna('movimientos_caja', 'categoria') ? categoria : null,
+        nro_comprobante: s.tieneColumna('movimientos_caja', 'nro_comprobante') ? nroComprobante : null,
       });
     } catch (error) {
       relanzarHttp(error);
@@ -283,7 +307,7 @@ export class CajaArqueoBussnies implements ICajaArqueoBussniees {
   async prepararCierre(
     manager: EntityManager,
     idApertura: number,
-    opciones: { idArqueo?: number; montoConteoCuerpo?: number | null },
+    opciones: { idArqueo?: number; montoConteoCuerpo?: number | null; ocultarEsperado?: boolean },
   ): Promise<ResultadoPreparacionCierre> {
     const resultado: ResultadoPreparacionCierre = { preparacion: {}, efectivo_esperado: null, arqueo: null };
     const turno = await this.repo.turno(idApertura, manager);
@@ -302,9 +326,11 @@ export class CajaArqueoBussnies implements ICajaArqueoBussniees {
       if (esperado && !arqueo!.efectivo_esperado.igual(esperado.efectivo.esperado)) {
         throw ErrorCaja.conflicto(
           CodigoErrorCaja.ARQUEO_NO_APLICA_CIERRE,
-          `El arqueo ${codigoArqueo(arqueo!.id_arqueo)} quedó desactualizado: el efectivo esperado cambió de ` +
-            `${arqueo!.efectivo_esperado.formatear()} a ${esperado.efectivo.esperado.formatear()} por movimientos posteriores. ` +
-            'Registre un nuevo arqueo de cierre.',
+          opciones.ocultarEsperado
+            ? `El arqueo ${codigoArqueo(arqueo!.id_arqueo)} quedó desactualizado: hubo movimientos después del conteo. Registre un nuevo arqueo de cierre.`
+            : `El arqueo ${codigoArqueo(arqueo!.id_arqueo)} quedó desactualizado: el efectivo esperado cambió de ` +
+              `${arqueo!.efectivo_esperado.formatear()} a ${esperado.efectivo.esperado.formatear()} por movimientos posteriores. ` +
+              'Registre un nuevo arqueo de cierre.',
         );
       }
       return this.usarArqueo(resultado, arqueo!);
@@ -314,9 +340,10 @@ export class CajaArqueoBussnies implements ICajaArqueoBussniees {
       const ultimo = await this.repo.ultimoDeCierre(manager, idApertura);
       if (ultimo && !ultimo.id_cierre) {
         if (esperado && !ultimo.efectivo_esperado.igual(esperado.efectivo.esperado)) {
-          resultado.aviso =
-            `No se usó el arqueo ${codigoArqueo(ultimo.id_arqueo)}: hubo movimientos después del conteo ` +
-            `(esperado ${ultimo.efectivo_esperado.formatear()} → ${esperado.efectivo.esperado.formatear()}).`;
+          resultado.aviso = opciones.ocultarEsperado
+            ? `No se usó el arqueo ${codigoArqueo(ultimo.id_arqueo)}: hubo movimientos después del conteo.`
+            : `No se usó el arqueo ${codigoArqueo(ultimo.id_arqueo)}: hubo movimientos después del conteo ` +
+              `(esperado ${ultimo.efectivo_esperado.formatear()} → ${esperado.efectivo.esperado.formatear()}).`;
           return resultado;
         }
         return this.usarArqueo(resultado, ultimo);
@@ -388,6 +415,11 @@ export class CajaArqueoBussnies implements ICajaArqueoBussniees {
   private async calcularEsperado(turno: TurnoArqueo, manager?: EntityManager): Promise<EsperadoCaja> {
     const filas = await this.repo.filasEsperado(turno.id_apertura, manager);
     return CalculadoraEsperado.calcular(turno.monto_inicial, filas);
+  }
+
+  /** Fase 7.3: clave `arqueo_ciego` (apagada por defecto; nunca lanza). */
+  private async arqueoCiego(): Promise<boolean> {
+    return this.controlCaja ? this.controlCaja.arqueoCiego() : false;
   }
 
   /** configuraciones.caja_arqueo_tolerancia (soles, 0 por defecto, máximo S/ 5.00). */

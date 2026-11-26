@@ -24,6 +24,16 @@ export interface MetodoPagoActivo {
   tipo: string;
 }
 
+/** Fase 9.4: deuda vencida más allá de los días de gracia. */
+export interface MoraCredito {
+  cuentas: number;
+  deuda_vencida: number;
+  /** Vencimiento más antiguo (AAAA-MM-DD). */
+  vencida_desde: string;
+  /** Días de atraso de la cuenta más antigua. */
+  dias_atraso: number;
+}
+
 /** Estados que se pueden pedir en el filtro del listado. */
 export const ESTADOS_CXC = ['pendiente', 'parcial', 'pagado', 'vencido', 'anulado'] as const;
 
@@ -185,6 +195,39 @@ export class CreditoRepository {
     );
     if (!filas[0]) return null;
     return this.mapLinea(filas[0]);
+  }
+
+  /**
+   * Fase 9.4: deuda con saldo vencida hace MÁS de `diasGracia` días (hora de Lima) del cliente o la empresa.
+   * Solo lectura (idx_cxc_cliente / idx_cxc_empresa). null si no hay ninguna.
+   */
+  async moraVencida(
+    por: { id_cliente?: number | null; id_empresa?: number | null },
+    diasGracia: number,
+  ): Promise<MoraCredito | null> {
+    const columna = por.id_empresa ? 'id_empresa' : 'id_cliente';
+    const id = Number(por.id_empresa || por.id_cliente);
+    if (!(id > 0)) return null;
+    const filas = await this.dataSource.query(
+      `SELECT COUNT(*)::int AS cuentas,
+              COALESCE(SUM(cxc.saldo), 0)::text AS deuda,
+              to_char(MIN(cxc.fecha_vencimiento), 'YYYY-MM-DD') AS desde,
+              COALESCE(MAX(${SQL_DIAS_ATRASO}), 0)::int AS dias_atraso
+         FROM cuentas_por_cobrar cxc
+        WHERE cxc.${columna} = $1
+          AND cxc.estado IN ('pendiente', 'parcial', 'vencido')
+          AND cxc.saldo > 0
+          AND cxc.fecha_vencimiento < ${SQL_HOY_LIMA} - $2::int`,
+      [id, Math.max(0, Math.trunc(diasGracia))],
+    );
+    const f = filas?.[0];
+    if (!f || Number(f.cuentas ?? 0) === 0) return null;
+    return {
+      cuentas: Number(f.cuentas),
+      deuda_vencida: Dinero.desdeBd(f.deuda).aNumero(),
+      vencida_desde: String(f.desde),
+      dias_atraso: Number(f.dias_atraso ?? 0),
+    };
   }
 
   private mapLinea(row: any): LineaCredito {

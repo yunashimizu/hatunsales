@@ -64,6 +64,23 @@ export interface MovimientoGuardado {
   fecha: Date;
   id_usuario: number | null;
   usuario_nombre: string | null;
+  /** fase20 (null sin la columna o en movimientos manuales). */
+  id_venta?: number | null;
+  categoria?: string | null;
+  nro_comprobante?: string | null;
+}
+
+/** Movimiento nuevo. Los tres últimos campos se escriben solo si su columna existe (fase20). */
+export interface NuevoMovimientoCaja {
+  id_apertura: number;
+  id_caja: number;
+  id_usuario: number;
+  tipo: 'ingreso' | 'egreso';
+  monto: Dinero;
+  descripcion: string;
+  id_venta?: number | null;
+  categoria?: string | null;
+  nro_comprobante?: string | null;
 }
 
 export interface ICajaArqueoRepository {
@@ -79,9 +96,6 @@ export interface ICajaArqueoRepository {
   listarPorTurno(idApertura: number, limite: number): Promise<ArqueoGuardado[]>;
   ultimoDeCierre(manager: EntityManager, idApertura: number): Promise<ArqueoGuardado | null>;
   vincularCierre(manager: EntityManager, idArqueo: number, idCierre: number): Promise<void>;
-  registrarMovimiento(
-    manager: EntityManager,
-    datos: { id_apertura: number; id_caja: number; id_usuario: number; tipo: 'ingreso' | 'egreso'; monto: Dinero; descripcion: string },
-  ): Promise<number>;
+  registrarMovimiento(manager: EntityManager, datos: NuevoMovimientoCaja): Promise<number>;
   listarMovimientos(idApertura: number, limite: number): Promise<MovimientoGuardado[]>;
 }

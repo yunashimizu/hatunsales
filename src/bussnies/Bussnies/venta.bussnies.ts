@@ -1,4 +1,6 @@
-import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { BitacoraService, EventoBitacora } from '../../bitacora/bitacora.service';
+import { ACCIONES_BITACORA, SIN_MOTIVO } from '../../bitacora/bitacora.acciones';
 import {
   VentaRepository,
   FiltroVentas,
@@ -7,6 +9,8 @@ import {
 } from '../../repository/Repository/venta.repository';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { CreditoRepository } from '../../repository/Repository/credito.repository';
+import type { MoraCredito } from '../../repository/Repository/credito.repository';
+import { ControlCajaService } from '../../caja/configuracion/control-caja.service';
 import { CajaPagosRepository } from '../../repository/Repository/caja-pagos.repository';
 import { ComprobanteBussnies } from './comprobante.bussnies';
 import { ReceptorBussnies } from './receptor.bussnies';
@@ -44,6 +48,23 @@ import {
   normalizarPorcentajeRecargo,
   repartirRecargoPorAfectacion,
 } from '../../util/precios/recargo-tarjeta';
+import { TIPO_IGV_GRAVADO } from '../../util/fiscal/calculo-fiscal';
+import { ControlRebajaService } from '../../control-rebaja/control-rebaja.service';
+import { huellaLineas } from '../../control-rebaja/permiso-autorizacion';
+import {
+  ConfigControlRebaja,
+  describirRebaja,
+  EvaluacionRebaja,
+  evaluarRebajas,
+  LineaParaControl,
+  precioReferencia,
+  RebajaVisible,
+  rebajaVisible,
+  requiereAutorizacion,
+} from '../../util/precios/control-rebaja';
+import type { ProductoVentaResponse } from '../../models/model/venta/venta.response';
+import type { AutorizarVentaRequest } from '../../models/model/venta/autorizar-venta.request';
+import { LocalesUsuarioService } from '../../stock/locales-usuario.service';
 
 /** Línea del comprobante que cobra el recargo por tarjeta: no es un producto, no mueve stock. */
 interface ItemRecargo {
@@ -65,6 +86,30 @@ export interface OpcionesEmisionVenta {
 }
 
 const SIN_RECARGO: RecargoTarjeta = { aplica: false, porcentaje: 0, base_tarjeta: 0, monto: 0 };
+
+/** Resultado del control de rebajas de una venta (Fase 6.4). null = no se controla (exenta, apagado o fallo). */
+interface ControlDeVenta {
+  config: ConfigControlRebaja;
+  rebajas: EvaluacionRebaja[];
+}
+
+/** Lo que el POS ve del control vigente (GET venta/contexto-pos). */
+export interface ControlRebajaPos {
+  modo: ConfigControlRebaja['modo'];
+  tope_pct: number;
+  bajo_costo: boolean;
+  /** false para administración (sin tope) o con el control apagado. */
+  aplica: boolean;
+}
+
+/** AAAA-MM-DD → DD/MM/AAAA (para el mensaje de la mora). */
+function fechaLegible(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso ?? ''));
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : String(iso ?? '');
+}
+
+/** 409 del modo `autorizar`: el front lo reconoce por este código (no 403: el front traduce todo 403 a «sin permiso»). */
+export const CODIGO_REQUIERE_AUTORIZACION = 'REQUIERE_AUTORIZACION';
 
 /**
  * Punto de venta de mostrador.
@@ -88,6 +133,14 @@ export class VentaBussnies {
     private readonly cajaPagosRepo: CajaPagosRepository,
     private readonly cajaSesion: CajaSesionBussnies,
     private readonly notasCredito?: NotaCreditoBussnies,
+    /** Bitácora (Fase 6.3): anota la venta sin descontar stock. Nunca hace fallar la venta. */
+    @Optional() private readonly bitacora?: BitacoraService,
+    /** Control de rebajas (Fase 6.4). Sin él (pruebas antiguas) la venta funciona como antes. */
+    @Optional() private readonly controlRebaja?: ControlRebajaService,
+    /** Fase 8.5: usuarios atados a locales. Sin él (pruebas antiguas) nadie queda restringido. */
+    @Optional() private readonly locales?: LocalesUsuarioService,
+    /** Fase 9.4: días de gracia del bloqueo por mora (`credito_bloqueo_mora_dias`). Sin él, apagado. */
+    @Optional() private readonly controlCaja?: ControlCajaService,
   ) {}
 
   // ── Apoyo al mostrador ───────────────────────────────────────
@@ -125,19 +178,50 @@ export class VentaBussnies {
    * Almacenes disponibles para el POS + default de configuración.
    * El cajero elige almacén cuando debe despachar desde otra sede.
    */
-  async contextoPos(): Promise<{
+  async contextoPos(usuario?: UsuarioToken): Promise<{
     almacenes: { id_almacen: number; nombre: string; sucursal: string; id_sucursal: number | null }[];
     almacen_default?: number;
     /** % que se suma a la parte de la venta cobrada con tarjeta (0 = sin recargo). */
     recargo_tarjeta_pct: number;
+    /** Fase 6.4: modo y tope vigentes del control de rebajas (ausente si no se pudo leer). */
+    control_rebaja?: ControlRebajaPos;
+    /** Fase 8.5: true si el usuario está atado a locales (la lista ya viene recortada). Ausente = sin restricción. */
+    locales_restringidos?: boolean;
   }> {
-    const filas = await this.repo.listarAlmacenesPos();
-    const def = await this.almacenPorDefecto();
+    const todas = await this.repo.listarAlmacenesPos();
+    // Fase 8.5: un usuario atado a locales solo ve los almacenes de sus locales; admin y sin asignar, todos.
+    const alcance = this.locales ? await this.locales.alcance(usuario) : { restringido: false as const };
+    const filas = alcance.restringido ? todas.filter((a) => alcance.almacenes.has(Number(a.id_almacen))) : todas;
+    const configurado = await this.almacenPorDefecto();
+    // Si el almacén por defecto no es de sus locales, el primero de los suyos.
+    const def = !alcance.restringido || (configurado !== undefined && alcance.almacenes.has(configurado))
+      ? configurado
+      : filas[0]?.id_almacen;
+    const control = await this.controlRebajaPos(usuario);
     return {
       almacenes: filas,
       ...(def ? { almacen_default: def } : {}),
+      ...(alcance.restringido ? { locales_restringidos: true } : {}),
       recargo_tarjeta_pct: await this.porcentajeRecargoTarjeta(),
+      ...(control ? { control_rebaja: control } : {}),
     };
+  }
+
+  /** Nunca lanza: sin configuración legible el POS simplemente no avisa. */
+  private async controlRebajaPos(usuario?: UsuarioToken): Promise<ControlRebajaPos | null> {
+    if (!this.controlRebaja) return null;
+    try {
+      const config = await this.controlRebaja.configuracionParaVenta();
+      if (!config) return null;
+      return {
+        modo: config.modo,
+        tope_pct: config.tope_pct,
+        bajo_costo: config.bajo_costo,
+        aplica: config.modo !== 'apagado' && normalizarRol(usuario?.rol) !== 'admin',
+      };
+    } catch {
+      return null;
+    }
   }
 
   async metodosPago() {
@@ -150,8 +234,10 @@ export class VentaBussnies {
    * cajero es lo que se cobra, se registra y se envía a SUNAT.
    */
   async previsualizar(dto: CrearVentaRequest, usuario?: UsuarioToken): Promise<PreviewComprobanteResponse> {
-    const { items, itemsRecargo, recargo, totalSinRecargo } = await this.armarLineas(dto);
+    const { items, itemsRecargo, recargo, totalSinRecargo, productos } = await this.armarLineas(dto);
     const base = await this.comprobantes.previsualizar(this.aSolicitudComprobante(dto, items, itemsRecargo));
+    // Fase 6.4: líneas que pedirían autorización o quedarían anotadas, para avisar ANTES de cobrar (sin el costo).
+    const control = await this.evaluarControl(dto, usuario, items, productos);
     const formaPago = await this.formaPagoDeVistaPrevia(dto);
     const conForma = formaPago ? { ...base, forma_pago: formaPago } : base;
     // Plan DO §2 (M4, M6): quien atiende y los pagos elegidos, solo si hay dato.
@@ -161,6 +247,7 @@ export class VentaBussnies {
       ...conForma,
       ...(atendido ? { atendido_por: atendido } : {}),
       ...(pagos.length ? { pagos_detalle: pagos } : {}),
+      ...(control ? { rebajas: this.rebajasVisibles(control) } : {}),
     };
     if (!recargo.aplica) return preview;
     return {
@@ -238,9 +325,18 @@ export class VentaBussnies {
       if (existente) return this.ventaYaRegistrada(existente, dto);
     }
 
-    const { items, itemsRecargo, resumen, recargo } = await this.armarLineas(dto);
+    // Fase 8.5: vender desde un almacén fuera de sus locales → 403 antes de cualquier efecto (admin y usuarios sin locales: como hoy).
+    const porDefecto = await this.almacenPorDefecto();
+    const idAlmacen = this.locales
+      ? await this.locales.almacenParaVenta(usuario, dto.id_almacen ?? undefined, porDefecto)
+      : dto.id_almacen ?? porDefecto;
+
+    const { items, itemsRecargo, resumen, recargo, productos } = await this.armarLineas(dto);
+    // Fase 6.4: antes de cualquier efecto (registrar al cliente, pagos). El reintento idempotente ya salió arriba.
+    const control = await this.evaluarControl(dto, usuario, items, productos);
+    const permiso = this.exigirPermisoSiHaceFalta(control, dto, usuario, items);
     const receptor = await this.resolverReceptor(dto);
-    const { pagos, credito } = await this.validarPagosYCredito(dto, resumen.total, receptor, usuario);
+    const { pagos, credito, moraOmitida } = await this.validarPagosYCredito(dto, resumen.total, receptor, usuario);
 
     const lineas: LineaVentaPersistida[] = items.map((item, indice) => {
       const linea = resumen.lineas[indice];
@@ -258,10 +354,17 @@ export class VentaBussnies {
         descuento_total_linea: items[indice].descuento_total_linea,
         precio_unitario_final: items[indice].precio_unitario_final,
         id_regla_mayorista: items[indice].id_regla_mayorista,
+        // Fase 6.1: costo de ese momento (null si el producto no tiene). La línea de recargo por tarjeta
+        // no está aquí (no se guarda en detalle_venta), así que nunca lleva costo.
+        costo_unitario: items[indice].costo_unitario,
+        // fase19 (ventaReferencia): precio de catálogo neto de esa cantidad. Es un dato de la venta, no del
+        // control: se guarda también para admin, cotizaciones y con el control apagado. Nunca frena la venta.
+        precio_referencia: this.referenciaSegura(productos.get(Number(item.id_producto)), item.cantidad),
       };
     });
 
-    const idAlmacen = dto.id_almacen ?? (await this.almacenPorDefecto());
+    // Vender sin mover stock es solo de administración; el pedido de otro rol se ignora.
+    const sinDescontarStock = dto.descontar_stock === false && normalizarRol(usuario?.rol) === 'admin';
 
     let idVenta: number;
     let ventaExistente = false;
@@ -285,8 +388,7 @@ export class VentaBussnies {
         lineas,
         pagos,
         {
-          // Vender sin mover stock es solo de administración; el pedido de otro rol se ignora.
-          descontarStock: !(dto.descontar_stock === false && normalizarRol(usuario?.rol) === 'admin'),
+          descontarStock: !sinDescontarStock,
           idAlmacenPreferido: idAlmacen,
         },
       );
@@ -306,6 +408,47 @@ export class VentaBussnies {
     const venta = ventaExistente ? await this.ventaYaRegistrada(idVenta, dto) : await this.obtener(idVenta);
     if (recargo.aplica) venta.recargo_tarjeta = recargo.monto;
     if (ventaExistente) return venta;
+
+    // Fase 6.4: después del COMMIT. Nunca frena la venta (registrarCon atrapa también el armado).
+    if (permiso) this.controlRebaja?.marcarUsado(permiso.firma, permiso.vence);
+    if (control?.rebajas.length) {
+      await this.bitacora?.registrarCon(() => this.eventosDeRebaja(control, permiso, idVenta, usuario, idAlmacen ?? null));
+    }
+
+    // Fase 9.4: después del COMMIT. Un admin vendió a crédito a quien tiene deuda vencida: queda su nombre.
+    if (moraOmitida && credito) {
+      await this.bitacora?.registrarCon(() => ({
+        accion: ACCIONES_BITACORA.CREDITO_CON_MORA,
+        id_usuario: usuario?.id_usuario ?? null,
+        rol: usuario?.rol ?? null,
+        id_almacen: idAlmacen ?? null,
+        entidad: 'venta',
+        id_entidad: idVenta,
+        antes: { ...moraOmitida },
+        despues: {
+          monto_credito: credito.monto,
+          id_cliente: credito.id_cliente ?? null,
+          id_empresa: credito.id_empresa ?? null,
+        },
+      }));
+    }
+
+    // Fase 6.5: después del COMMIT. El front anterior no manda motivo: se anota «sin motivo», no se rechaza.
+    if (sinDescontarStock) {
+      await this.bitacora?.registrarCon(() => ({
+        accion: ACCIONES_BITACORA.VENTA_SIN_DESCONTAR_STOCK,
+        id_usuario: usuario?.id_usuario ?? null,
+        rol: usuario?.rol ?? null,
+        id_almacen: idAlmacen ?? null,
+        entidad: 'venta',
+        id_entidad: idVenta,
+        despues: {
+          total: resumen.total,
+          lineas: lineas.map((l) => ({ id_producto: l.id_producto, descripcion: l.descripcion, cantidad: l.cantidad })),
+        },
+        motivo: dto.motivo_sin_stock?.trim() || SIN_MOTIVO,
+      }));
+    }
 
     if (dto.emitir_comprobante === false) return venta;
 
@@ -339,6 +482,216 @@ export class VentaBussnies {
     }
 
     return venta;
+  }
+
+  // ── Control de rebajas (Fase 6.4) ────────────────────────────
+
+  /**
+   * `POST venta/autorizacion`: un administrador activo autoriza ESTE carrito para ESTE vendedor durante
+   * 5 minutos. El permiso devuelto no es un JWT (ver permiso-autorizacion.ts) y se manda en
+   * `permiso_autorizacion` al reintentar `POST venta` con la misma clave de idempotencia.
+   */
+  async autorizar(dto: AutorizarVentaRequest, usuario?: UsuarioToken): Promise<{
+    permiso: string;
+    vence: string;
+    vigencia_seg: number;
+    autorizador: { id_usuario: number; nombre: string };
+    rebajas: RebajaVisible[];
+  }> {
+    if (!this.controlRebaja) {
+      throw new ServiceUnavailableException('La autorización de rebajas no está disponible en este momento.');
+    }
+    const solicitante = Number(usuario?.id_usuario);
+    if (!Number.isSafeInteger(solicitante) || solicitante <= 0) {
+      throw new BadRequestException('No se pudo identificar al usuario que pide la autorización.');
+    }
+    if (!Array.isArray(dto?.items) || dto.items.length === 0) {
+      throw new BadRequestException(cuerpoError(CodigoError.VENTA_SIN_ITEMS, 'Indique los productos de la venta que se autoriza'));
+    }
+
+    // Primero la contraseña (igual cueste lo mismo con o sin cuenta); luego las líneas.
+    const admin = await this.controlRebaja.verificarAdministrador(dto.email, dto.password, solicitante);
+    const { items, productos } = await this.lineasConPrecio(dto.items);
+    const control = await this.evaluarControl({}, usuario, items, productos);
+    const { permiso, vence } = this.controlRebaja.emitirPermiso(solicitante, admin.id_usuario, this.huellaDe(items));
+    this.logger.log(`Rebaja autorizada por el administrador ${admin.id_usuario} para el usuario ${solicitante} (${items.length} líneas).`);
+    return {
+      permiso,
+      vence: new Date(vence).toISOString(),
+      vigencia_seg: Math.round((vence - this.controlRebaja.ahora()) / 1000),
+      autorizador: { id_usuario: admin.id_usuario, nombre: admin.nombre },
+      rebajas: control ? this.rebajasVisibles(control) : [],
+    };
+  }
+
+  /**
+   * Rebajas de la venta, medidas contra el catálogo de la base. null = no se controla: administración
+   * (sin tope), la conversión de una cotización (el repositorio ya exige sus precios, R4), control
+   * apagado, o cualquier fallo al leer la configuración o al evaluar. Nunca lanza.
+   */
+  /**
+   * La conversión de una cotización queda exenta solo si ninguna línea lleva rebaja propia: la cotización
+   * ya fija el precio (neto) y se compara en el repositorio contra el precio de LISTA, que no ve el
+   * descuento. Se usa lo que manda el cliente, igual que `lineasConPrecio` (`item.descuento ??
+   * producto.descuento`); no el descuento ya resuelto, que incluye el mayorista y frenaría conversiones
+   * legítimas.
+   */
+  private sinRebajaPropia(
+    items: CrearVentaRequest['items'] | undefined,
+    productos: Map<number, ProductoVentaResponse>,
+  ): boolean {
+    return (items ?? []).length > 0
+      && (items ?? []).every((i) => Number(i.descuento ?? productos.get(Number(i.id_producto))?.descuento ?? 0) === 0);
+  }
+
+  private async evaluarControl(
+    dto: Pick<CrearVentaRequest, 'id_proforma'> & Partial<Pick<CrearVentaRequest, 'items'>>,
+    usuario: UsuarioToken | undefined,
+    items: { id_producto: number; descripcion: string; cantidad: number; precio_unitario_final: number }[],
+    productos: Map<number, ProductoVentaResponse>,
+  ): Promise<ControlDeVenta | null> {
+    if (!this.controlRebaja || !usuario) return null;
+    try {
+      if (normalizarRol(usuario.rol) === 'admin') return null;
+      if (Number(dto.id_proforma) > 0 && this.sinRebajaPropia(dto.items, productos)) return null;
+      const config = await this.controlRebaja.configuracionParaVenta();
+      if (!config || config.modo === 'apagado') return null;
+      const lineas: LineaParaControl[] = items.map((item) => {
+        const producto = productos.get(Number(item.id_producto));
+        return {
+          id_producto: item.id_producto,
+          descripcion: item.descripcion,
+          cantidad: item.cantidad,
+          precio_final: item.precio_unitario_final,
+          precio_venta_base: Number(producto?.precio_venta ?? 0),
+          descuento_base: Number(producto?.descuento ?? 0),
+          reglas_mayoristas: producto?.reglas_mayoristas ?? [],
+          costo_unitario: producto?.precio_compra ?? null,
+        };
+      });
+      return { config, rebajas: evaluarRebajas(lineas, config) };
+    } catch (error) {
+      this.logger.warn(`No se pudo evaluar el control de rebajas; la venta sigue sin control: ${(error as Error)?.message ?? error}`);
+      return null;
+    }
+  }
+
+  /** Precio de catálogo neto (base + regla mayorista) para esa cantidad; null si no hay o si el cálculo falla. */
+  private referenciaSegura(producto: ProductoVentaResponse | undefined, cantidad: number): number | null {
+    if (!producto) return null;
+    try {
+      return precioReferencia({
+        precio_venta_base: Number(producto.precio_venta ?? 0),
+        descuento_base: Number(producto.descuento ?? 0),
+        cantidad,
+        reglas_mayoristas: producto.reglas_mayoristas ?? [],
+      });
+    } catch (error) {
+      this.logger.warn(`No se pudo calcular el precio de referencia del producto ${producto.id_producto}: ${(error as Error)?.message ?? error}`);
+      return null;
+    }
+  }
+
+  /** Lo que ve el mostrador: sin el costo. */
+  private rebajasVisibles(control: ControlDeVenta): RebajaVisible[] {
+    return control.rebajas.map((e) => rebajaVisible(e, control.config));
+  }
+
+  private huellaDe(items: { id_producto: number; cantidad: number; precio_unitario_final: number }[]): string {
+    return huellaLineas(items.map((i) => ({ id_producto: i.id_producto, cantidad: i.cantidad, precio_final: i.precio_unitario_final })));
+  }
+
+  /**
+   * Modo `autorizar` con líneas afectadas: exige un permiso válido para este vendedor y estas líneas.
+   * Sin él, 409 `REQUIERE_AUTORIZACION` (no 403). En `registrar`, `apagado` o sin líneas afectadas no
+   * mira el permiso (uno que sobre o esté vencido no molesta).
+   */
+  private exigirPermisoSiHaceFalta(
+    control: ControlDeVenta | null,
+    dto: CrearVentaRequest,
+    usuario: UsuarioToken | undefined,
+    items: { id_producto: number; cantidad: number; precio_unitario_final: number }[],
+  ): { firma: string; vence: number; id_autorizador: number } | null {
+    if (!control || !this.controlRebaja || !requiereAutorizacion(control.rebajas, control.config)) return null;
+    const resultado = this.controlRebaja.verificarPermiso(dto.permiso_autorizacion, Number(usuario?.id_usuario), this.huellaDe(items));
+    if (resultado.valido) {
+      return { firma: resultado.firma, vence: resultado.datos.vence, id_autorizador: resultado.datos.aut };
+    }
+    const porMotivo: Record<string, string> = {
+      ausente: '',
+      vencido: 'La autorización venció (dura 5 minutos): pídala de nuevo. ',
+      otras_lineas: 'La venta cambió después de autorizarla (productos, cantidades o precios): pida la autorización de nuevo. ',
+      otro_solicitante: 'La autorización es para otro usuario: pídala de nuevo. ',
+      usado: 'Esa autorización ya se usó en otra venta: pida una nueva. ',
+    };
+    const antes = porMotivo[resultado.motivo] ?? 'La autorización no es válida: pídala de nuevo. ';
+    const detalle = control.rebajas.map((e) => describirRebaja(e, control.config)).join('; ');
+    throw new ConflictException({
+      codigo: CODIGO_REQUIERE_AUTORIZACION,
+      message: `${antes}Esta rebaja necesita la autorización de un administrador: ${detalle}.`,
+      motivo: resultado.motivo,
+      tope_pct: control.config.tope_pct,
+      lineas: this.rebajasVisibles(control),
+    });
+  }
+
+  /**
+   * Bitácora de la venta ya guardada: una fila por línea y motivo (sobre el tope / bajo el costo) con el
+   * vendedor, el producto, la referencia y lo cobrado, y `venta.autorizada` si pasó con permiso. Aquí sí
+   * va el costo: la bitácora solo la lee administración.
+   */
+  private eventosDeRebaja(
+    control: ControlDeVenta,
+    permiso: { id_autorizador: number } | null,
+    idVenta: number,
+    usuario: UsuarioToken | undefined,
+    idAlmacen: number | null,
+  ): EventoBitacora[] {
+    const base = {
+      id_usuario: usuario?.id_usuario ?? null,
+      rol: usuario?.rol ?? null,
+      id_autorizador: permiso?.id_autorizador ?? null,
+      id_almacen: idAlmacen,
+      entidad: 'venta',
+      id_entidad: idVenta,
+    };
+    const lineaDe = (e: EvaluacionRebaja) => ({
+      id_producto: e.id_producto,
+      descripcion: e.descripcion,
+      cantidad: e.cantidad,
+      precio_referencia: e.precio_referencia,
+      precio_cobrado: e.precio_final,
+      rebaja_pct: e.rebaja_pct,
+    });
+    const eventos: EventoBitacora[] = [];
+    for (const e of control.rebajas) {
+      if (e.sobre_tope) {
+        eventos.push({
+          ...base,
+          accion: ACCIONES_BITACORA.VENTA_REBAJA_SOBRE_TOPE,
+          despues: { ...lineaDe(e), tope_pct: control.config.tope_pct, modo: control.config.modo },
+        });
+      }
+      if (e.bajo_costo) {
+        eventos.push({
+          ...base,
+          accion: ACCIONES_BITACORA.VENTA_BAJO_COSTO,
+          despues: { ...lineaDe(e), costo_unitario: e.costo_unitario, modo: control.config.modo },
+        });
+      }
+    }
+    if (permiso) {
+      eventos.push({
+        ...base,
+        accion: ACCIONES_BITACORA.VENTA_AUTORIZADA,
+        despues: {
+          id_solicitante: usuario?.id_usuario ?? null,
+          id_autorizador: permiso.id_autorizador,
+          lineas: control.rebajas.map((e) => ({ ...lineaDe(e), sobre_tope: e.sobre_tope, bajo_costo: e.bajo_costo })),
+        },
+      });
+    }
+    return eventos;
   }
 
   /**
@@ -453,7 +806,7 @@ export class VentaBussnies {
     if (!this.notasCredito) {
       throw new ServiceUnavailableException('La anulación de ventas no está disponible en este momento. Intente de nuevo en unos minutos.');
     }
-    return this.notasCredito.anularVenta(idVenta, dto, usuario?.id_usuario ?? null);
+    return this.notasCredito.anularVenta(idVenta, dto, usuario?.id_usuario ?? null, usuario?.rol ?? null);
   }
 
   // ── Interno ──────────────────────────────────────────────────
@@ -611,10 +964,11 @@ export class VentaBussnies {
   /**
    * Los precios se toman del producto en base de datos, no de lo que envía el
    * navegador. Solo se acepta un precio distinto si viene explícito, para
-   * permitir un ajuste manual en el mostrador.
+   * permitir un ajuste manual en el mostrador. Devuelve también los productos
+   * leídos: el control de rebajas (Fase 6.4) mide contra sus datos de la base.
    */
-  private async armarLineas(dto: CrearVentaRequest) {
-    const ids = [...new Set(dto.items.map((i) => Number(i.id_producto)).filter(Boolean))];
+  private async lineasConPrecio(pedidos: ItemVentaRequest[]) {
+    const ids = [...new Set(pedidos.map((i) => Number(i.id_producto)).filter(Boolean))];
     const productos = await this.repo.cargarProductos(ids);
 
     const faltantes = ids.filter((id) => !productos.has(id));
@@ -622,7 +976,7 @@ export class VentaBussnies {
       throw new BadRequestException(`No se encontraron los productos: ${faltantes.join(', ')}`);
     }
 
-    const items = dto.items.map((item: ItemVentaRequest) => {
+    const items = pedidos.map((item: ItemVentaRequest) => {
       const producto = productos.get(Number(item.id_producto))!;
       const precioLista = Number(item.precio_unitario ?? producto.precio_venta ?? 0);
       const descuentoUnitario = Number(item.descuento ?? producto.descuento ?? 0);
@@ -650,11 +1004,22 @@ export class VentaBussnies {
         descuento_total_linea: precio.descuento_total_linea,
         precio_unitario_final: precio.precio_unitario_final,
         id_regla_mayorista: precio.id_regla_mayorista,
-        tipo_de_igv: item.tipo_de_igv,
+        // 6.6: la afectación la fija el servidor (gravado). El navegador no la decide: con otro valor un
+        // cliente manipulado registraba una venta sin IGV. La afectación por producto llega con la Fase 10.
+        tipo_de_igv: TIPO_IGV_GRAVADO,
         stock_disponible: producto.stock_disponible,
         codigo_sunat: producto.codigo_sunat ?? null,
+        /** Interno (Fase 6.1): no viaja al comprobante ni a la respuesta (aSolicitudComprobante copia campo a campo). */
+        costo_unitario: producto.precio_compra ?? null,
       };
     });
+
+    return { items, productos };
+  }
+
+  /** Líneas con precio, IGV y recargo por tarjeta de la venta del mostrador. */
+  private async armarLineas(dto: CrearVentaRequest) {
+    const { items, productos } = await this.lineasConPrecio(dto.items);
 
     const porcentajeIgv = await this.config.obtenerNumero(
       'tienda_igv_porcentaje',
@@ -687,7 +1052,7 @@ export class VentaBussnies {
         )
       : resumenProductos;
 
-    return { items, itemsRecargo, resumen, recargo, totalSinRecargo: resumenProductos.total };
+    return { items, itemsRecargo, resumen, recargo, totalSinRecargo: resumenProductos.total, productos };
   }
 
   /** % vigente del recargo por tarjeta (0 = desactivado); lo lee el POS para el cálculo en vivo. */
@@ -866,6 +1231,7 @@ export class VentaBussnies {
       id_cliente?: number | null;
       id_empresa?: number | null;
     } | undefined;
+    let moraOmitida: (MoraCredito & { dias_gracia: number }) | undefined;
 
     if (montoCredito > 0) {
       this.credito.assertPuedeDarCredito(usuario);
@@ -892,6 +1258,21 @@ export class VentaBussnies {
           ),
         );
       }
+      // Fase 9.4 (apagado por defecto): deuda vencida hace más de N días → no hay crédito nuevo, salvo admin.
+      const mora = await this.moraQueBloquea(receptor);
+      if (mora) {
+        if (normalizarRol(usuario?.rol) !== 'admin') {
+          throw new ConflictException({
+            ...cuerpoError(
+              CodigoError.CREDITO_BLOQUEADO_POR_MORA,
+              `No se puede vender a crédito: ${linea.denominacion || 'este cliente'} debe S/ ${mora.deuda_vencida.toFixed(2)} vencidos desde el ${fechaLegible(mora.vencida_desde)} (${mora.dias_atraso} días de atraso; se permiten ${mora.dias_gracia}). Cobre la deuda en Cuentas por cobrar o pida a un administrador que registre la venta.`,
+            ),
+            ...mora,
+          });
+        }
+        moraOmitida = mora;
+      }
+
       if (montoCredito > linea.disponible + 0.05) {
         throw new BadRequestException(
           cuerpoError(
@@ -1027,7 +1408,31 @@ export class VentaBussnies {
         referencia_externa: p.referencia_externa,
       })),
       credito,
+      moraOmitida,
     };
+  }
+
+  /**
+   * Fase 9.4: con `credito_bloqueo_mora_dias` = N > 0, la deuda del cliente o la empresa vencida hace más de
+   * N días. Con N = 0 (por defecto) ni siquiera consulta. Un fallo al leer la configuración o la deuda NO
+   * frena la venta (se avisa en el log): el bloqueo nunca debe dejar la caja parada por un error.
+   */
+  private async moraQueBloquea(
+    receptor: { id_cliente?: number; id_empresa?: number },
+  ): Promise<(MoraCredito & { dias_gracia: number }) | null> {
+    if (!this.controlCaja) return null;
+    const dias = await this.controlCaja.diasBloqueoMora();
+    if (!(dias > 0)) return null;
+    try {
+      const mora = await this.creditoRepo.moraVencida(
+        receptor.id_empresa ? { id_empresa: receptor.id_empresa } : { id_cliente: receptor.id_cliente },
+        dias,
+      );
+      return mora ? { ...mora, dias_gracia: dias } : null;
+    } catch (error) {
+      this.logger.warn(`No se pudo revisar la mora del cliente (la venta sigue): ${(error as Error)?.message ?? error}`);
+      return null;
+    }
   }
 
   private async nombreMedioPago(pagos: { id_metodo?: number }[]) {

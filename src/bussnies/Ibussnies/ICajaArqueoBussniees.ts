@@ -4,7 +4,6 @@ import type { MovimientoCajaRequest } from '../../models/model/caja.request';
 import type { RegistrarArqueoRequest } from '../../models/model/caja-arqueo.request';
 import type {
   ArqueoDetalleResponse,
-  ArqueoEsperadoResponse,
   ArqueoResumenResponse,
   MovimientoCajaResponse,
   MovimientosTurnoResponse,
@@ -12,6 +11,7 @@ import type {
 } from '../../models/model/caja-arqueo.response';
 import type { PreparacionCierre } from '../../repository/Repository/caja-sesion.repository';
 import type { FormatoArqueoPdf } from '../../util/documentos/arqueo-pdf';
+import type { ArqueoEsperadoConMarca } from '../../caja/arqueo/arqueo-ciego';
 
 /** Lo que el arqueo aporta al cierre del turno (POST /caja/cerrar). */
 export interface ResultadoPreparacionCierre {
@@ -25,7 +25,8 @@ export interface ResultadoPreparacionCierre {
 }
 
 export interface ICajaArqueoBussniees {
-  esperado(usuario: UsuarioToken, idApertura?: number): Promise<ArqueoEsperadoResponse>;
+  /** Con el arqueo ciego (Fase 7.3) y un usuario no admin, los montos del esperado van en null. */
+  esperado(usuario: UsuarioToken, idApertura?: number): Promise<ArqueoEsperadoConMarca>;
   registrar(usuario: UsuarioToken, dto: RegistrarArqueoRequest): Promise<ArqueoDetalleResponse>;
   listar(
     usuario: UsuarioToken,
@@ -39,6 +40,6 @@ export interface ICajaArqueoBussniees {
   prepararCierre(
     manager: EntityManager,
     idApertura: number,
-    opciones: { idArqueo?: number; montoConteoCuerpo?: number | null },
+    opciones: { idArqueo?: number; montoConteoCuerpo?: number | null; ocultarEsperado?: boolean },
   ): Promise<ResultadoPreparacionCierre>;
 }

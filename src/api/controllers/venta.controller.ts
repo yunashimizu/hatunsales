@@ -3,6 +3,7 @@ import { VentaBussnies } from '../../bussnies/Bussnies/venta.bussnies';
 import { VentaDocumentosBussnies } from '../../bussnies/Bussnies/venta-documentos.bussnies';
 import { CrearVentaRequest, EmitirComprobanteVentaRequest } from '../../models/model/venta/venta.request';
 import { AnularVentaRequest } from '../../models/model/venta/anular-venta.request';
+import { AutorizarVentaRequest } from '../../models/model/venta/autorizar-venta.request';
 import { ListarVentasRequest, ListarVentasSinComprobanteRequest } from '../../models/model/venta/listar-ventas.request';
 import { JwtGuard } from '../../guards/jwt.guard';
 import { RolesGuard } from '../../guards/roles.guard';
@@ -84,8 +85,8 @@ export class VentaController {
 
   /** Almacenes + default para el selector de sede/caja del POS. */
   @Get('contexto-pos')
-  contextoPos() {
-    return this.service.contextoPos();
+  contextoPos(@UsuarioActual() usuario: UsuarioToken) {
+    return this.service.contextoPos(usuario);
   }
 
   @Get('metodos-pago')
@@ -97,6 +98,18 @@ export class VentaController {
   @Post('preview')
   preview(@Body() body: CrearVentaRequest, @UsuarioActual() usuario: UsuarioToken) {
     return this.service.previsualizar(body, usuario);
+  }
+
+  /**
+   * Fase 6.4: un administrador activo (correo y contraseña) autoriza las líneas de esta venta para quien
+   * la pide. Devuelve un permiso de 5 minutos que NO es una sesión; va en `permiso_autorizacion` de
+   * `POST venta`. Credenciales malas → 422 `AUTORIZACION_RECHAZADA` (no 401). Cubeta propia de límite
+   * de peticiones (politica-limites.ts). Se declara antes de las rutas con `:id`.
+   */
+  @Post('autorizacion')
+  @HttpCode(200)
+  autorizar(@Body() body: AutorizarVentaRequest, @UsuarioActual() usuario: UsuarioToken) {
+    return this.service.autorizar(body, usuario);
   }
 
   @Post()

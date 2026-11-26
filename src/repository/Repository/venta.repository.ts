@@ -21,6 +21,7 @@ import {
   sqlJoinEmpresa,
   sqlPrincipalVigente,
 } from './venta-documentos.repository';
+import { columnasRastro, ColumnasRastro, extrasLote, hayColumnasRastro, RastroMovimiento, sufijo } from '../../stock/rastro-movimiento';
 
 export interface LineaVentaPersistida {
   id_producto: number;
@@ -36,6 +37,17 @@ export interface LineaVentaPersistida {
   descuento_total_linea: number;
   precio_unitario_final: number;
   id_regla_mayorista: number | null;
+  /**
+   * Costo unitario del producto al vender (productos.precio_compra de ese momento). null = sin costo
+   * registrado: «sin costo» no es «costo cero». Solo se guarda con la capacidad `ventaCosto` (fase19).
+   */
+  costo_unitario?: number | null;
+  /**
+   * Precio de catálogo neto que calculó el servidor para esa cantidad (fase19, capacidad `ventaReferencia`).
+   * null = sin referencia (producto sin precio en la base). La rebaja en soles de la línea es
+   * (precio_referencia − precio_unitario_final) × cantidad cuando es positiva.
+   */
+  precio_referencia?: number | null;
 }
 
 export interface DatosVenta {
@@ -176,6 +188,26 @@ function milesimas(valor: unknown): number {
 
 function desdeMilesimas(valor: number): number {
   return valor / 1000;
+}
+
+/** Precio de referencia utilizable: mayor que 0, con 2 decimales; lo demás es «sin referencia» (null). */
+export function referenciaPositiva(valor: unknown): number | null {
+  if (valor === null || valor === undefined || valor === '') return null;
+  const n = Number(valor);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+}
+
+/** Costo de compra utilizable: un número mayor que 0; 0, vacío o inválido es «sin costo» (null). */
+export function costoPositivo(valor: unknown): number | null {
+  if (valor === null || valor === undefined || valor === '') return null;
+  const numero = Number(valor);
+  return Number.isFinite(numero) && numero > 0 ? numero : null;
+}
+
+/** Almacén de la venta cuando el POS no eligió uno: el único del que salió el stock, o null. */
+function almacenUnico(salidas: { id_almacen: number }[]): number | null {
+  const almacenes = new Set(salidas.map((s) => s.id_almacen));
+  return almacenes.size === 1 ? [...almacenes][0] : null;
 }
 
 /** Suma por (producto, almacén) y ordena igual que se bloquea el inventario (id_producto, id_almacen). */
@@ -503,7 +535,8 @@ export class VentaRepository {
                WHERE r.id_producto = p.id_producto AND r.activo = TRUE), '[]'::json) AS reglas_mayoristas,
               COALESCE(inv.stock, 0)         AS stock_disponible,
               ''                             AS imagen_url,
-              NULLIF(TRIM(to_jsonb(p) ->> 'codigo_sunat'), '') AS codigo_sunat
+              NULLIF(TRIM(to_jsonb(p) ->> 'codigo_sunat'), '') AS codigo_sunat,
+              p.precio_compra                AS precio_compra
          FROM productos p
          LEFT JOIN LATERAL (
                 SELECT SUM(i.stock) AS stock FROM inventario i WHERE i.id_producto = p.id_producto
@@ -515,7 +548,11 @@ export class VentaRepository {
     return new Map(
       filas.map((f: any) => [
         Number(f.id_producto),
-        { ...this.mapProducto(f), codigo_sunat: f.codigo_sunat ? String(f.codigo_sunat) : null },
+        {
+          ...this.mapProducto(f),
+          codigo_sunat: f.codigo_sunat ? String(f.codigo_sunat) : null,
+          precio_compra: costoPositivo(f.precio_compra),
+        },
       ]),
     );
   }
@@ -681,6 +718,14 @@ export class VentaRepository {
       ? datos.clave_idempotencia
       : undefined;
     const conStockSalida = await this.esquema.tiene('ventaStockSalida');
+    // fase19: autor y costo solo si existen las columnas (antes del script la venta se guarda como siempre).
+    const conAutor = await this.esquema.tiene('ventaAutor');
+    const conCosto = await this.esquema.tiene('ventaCosto');
+    const conReferencia = await this.esquema.tiene('ventaReferencia');
+    // fase21 (8.1): con las columnas de rastro el movimiento de la venta se escribe DESPUÉS de la cabecera
+    // (necesita su id). El descuento de stock es el mismo; sin fase21 todo queda exactamente como antes.
+    const columnasMovimiento = await columnasRastro(this.esquema);
+    const movimientoConVenta = hayColumnasRastro(columnasMovimiento);
 
     try {
       // Un interbloqueo o fallo de serialización revierte todo: la venta entera se repite sola.
@@ -706,7 +751,7 @@ export class VentaRepository {
 
         let salidasStock: SalidaStock[] = [];
         if (opciones.descontarStock) {
-          salidasStock = await this.descontarStock(manager, lineas, opciones.idAlmacenPreferido);
+          salidasStock = await this.descontarStock(manager, lineas, opciones.idAlmacenPreferido, !movimientoConVenta);
         }
 
         // Antes del INSERT de la venta: su llave foránea toma KEY SHARE del cliente o empresa y,
@@ -722,7 +767,18 @@ export class VentaRepository {
           idAlmacen: opciones.idAlmacenPreferido,
         });
 
-        const idVenta = await this.insertarCabecera(manager, esquema, datos, apertura?.id_caja ?? null, clave);
+        const autor = conAutor
+          ? { id_usuario: datos.id_usuario ?? null, id_almacen: opciones.idAlmacenPreferido ?? almacenUnico(salidasStock) }
+          : null;
+        const idVenta = await this.insertarCabecera(manager, esquema, datos, apertura?.id_caja ?? null, clave, autor);
+
+        if (movimientoConVenta && salidasStock.length) {
+          await this.registrarMovimientos(manager, salidasStock, 'salida', 'Venta en mostrador', {
+            id_usuario: datos.id_usuario ?? null,
+            tipo_documento: 'venta',
+            id_documento: idVenta,
+          }, columnasMovimiento);
+        }
 
         if (salidasStock.length && conStockSalida) {
           await manager.query(
@@ -739,7 +795,7 @@ export class VentaRepository {
           );
         }
 
-        await this.insertarDetalle(manager, idVenta, lineas);
+        await this.insertarDetalle(manager, idVenta, lineas, conCosto, conReferencia);
         await this.insertarPagos(manager, esquema, idVenta, pagos);
 
         if (datos.credito && Number(datos.credito.monto) > 0) {
@@ -792,6 +848,7 @@ export class VentaRepository {
     datos: DatosVenta,
     idCaja: number | null,
     clave: string | undefined,
+    autor: { id_usuario: number | null; id_almacen: number | null } | null = null,
   ): Promise<number> {
     const columnas: string[] = ['id_cliente', 'id_caja', 'subtotal', 'igv', 'total', 'origen'];
     const valores: unknown[] = [
@@ -814,6 +871,10 @@ export class VentaRepository {
       columnas.push('clave_idempotencia');
       valores.push(clave);
     }
+    if (autor) {
+      columnas.push('id_usuario', 'id_almacen');
+      valores.push(autor.id_usuario, autor.id_almacen);
+    }
     const marcadores = valores.map((_, i) => `$${i + 1}`);
     // clock_timestamp() y no NOW(): la hora real, tomada después de los candados (la de la caja
     // incluida). Así la venta cae dentro de [apertura, cierre) del turno al que se cuelga.
@@ -826,21 +887,40 @@ export class VentaRepository {
     return Number(insertadas[0]?.id_venta);
   }
 
-  /** Un solo INSERT para todas las líneas (antes, uno por línea). */
-  private async insertarDetalle(manager: Consultor, idVenta: number, lineas: LineaVentaPersistida[]): Promise<void> {
+  /**
+   * Un solo INSERT para todas las líneas (antes, uno por línea). Con `conCosto` (fase19) guarda además el
+   * costo unitario de cada línea (NULL si el producto no tenía costo) y con `conReferencia` el precio de
+   * catálogo neto (NULL si no hay referencia). Sin esas capacidades, el INSERT es el de siempre.
+   */
+  private async insertarDetalle(
+    manager: Consultor,
+    idVenta: number,
+    lineas: LineaVentaPersistida[],
+    conCosto = false,
+    conReferencia = false,
+  ): Promise<void> {
     if (!lineas.length) return;
+    const extras: { columna: string; alias: string; valores: (number | null)[] }[] = [];
+    if (conCosto) extras.push({ columna: 'costo_unitario', alias: 'costo', valores: lineas.map((l) => costoPositivo(l.costo_unitario)) });
+    if (conReferencia) {
+      extras.push({ columna: 'precio_referencia', alias: 'referencia', valores: lineas.map((l) => referenciaPositiva(l.precio_referencia)) });
+    }
+    const columnas = extras.map((e) => `, ${e.columna}`).join('');
+    const valores = extras.map((e) => `, d.${e.alias}`).join('');
+    const arreglos = extras.map((_, i) => `, $${13 + i}::numeric[]`).join('');
+    const alias = extras.map((e) => `, ${e.alias}`).join('');
     await manager.query(
       `INSERT INTO detalle_venta
          (id_venta, id_producto, cantidad, precio, precio_lista_unitario,
           descuento_unitario_aplicado, descuento_total_linea, precio_unitario_final,
-          subtotal, igv, total, id_regla_mayorista)
+          subtotal, igv, total, id_regla_mayorista${columnas})
        SELECT $1, d.id_producto, d.cantidad, d.precio, d.precio_lista, d.descuento_unitario,
-              d.descuento_linea, d.precio_final, d.subtotal, d.igv, d.total, d.id_regla
+              d.descuento_linea, d.precio_final, d.subtotal, d.igv, d.total, d.id_regla${valores}
          FROM unnest(
                 $2::int[], $3::numeric[], $4::numeric[], $5::numeric[], $6::numeric[],
-                $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::bigint[]
+                $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::bigint[]${arreglos}
               ) WITH ORDINALITY AS d(id_producto, cantidad, precio, precio_lista, descuento_unitario,
-                                     descuento_linea, precio_final, subtotal, igv, total, id_regla, n)
+                                     descuento_linea, precio_final, subtotal, igv, total, id_regla${alias}, n)
         ORDER BY d.n`,
       [
         idVenta,
@@ -855,6 +935,7 @@ export class VentaRepository {
         lineas.map((l) => l.igv),
         lineas.map((l) => l.total),
         lineas.map((l) => l.id_regla_mayorista ?? null),
+        ...extras.map((e) => e.valores),
       ],
     );
   }
@@ -1026,6 +1107,8 @@ export class VentaRepository {
     manager: Consultor,
     lineas: LineaVentaPersistida[],
     idAlmacenPreferido?: number,
+    /** false: el movimiento lo escribe quien llama, ya con el id de la venta (fase21). */
+    registrarMovimiento = true,
   ): Promise<SalidaStock[]> {
     if (!lineas.length) return [];
     const exclusivo =
@@ -1068,7 +1151,7 @@ export class VentaRepository {
         [plan.descuentos.map((d) => d.id_inventario), plan.descuentos.map((d) => d.cantidad)],
       );
     }
-    await this.registrarMovimientos(manager, plan.salidas, 'salida', 'Venta en mostrador');
+    if (registrarMovimiento) await this.registrarMovimientos(manager, plan.salidas, 'salida', 'Venta en mostrador');
     return plan.salidas;
   }
 
@@ -1081,21 +1164,25 @@ export class VentaRepository {
     items: { id_producto: number; id_almacen: number; cantidad: number }[],
     tipo: 'entrada' | 'salida',
     descripcion: string,
+    /** Fase 8.1: quién y por qué documento (solo con las columnas de fase21). */
+    rastro?: RastroMovimiento,
+    columnas?: ColumnasRastro,
   ): Promise<void> {
     if (!items.length) return;
     const productos = items.map((i) => i.id_producto);
     const cantidades = items.map((i) => i.cantidad);
     // Fragmentos fijos del código (no vienen del usuario): el tipo y a qué columna va la sucursal.
     const sql = SQL_MOVIMIENTO[tipo];
+    const extras = extrasLote(columnas ?? (await columnasRastro(this.esquema)), rastro, 5, 'm.id_almacen');
 
     await manager.query(
       `INSERT INTO movimientos_inventario
-         (id_producto, tipo, cantidad, id_sucursal_origen, id_sucursal_destino, descripcion, fecha)
-       SELECT m.id_producto, ${sql.tipo}, m.cantidad, ${sql.sucursales}, $4, NOW()
+         (id_producto, tipo, cantidad, id_sucursal_origen, id_sucursal_destino, descripcion, fecha${sufijo(extras.columnas)})
+       SELECT m.id_producto, ${sql.tipo}, m.cantidad, ${sql.sucursales}, $4, NOW()${sufijo(extras.expresiones)}
          FROM unnest($1::int[], $2::int[], $3::numeric[]) WITH ORDINALITY AS m(id_producto, id_almacen, cantidad, n)
          LEFT JOIN almacenes a ON a.id_almacen = m.id_almacen
         ORDER BY m.n`,
-      [productos, items.map((i) => i.id_almacen), cantidades, descripcion],
+      [productos, items.map((i) => i.id_almacen), cantidades, descripcion, ...extras.valores],
     );
 
     await manager.query(
@@ -1375,7 +1462,7 @@ export class VentaRepository {
    */
   async anularVentaCompleta(
     idVenta: number,
-    opciones: { consultor?: Consultor; descripcion?: string } = {},
+    opciones: { consultor?: Consultor; descripcion?: string; rastro?: RastroMovimiento } = {},
   ): Promise<{
     stock_devuelto: boolean;
     cxc_cerradas: number;
@@ -1449,7 +1536,13 @@ export class VentaRepository {
           }
         }
       }
-      await this.registrarMovimientos(manager, devueltas, 'entrada', opciones.descripcion ?? 'Devolución por venta anulada');
+      await this.registrarMovimientos(
+        manager,
+        devueltas,
+        'entrada',
+        opciones.descripcion ?? 'Devolución por venta anulada',
+        opciones.rastro ?? { tipo_documento: 'anulacion', id_documento: idVenta },
+      );
 
       const cxc = conCredito
         ? filasDe(await manager.query(
@@ -1520,7 +1613,7 @@ export class VentaRepository {
     consultor: Consultor,
     idVenta: number,
     acreditado: { id_producto: number; cantidad: number }[],
-    opciones: { reingresar: boolean; descripcion: string },
+    opciones: { reingresar: boolean; descripcion: string; rastro?: RastroMovimiento },
   ): Promise<{ id_producto: number; id_almacen: number; cantidad: number }[]> {
     const porProducto = new Map<number, number>();
     for (const linea of acreditado) {
@@ -1568,7 +1661,7 @@ export class VentaRepository {
     for (const r of reingresadas) {
       await this.devolverAAlmacen(consultor, r.id_producto, r.id_almacen, r.cantidad);
     }
-    await this.registrarMovimientos(consultor, reingresadas, 'entrada', opciones.descripcion);
+    await this.registrarMovimientos(consultor, reingresadas, 'entrada', opciones.descripcion, opciones.rastro);
     return reingresadas;
   }
 

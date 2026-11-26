@@ -68,6 +68,8 @@ export type FilaTurno = {
   /** Efectivo contado al cerrar; null si el turno sigue abierto o el cierre no lo guardó. */
   monto_conteo: Dinero | null;
   cerrada: boolean;
+  /** Fase 7.4: lo cerró la tarea de turnos olvidados (false sin sql/fase20). */
+  cierre_automatico?: boolean;
 };
 
 export type ResumenTurno = {
@@ -86,6 +88,14 @@ export interface PreparacionCierre {
   /** Se ejecuta tras insertar el cierre (p. ej. enlazar el arqueo). */
   alCerrar?: (manager: EntityManager, idCierre: number) => Promise<void>;
 }
+
+/** Ventas de mostrador de un día que quedaron sin turno (id_caja nulo), por local (Fase 7.6). */
+export type FilaVentasSinTurno = {
+  id_sucursal: number | null;
+  sucursal_nombre: string | null;
+  cantidad: number;
+  monto: Dinero;
+};
 
 export interface ResultadoCierre {
   id_apertura: number;
@@ -516,12 +526,13 @@ export class CajaSesionRepository {
     const cierreFecha = m.cierre.colFecha ?? 'NULL::timestamp';
     const cierreMonto = m.cierre.colMonto ? `${m.cierre.colMonto}::text` : 'NULL::text';
     const ordenCierre = m.cierre.colFecha ? `${m.cierre.colFecha} ASC NULLS LAST` : 'id_apertura';
+    const cierreAutomatico = m.snapshot.tieneColumna('cierres_caja', 'automatico') ? 'COALESCE(automatico, FALSE)' : 'FALSE';
     const from = `FROM aperturas_caja a
          JOIN cajas c ON c.id_caja = a.id_caja
          ${m.caja.tieneSucursal ? 'LEFT JOIN sucursales s ON s.id_sucursal = c.id_sucursal' : ''}
          LEFT JOIN usuarios u ON u.id_usuario = a.id_usuario
          LEFT JOIN LATERAL (
-                SELECT ${cierreFecha} AS fecha, ${cierreMonto} AS monto
+                SELECT ${cierreFecha} AS fecha, ${cierreMonto} AS monto, ${cierreAutomatico} AS automatico
                   FROM cierres_caja
                  WHERE id_apertura = a.id_apertura
                  ORDER BY ${ordenCierre}
@@ -566,6 +577,7 @@ export class CajaSesionRepository {
                 to_char(ci.fecha, ${ISO_UTC}) AS cerrada_en,
                 ${selMonto} AS monto_inicial,
                 ci.monto AS monto_conteo,
+                COALESCE(ci.automatico, FALSE) AS cierre_automatico,
                 EXISTS (SELECT 1 FROM cierres_caja x WHERE x.id_apertura = a.id_apertura) AS cerrada
            ${from}
            ${where}
@@ -597,6 +609,7 @@ export class CajaSesionRepository {
       monto_inicial: f.monto_inicial != null && f.monto_inicial !== '' ? Dinero.desdeBd(f.monto_inicial) : null,
       monto_conteo: f.monto_conteo != null && f.monto_conteo !== '' ? Dinero.desdeBd(f.monto_conteo) : null,
       cerrada: f.cerrada === true || f.cerrada === 't' || f.cerrada === 1,
+      cierre_automatico: f.cierre_automatico === true || f.cierre_automatico === 't',
     }));
     return { filas: mapeadas, total: conteo ? Number(conteo[0]?.total ?? 0) : mapeadas.length };
   }
@@ -705,9 +718,12 @@ export class CajaSesionRepository {
   async cerrar(
     params: {
       idApertura: number;
-      idUsuario: number;
+      /** null = lo cerró el sistema (cierre automático, Fase 7.4). */
+      idUsuario: number | null;
       montoConteo?: number | null;
       observacion?: string | null;
+      /** Fase 7.4: marca cierres_caja.automatico = TRUE si la columna existe (sql/fase20). */
+      automatico?: boolean;
     },
     preparar?: (manager: EntityManager) => Promise<PreparacionCierre>,
   ): Promise<ResultadoCierre> {
@@ -730,9 +746,13 @@ export class CajaSesionRepository {
 
       const cols = ['id_apertura'];
       const vals: unknown[] = [params.idApertura];
-      if (m.cierre.tieneIdUsuario) {
+      if (m.cierre.tieneIdUsuario && params.idUsuario != null) {
         cols.push('id_usuario');
         vals.push(params.idUsuario);
+      }
+      if (params.automatico && m.snapshot.tieneColumna('cierres_caja', 'automatico')) {
+        cols.push('automatico');
+        vals.push(true);
       }
       if (m.cierre.colMonto && conteoValido) {
         cols.push(m.cierre.colMonto);
@@ -778,6 +798,65 @@ export class CajaSesionRepository {
         monto_conteo: conteoValido ? Dinero.desdeNumeroRedondeado(Number(montoConteo)).aNumero() : null,
       };
     });
+  }
+
+  /**
+   * Fase 7.4: turnos abiertos hace más de `horas` (los más antiguos primero). Con varias réplicas solo una
+   * los busca en cada vuelta (pg_try_advisory_xact_lock); si otra la tiene, devuelve []. Cerrar dos veces el
+   * mismo turno tampoco es posible: `cerrar` relee bajo FOR UPDATE y responde CAJA_YA_CERRADA.
+   * La comparación usa la misma conversión que el INSERT de la apertura (clock_timestamp() → timestamp).
+   */
+  async turnosOlvidados(horas: number, limite: number): Promise<number[]> {
+    const m = await this.metaSesion();
+    if (!m.apertura.colFecha || !(horas > 0)) return [];
+    return this.dataSource.transaction(async (manager) => {
+      const candado = await manager.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS ok', ['caja:cierre-automatico']);
+      if (!(candado[0]?.ok === true || candado[0]?.ok === 't')) return [];
+      const filas = await manager.query(
+        `SELECT a.id_apertura
+           FROM aperturas_caja a
+          WHERE NOT EXISTS (SELECT 1 FROM cierres_caja ci WHERE ci.id_apertura = a.id_apertura)
+            AND a.${m.apertura.colFecha} < clock_timestamp()::timestamp - make_interval(hours => $1::int)
+          ORDER BY a.${m.apertura.colFecha} ASC, a.id_apertura ASC
+          LIMIT $2`,
+        [Math.trunc(horas), Math.max(1, Math.trunc(limite))],
+      );
+      return (filas as any[]).map((f) => Number(f.id_apertura));
+    });
+  }
+
+  /**
+   * Fase 7.6 (solo lectura): ventas de mostrador NO anuladas del día `ymd` (Lima) sin caja (`id_caja` nulo),
+   * por local. El local sale del almacén de la venta (ventas.id_almacen, sql/fase19); sin esa columna, o sin
+   * almacén, van como «sin local» (id_sucursal null). No cambia ninguna regla de la caja blanda.
+   */
+  async ventasSinTurno(ymd: string): Promise<FilaVentasSinTurno[]> {
+    const m = await this.metaSesion();
+    const conEstado = m.snapshot.tieneColumna('ventas', 'estado');
+    const conOrigen = m.snapshot.tieneColumna('ventas', 'origen');
+    const conAlmacen = m.snapshot.tieneColumna('ventas', 'id_almacen');
+    const filas = await this.dataSource.query(
+      `SELECT ${conAlmacen ? 'al.id_sucursal' : 'NULL::int'} AS id_sucursal,
+              ${conAlmacen ? 's.nombre' : 'NULL::text'} AS sucursal_nombre,
+              COUNT(*)::int AS cantidad,
+              COALESCE(SUM(v.total), 0)::text AS monto
+         FROM ventas v
+         ${conAlmacen ? 'LEFT JOIN almacenes al ON al.id_almacen = v.id_almacen LEFT JOIN sucursales s ON s.id_sucursal = al.id_sucursal' : ''}
+        WHERE v.id_caja IS NULL
+          AND v.fecha >= ${sqlInicioDiaLima('$1')}
+          AND v.fecha < ${sqlFinExclusivoDiaLima('$1')}
+          ${conEstado ? "AND COALESCE(v.estado, 'activa') <> 'anulada'" : ''}
+          ${conOrigen ? "AND COALESCE(v.origen, 'mostrador') = 'mostrador'" : ''}
+        GROUP BY 1, 2
+        ORDER BY 3 DESC, 2 ASC NULLS LAST`,
+      [ymd],
+    );
+    return (filas as any[]).map((f) => ({
+      id_sucursal: f.id_sucursal != null ? Number(f.id_sucursal) : null,
+      sucursal_nombre: f.sucursal_nombre != null ? String(f.sucursal_nombre) : null,
+      cantidad: Number(f.cantidad ?? 0),
+      monto: Dinero.desdeBd(f.monto),
+    }));
   }
 
   /**

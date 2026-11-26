@@ -377,3 +377,182 @@ describe('montoInicialDeApertura', () => {
     expect(montoInicialDeApertura({ monto_inicial: '25.50' as any }).aNumero()).toBe(25.5);
   });
 });
+
+describe('CajaSesionBussnies.cerrar · bitácora del cierre ajeno (Fase 6.3)', () => {
+  function armarCierre(idUsuarioTurno: number | null) {
+    const apertura = {
+      id_apertura: 55, id_caja: 3, caja_nombre: 'Caja 1', id_sucursal: 1, sucursal_nombre: 'Principal',
+      id_usuario: idUsuarioTurno, fecha: '2026-11-25T13:00:00.000Z', monto_inicial: 0,
+    };
+    const repo = {
+      obtenerAperturaPorId: jest.fn().mockResolvedValue(apertura),
+      resumenTurno: jest.fn().mockResolvedValue({ ventas: 0 }),
+      cerrar: jest.fn(async (_p: unknown, preparar: (m: unknown) => Promise<unknown>) => {
+        await preparar({});
+        return { id_cierre: 90 };
+      }),
+    };
+    const arqueos = {
+      prepararCierre: jest.fn().mockResolvedValue({ preparacion: {}, efectivo_esperado: 120.5, arqueo: { id_arqueo: 12 } }),
+    };
+    const bitacora = dobleBitacora();
+    const servicio = new CajaSesionBussnies(repo as any, arqueos as any, bitacora as any);
+    return { servicio, repo, bitacora };
+  }
+
+  it('un admin que cierra el turno de otro deja caja.cierre_ajeno con el dueño del turno, después del cierre', async () => {
+    const { servicio, repo, bitacora } = armarCierre(7);
+
+    const r = await servicio.cerrar({ id_apertura: 55, monto_conteo: 120, observacion: 'Rosa se fue temprano' } as any, admin);
+
+    expect(r).toMatchObject({ id_cierre: 90, efectivo_esperado: 120.5 });
+    expect(bitacora.registrar).toHaveBeenCalledWith({
+      accion: 'caja.cierre_ajeno',
+      id_usuario: 1,
+      rol: 'admin',
+      entidad: 'apertura_caja',
+      id_entidad: 55,
+      antes: { id_usuario_turno: 7, id_caja: 3, caja: 'Caja 1' },
+      despues: { monto_conteo: 120, efectivo_esperado: 120.5, id_arqueo: 12 },
+      motivo: 'Rosa se fue temprano',
+    });
+    expect(bitacora.registrar.mock.invocationCallOrder[0]).toBeGreaterThan(repo.cerrar.mock.invocationCallOrder[0]);
+  });
+
+  it('cerrar el propio turno, o uno sin dueño, no anota nada', async () => {
+    const propio = armarCierre(7);
+    await propio.servicio.cerrar({ id_apertura: 55 } as any, usuario);
+    expect(propio.bitacora.registrar).not.toHaveBeenCalled();
+
+    const sinDueno = armarCierre(null);
+    await sinDueno.servicio.cerrar({ id_apertura: 55 } as any, admin);
+    expect(sinDueno.bitacora.registrar).not.toHaveBeenCalled();
+  });
+});
+
+
+/** Doble de BitacoraService: `registrarCon` arma el evento (como el servicio real) y lo pasa a `registrar`, que es lo que miran las pruebas. */
+function dobleBitacora() {
+  const registrar = jest.fn(async (_evento: any) => undefined);
+  const registrarCon = jest.fn(async (fabrica: () => any) => {
+    const r = fabrica();
+    for (const e of Array.isArray(r) ? r : [r]) if (e) await registrar(e);
+  });
+  return { registrar, registrarCon };
+}
+
+describe('CajaSesionBussnies · arqueo ciego (Fase 7.3)', () => {
+  const resumen = { ventas: 4, total: 230, por_metodo: [{ metodo: 'EFECTIVO', total: 200, cantidad: 3 }, { metodo: 'Yape', total: 30, cantidad: 1 }] };
+  const apertura = {
+    id_apertura: 55, id_caja: 3, caja_nombre: 'Caja 1', id_sucursal: 1, sucursal_nombre: 'Principal',
+    id_usuario: 7, fecha: '2026-11-25T13:00:00.000Z', monto_inicial: 50,
+  };
+  function armarCiego(ciego: boolean, montoConteoCierre: number | null = null) {
+    const repo = {
+      modoCaja: jest.fn().mockResolvedValue('blando'),
+      sesionUsuario: jest.fn().mockResolvedValue(apertura),
+      obtenerAperturaPorId: jest.fn().mockResolvedValue(apertura),
+      resumenTurno: jest.fn().mockResolvedValue(resumen),
+      cerrar: jest.fn(async (_p: unknown, preparar: (m: unknown) => Promise<unknown>) => {
+        await preparar({});
+        return { id_apertura: 55, id_cierre: 90, cerrada: true, monto_conteo: montoConteoCierre };
+      }),
+    };
+    const arqueos = {
+      prepararCierre: jest.fn().mockResolvedValue({ preparacion: {}, efectivo_esperado: 250, arqueo: null }),
+    };
+    const control = { arqueoCiego: jest.fn().mockResolvedValue(ciego) };
+    const servicio = new CajaSesionBussnies(repo as any, arqueos as any, dobleBitacora() as any, control as any);
+    return { servicio, repo, arqueos };
+  }
+
+  it('apagado: sesión, resumen y cierre como antes (más la marca resumen_oculto: false)', async () => {
+    const { servicio } = armarCiego(false);
+    expect(await servicio.sesion(usuario)).toMatchObject({ resumen, resumen_oculto: false });
+    expect(await servicio.resumenTurno(usuario)).toMatchObject({ resumen, resumen_oculto: false });
+    expect(await servicio.cerrar({} as any, usuario)).toMatchObject({ efectivo_esperado: 250, resumen });
+  });
+
+  it('encendido, rol caja: sesión y resumen sin montos (el número de ventas sí)', async () => {
+    const { servicio } = armarCiego(true);
+    const s = await servicio.sesion(usuario);
+    expect(s.resumen_oculto).toBe(true);
+    expect(s.resumen).toEqual({ ventas: 4, total: null, por_metodo: [{ metodo: 'EFECTIVO', total: null, cantidad: 3 }, { metodo: 'Yape', total: null, cantidad: 1 }] });
+    expect((await servicio.resumenTurno(usuario)).resumen).toMatchObject({ total: null });
+  });
+
+  it('encendido, rol caja: cerrar SIN conteo no devuelve el esperado; CON conteo sí (ya contó)', async () => {
+    const sinConteo = armarCiego(true, null);
+    const r = await sinConteo.servicio.cerrar({} as any, usuario);
+    expect(r).not.toHaveProperty('efectivo_esperado');
+    expect(r).toMatchObject({ esperado_oculto: true, resumen: { total: null } });
+    expect(sinConteo.arqueos.prepararCierre).toHaveBeenCalledWith({}, 55, expect.objectContaining({ ocultarEsperado: true }));
+
+    const conConteo = await armarCiego(true, 245).servicio.cerrar({ monto_conteo: 245 } as any, usuario);
+    expect(conConteo).toMatchObject({ efectivo_esperado: 250, resumen });
+  });
+
+  it('encendido, admin: lo ve todo', async () => {
+    const { servicio, arqueos } = armarCiego(true);
+    expect(await servicio.sesion(admin)).toMatchObject({ resumen, resumen_oculto: false });
+    expect(await servicio.cerrar({ id_apertura: 55 } as any, admin)).toMatchObject({ efectivo_esperado: 250 });
+    expect(arqueos.prepararCierre).toHaveBeenCalledWith({}, 55, expect.objectContaining({ ocultarEsperado: false }));
+  });
+});
+
+describe('CajaSesionBussnies.cerrarAutomatico (Fase 7.4)', () => {
+  const apertura = {
+    id_apertura: 55, id_caja: 3, caja_nombre: 'Caja 1', id_sucursal: 1, sucursal_nombre: 'Principal',
+    id_usuario: 7, fecha: '2026-11-24T13:00:00.000Z', monto_inicial: 50,
+  };
+  function armarAuto(preparacion: Record<string, unknown> = {}, error?: Error) {
+    const llamadas: { params: any; prep: any }[] = [];
+    const repo = {
+      obtenerAperturaPorId: jest.fn().mockResolvedValue(apertura),
+      cerrar: jest.fn(async (params: any, preparar: (m: unknown) => Promise<unknown>) => {
+        if (error) throw error;
+        const prep = await preparar({});
+        llamadas.push({ params, prep });
+        return { id_apertura: 55, id_cierre: 91, cerrada: true, monto_conteo: (prep as any).montoConteo ?? null };
+      }),
+    };
+    const arqueos = {
+      prepararCierre: jest.fn().mockResolvedValue({ preparacion, efectivo_esperado: 310, arqueo: preparacion.montoConteo != null ? { id_arqueo: 12 } : null }),
+    };
+    const bitacora = dobleBitacora();
+    const servicio = new CajaSesionBussnies(repo as any, arqueos as any, bitacora as any);
+    return { servicio, repo, arqueos, bitacora, llamadas };
+  }
+
+  it('cierra sin conteo, sin usuario, marcado como automático, con el esperado como monto_final y lo anota en la bitácora', async () => {
+    const { servicio, llamadas, arqueos, bitacora } = armarAuto({ montoFinal: '310.00' });
+    expect(await servicio.cerrarAutomatico(55, 16)).toBe(true);
+    expect(arqueos.prepararCierre).toHaveBeenCalledWith({}, 55, { montoConteoCuerpo: null });
+    expect(llamadas[0].params).toMatchObject({ idApertura: 55, idUsuario: null, montoConteo: null, automatico: true });
+    expect(llamadas[0].prep).toMatchObject({ montoFinal: '310.00' });
+    expect(llamadas[0].prep.observacion).toBe('Cierre automático: el turno llevaba más de 16 h abierto y nadie lo cerró. Sin conteo de efectivo.');
+    expect(bitacora.registrar).toHaveBeenCalledWith(expect.objectContaining({
+      accion: 'caja.cierre_automatico',
+      id_usuario: null,
+      entidad: 'apertura_caja',
+      id_entidad: 55,
+      antes: expect.objectContaining({ id_usuario_turno: 7, id_caja: 3 }),
+      despues: expect.objectContaining({ id_cierre: 91, monto_conteo: null, efectivo_esperado: 310, horas: 16 }),
+    }));
+  });
+
+  it('si el cajero dejó un arqueo de cierre vigente, usa su conteo y conserva su observación detrás de la marca', async () => {
+    const { servicio, llamadas } = armarAuto({ montoConteo: 300, observacion: 'Faltan 10 por un vuelto' });
+    await servicio.cerrarAutomatico(55, 16);
+    expect(llamadas[0].prep.montoConteo).toBe(300);
+    expect(llamadas[0].prep.observacion).toBe(
+      'Cierre automático: el turno llevaba más de 16 h abierto y nadie lo cerró. Conteo tomado del último arqueo de cierre. Faltan 10 por un vuelto',
+    );
+  });
+
+  it('turno ya cerrado (otra réplica o el cajero): false, sin bitácora', async () => {
+    const { servicio, bitacora } = armarAuto({}, new Error('CAJA_YA_CERRADA'));
+    expect(await servicio.cerrarAutomatico(55, 16)).toBe(false);
+    expect(bitacora.registrar).not.toHaveBeenCalled();
+  });
+});

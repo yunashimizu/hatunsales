@@ -67,6 +67,17 @@ export class ProductoController {
     return this.service.generarCodigoInterno();
   }
 
+  /**
+   * Fase 2.8: SKU sugerido (prefijo de la categoría + correlativo). Solo lectura, no reserva nada.
+   * `categoria` = id de la categoría o su nombre; sin ella, prefijo GEN. Antes de `:id`.
+   */
+  @Get('siguiente-sku')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin', 'vendedor')
+  siguienteSku(@Query('categoria') categoria?: string) {
+    return this.service.siguienteSku(categoria);
+  }
+
   /** Productos activos sin código SUNAT. Antes de `:id`, o Nest tomaría «sin-codigo-sunat» como id. */
   @Get('sin-codigo-sunat')
   @UseGuards(JwtGuard, RolesGuard)
@@ -101,14 +112,15 @@ export class ProductoController {
   @Put(':id')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin', 'vendedor')
-  update(@Param('id') id: string, @Body() body: ActualizarProductoRequest) {
-    return this.service.update(body, Number(id));
+  update(@Param('id') id: string, @Body() body: ActualizarProductoRequest, @UsuarioActual() usuario?: UsuarioToken) {
+    // El usuario va a la bitácora (Fase 6.3, R7): quién cambió precio, costo o descuento.
+    return this.service.update(body, Number(id), usuario);
   }
 
   @Delete(':id')
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin')
-  delete(@Param('id') id: string) {
-    return this.service.delete(Number(id));
+  delete(@Param('id') id: string, @UsuarioActual() usuario?: UsuarioToken) {
+    return this.service.delete(Number(id), usuario);
   }
 }

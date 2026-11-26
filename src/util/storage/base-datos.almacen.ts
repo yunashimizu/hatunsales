@@ -1,9 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { createHash } from 'crypto';
-import { AlmacenArchivos, ArchivoEntrada, ArchivoGuardado } from './almacen.interface';
+import { AlmacenArchivos, ArchivoEntrada, ArchivoGuardado, ArchivoLeido } from './almacen.interface';
 import { medirImagen } from './redimensionador-imagen';
+import { EsquemaMejoraFotos } from '../../fotos/esquema-mejora-fotos';
 
 /**
  * Borra la fila solo si nadie más la usa. $1 = id_archivo, $2 = URL pública
@@ -23,6 +24,17 @@ export const SQL_BORRAR_ARCHIVO_SIN_USO = `
      AND NOT EXISTS (SELECT 1 FROM pedido_items it WHERE it.imagen_url = $2)`;
 
 /**
+ * Igual, y además respeta la mejora de fotos (sql/fase23): un archivo que es la ORIGINAL o la MEJORADA
+ * guardada de alguna foto no se borra, aunque la fila de la imagen apunte ahora al otro. Es un texto
+ * aparte porque una consulta que nombra una tabla inexistente falla entera: se usa solo si la tabla existe.
+ */
+export const SQL_BORRAR_ARCHIVO_SIN_USO_CON_MEJORA = `${SQL_BORRAR_ARCHIVO_SIN_USO}
+     AND NOT EXISTS (
+           SELECT 1 FROM productos_imagenes_mejora m
+            WHERE m.url_original = $2 OR m.url_mejorada = $2
+         )`;
+
+/**
  * Guarda la imagen dentro de PostgreSQL, en la tabla `archivos`.
  *
  * Es el proveedor por defecto porque sobrevive a los despliegues sin depender
@@ -38,6 +50,8 @@ export class BaseDatosAlmacen implements AlmacenArchivos {
   constructor(
     @InjectDataSource('pgConnection')
     private readonly dataSource: DataSource,
+    /** Opcional: sin él (o sin la tabla de fase23) el borrado usa el texto de siempre. */
+    @Optional() private readonly esquemaMejora?: EsquemaMejoraFotos,
   ) {}
 
   async guardar(entrada: ArchivoEntrada): Promise<ArchivoGuardado> {
@@ -97,10 +111,21 @@ export class BaseDatosAlmacen implements AlmacenArchivos {
     const id = Number(clave);
     if (!Number.isInteger(id) || id <= 0) return;
     try {
-      await this.dataSource.query(SQL_BORRAR_ARCHIVO_SIN_USO, [id, `/archivos/${id}`, String(id)]);
+      const conMejora = this.esquemaMejora ? await this.esquemaMejora.disponible() : false;
+      await this.dataSource.query(
+        conMejora ? SQL_BORRAR_ARCHIVO_SIN_USO_CON_MEJORA : SQL_BORRAR_ARCHIVO_SIN_USO,
+        [id, `/archivos/${id}`, String(id)],
+      );
     } catch (error: any) {
       this.logger.warn(`Se conserva el archivo ${id}: no se pudo comprobar si sigue en uso (${error?.message ?? error})`);
     }
+  }
+
+  async leerOriginal(guardado: { clave: string; url: string }): Promise<ArchivoLeido | null> {
+    const id = Number(guardado.clave);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    const archivo = await this.leer(id);
+    return archivo ? { buffer: archivo.contenido, mime: archivo.mime } : null;
   }
 
   async leer(id: number): Promise<{ contenido: Buffer; mime: string; hash: string } | null> {

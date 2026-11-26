@@ -1,3 +1,4 @@
+import { ForbiddenException } from '@nestjs/common';
 import { BadRequestException, ConflictException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { ean13Interno, esEan13Valido } from '../../util/codigo-barras.util';
 import { ProductoBussnies } from './producto.bussnies';
@@ -23,6 +24,8 @@ function armar() {
     getById: jest.fn().mockResolvedValue({ id_producto: 7 }),
     actualizarSiExiste: jest.fn().mockResolvedValue(true),
     delete: jest.fn().mockResolvedValue(1),
+    // Fase 9.3: borrado solo sin historial (por omisión: sin historial, se borra).
+    eliminarSiNoTieneHistorial: jest.fn().mockResolvedValue({ borrados: 1, historial: { total: 0, detalle: {} } }),
     listarSinCodigoSunat: jest.fn().mockResolvedValue({ total: 0, datos: [] }),
     // Por omisión todos los ids existen: devuelve los que recibe.
     asignarCodigoSunat: jest.fn(async (ids: number[]) => ids),
@@ -33,7 +36,7 @@ function armar() {
     insertarFilaVacia: jest.fn(),
     ajustar: jest.fn(),
   };
-  const inventarioBussnies = { ajustarEnTransaccion: jest.fn().mockResolvedValue(12) };
+  const inventarioBussnies = { ajustarEnTransaccion: jest.fn().mockResolvedValue(12), exigirAlmacenParaAjuste: jest.fn().mockResolvedValue(undefined) };
   // Cada transacción recibe un manager propio, para poder comprobar que todo usa el mismo.
   const managers: any[] = [];
   const dataSource = {
@@ -473,6 +476,20 @@ describe('ProductoBussnies.update · edición y stock en una transacción (A4)',
     expect(repo.detallePorId).toHaveBeenCalledTimes(1);
   });
 
+  it('Fase 8.1/8.5: el ajuste lleva quién lo hizo y, fuera de sus locales, el 403 sale antes de escribir nada', async () => {
+    const { servicio, inventarioBussnies, dataSource } = armar();
+    const usuario = { id_usuario: 7, rol: 'vendedor' } as any;
+    await servicio.update({ nombre: 'Clavo', ajuste_stock: ajuste } as any, 7, usuario);
+    expect(inventarioBussnies.exigirAlmacenParaAjuste).toHaveBeenCalledWith(usuario, 2);
+    expect(inventarioBussnies.ajustarEnTransaccion.mock.calls[0][2]).toEqual({ id_usuario: 7, tipo_documento: 'ajuste', id_documento: null });
+
+    const bloqueado = armar();
+    bloqueado.inventarioBussnies.exigirAlmacenParaAjuste.mockRejectedValueOnce(new ForbiddenException('fuera de su local'));
+    await expect(bloqueado.servicio.update({ nombre: 'Clavo', ajuste_stock: ajuste } as any, 7, usuario)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(bloqueado.dataSource.transaction).not.toHaveBeenCalled();
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+  });
+
   it('una baja de stock manda la diferencia negativa', async () => {
     const { servicio, inventarioBussnies } = armar();
     await servicio.update({ nombre: 'Clavo', ajuste_stock: { id_almacen: 2, stock_nuevo: 4, stock_anterior: 10 } } as any, 7);
@@ -512,25 +529,160 @@ describe('ProductoBussnies.update · edición y stock en una transacción (A4)',
   });
 });
 
-describe('ProductoBussnies.delete · borrado directo (A3)', () => {
-  it('borra sin leer antes', async () => {
+describe('ProductoBussnies.delete · archivar en vez de borrar (Fase 9.3)', () => {
+  it('sin historial borra de verdad, sin leer antes', async () => {
     const { servicio, repo } = armar();
     await expect(servicio.delete(7)).resolves.toBe(1);
     expect(repo.getById).not.toHaveBeenCalled();
-    expect(repo.delete).toHaveBeenCalledWith(7);
+    expect(repo.eliminarSiNoTieneHistorial).toHaveBeenCalledWith(7);
   });
 
   it('sin filas afectadas responde 404', async () => {
     const { servicio, repo } = armar();
-    repo.delete.mockResolvedValue(0);
+    repo.eliminarSiNoTieneHistorial.mockResolvedValue({ borrados: 0, historial: null });
     await expect(servicio.delete(99)).rejects.toThrow('Producto 99 no encontrado');
   });
 
-  it('con registros que lo referencian (23503) responde 409 con el mensaje de siempre', async () => {
+  it('con historial responde 409 PRODUCTO_CON_HISTORIAL con el detalle y la propuesta de desactivarlo', async () => {
     const { servicio, repo } = armar();
-    repo.delete.mockRejectedValue({ code: '23503' });
-    await expect(servicio.delete(7)).rejects.toThrow(
-      'No se puede eliminar: el producto tiene ventas, stock o movimientos registrados. Desactívelo en su lugar.',
-    );
+    repo.eliminarSiNoTieneHistorial.mockResolvedValue({ borrados: 0, historial: { total: 1003, detalle: { ventas: 3, kardex: 1000 } } });
+    const error: any = await servicio.delete(7).catch((e) => e);
+    expect(error).toBeInstanceOf(ConflictException);
+    expect(error.getResponse()).toMatchObject({
+      codigo: 'PRODUCTO_CON_HISTORIAL', historial: { ventas: 3, kardex: 1000 }, sugerencia: 'desactivar',
+    });
+    expect(error.getResponse().message).toContain('ventas: 3, kardex: más de 1000');
+    expect(error.getResponse().message).toContain('Desactívelo');
+  });
+
+  it('una llave foránea que no está en la lista (23503) sigue siendo 409 con el mensaje de siempre y el código', async () => {
+    const { servicio, repo } = armar();
+    repo.eliminarSiNoTieneHistorial.mockRejectedValue({ code: '23503' });
+    const error: any = await servicio.delete(7).catch((e) => e);
+    expect(error.getStatus()).toBe(409);
+    expect(error.getResponse()).toMatchObject({
+      codigo: 'PRODUCTO_CON_HISTORIAL',
+      message: 'No se puede eliminar: el producto tiene ventas, stock o movimientos registrados. Desactívelo en su lugar.',
+    });
+  });
+});
+
+describe('ProductoBussnies · bitácora de precios y borrados (Fase 6.3, R7)', () => {
+  function conBitacora(opciones: { disponible?: boolean; antes?: any } = {}) {
+    const base = armar();
+    const bitacora = {
+      disponible: jest.fn(async () => opciones.disponible ?? true),
+      ...dobleBitacora(),
+    };
+    const dataSource = {
+      ...base.dataSource,
+      query: jest.fn(async (_sql: string, _params?: any) => [opciones.antes ?? { nombre: 'Martillo', precio_venta: '30.00', precio_compra: '18.00', descuento: '0.00' }]),
+    };
+    const servicio = new ProductoBussnies(base.repo as any, base.inventarioRepo as any, dataSource as any, base.inventarioBussnies as any, bitacora as any);
+    return { ...base, servicio, bitacora, dataSource };
+  }
+  const USUARIO = { id_usuario: 4, rol: 'vendedor' } as any;
+
+  it('bajar el precio deja producto.precio_cambiado con el antes y el después de precio, costo y descuento', async () => {
+    const { servicio, repo, bitacora, dataSource } = conBitacora();
+    repo.detallePorId.mockResolvedValue({ id_producto: 7, nombre: 'Martillo', precio_venta: '25.00', precio_compra: '18.00', descuento: '0.00' });
+
+    await servicio.update({ precio_venta: 25 } as any, 7, USUARIO);
+
+    expect(String(dataSource.query.mock.calls[0][0])).toContain('SELECT nombre, precio_venta, precio_compra, descuento FROM productos');
+    // El «antes» se lee ANTES del UPDATE.
+    expect(dataSource.query.mock.invocationCallOrder[0]).toBeLessThan(repo.actualizarSiExiste.mock.invocationCallOrder[0]);
+    expect(bitacora.registrar).toHaveBeenCalledWith({
+      accion: 'producto.precio_cambiado',
+      id_usuario: 4,
+      rol: 'vendedor',
+      entidad: 'producto',
+      id_entidad: 7,
+      antes: { nombre: 'Martillo', precio_venta: 30, precio_compra: 18, descuento: 0 },
+      despues: { nombre: 'Martillo', precio_venta: 25, precio_compra: 18, descuento: 0 },
+    });
+  });
+
+  it('una edición sin campos de precio no lee nada ni anota; mandar el mismo precio tampoco anota', async () => {
+    const { servicio, repo, bitacora, dataSource } = conBitacora();
+    repo.detallePorId.mockResolvedValue({ id_producto: 7, nombre: 'Martillo', precio_venta: '30.00', precio_compra: '18.00', descuento: '0.00' });
+
+    await servicio.update({ nombre: 'Martillo' } as any, 7, USUARIO);
+    expect(dataSource.query).not.toHaveBeenCalled();
+
+    await servicio.update({ precio_venta: 30 } as any, 7, USUARIO);
+    expect(bitacora.registrar).not.toHaveBeenCalled();
+  });
+
+  it('sin la tabla (fase19 sin correr) no hace la lectura previa; el borrado se entrega igual al servicio, que lo descarta', async () => {
+    const { servicio, bitacora, dataSource } = conBitacora({ disponible: false });
+
+    await servicio.update({ precio_venta: 25 } as any, 7, USUARIO);
+    expect(bitacora.registrar).not.toHaveBeenCalled();
+    await servicio.delete(7, USUARIO);
+
+    expect(dataSource.query).not.toHaveBeenCalled();
+    expect(bitacora.registrar).toHaveBeenCalledTimes(1);
+    expect(bitacora.registrar.mock.calls[0][0]).toMatchObject({ accion: 'producto.eliminado', antes: null });
+  });
+
+  it('borrar anota producto.eliminado con lo que tenía; si el borrado falla (tiene ventas) no anota', async () => {
+    const { servicio, repo, bitacora } = conBitacora();
+
+    await servicio.delete(7, { id_usuario: 1, rol: 'admin' } as any);
+    expect(bitacora.registrar).toHaveBeenCalledWith(expect.objectContaining({
+      accion: 'producto.eliminado', id_usuario: 1, entidad: 'producto', id_entidad: 7,
+      antes: { nombre: 'Martillo', precio_venta: 30, precio_compra: 18, descuento: 0 },
+    }));
+
+    bitacora.registrar.mockClear();
+    repo.eliminarSiNoTieneHistorial.mockResolvedValue({ borrados: 0, historial: { total: 2, detalle: { ventas: 2 } } });
+    await expect(servicio.delete(7)).rejects.toBeInstanceOf(ConflictException);
+    expect(bitacora.registrar).not.toHaveBeenCalled();
+  });
+});
+
+
+/** Doble de BitacoraService: `registrarCon` arma el evento (como el servicio real) y lo pasa a `registrar`, que es lo que miran las pruebas. */
+function dobleBitacora() {
+  const registrar = jest.fn(async (_evento: any) => undefined);
+  const registrarCon = jest.fn(async (fabrica: () => any) => {
+    const r = fabrica();
+    for (const e of Array.isArray(r) ? r : [r]) if (e) await registrar(e);
+  });
+  return { registrar, registrarCon };
+}
+
+describe('ProductoBussnies.siguienteSku (Fase 2.8)', () => {
+  function conSku(mayor = 0, usados: string[] = [], categoria: string | null = 'Herramientas') {
+    const base = armar();
+    Object.assign(base.repo, {
+      nombreCategoria: jest.fn(async () => categoria),
+      mayorCorrelativoSku: jest.fn(async () => mayor),
+      codigoEnUso: jest.fn(async (c: string) => usados.includes(c)),
+    });
+    return base;
+  }
+
+  it('por id de categoría: prefijo de su nombre + siguiente correlativo, sin escribir nada', async () => {
+    const { servicio, repo } = conSku(7);
+    await expect(servicio.siguienteSku('3')).resolves.toEqual({ sugerencia: 'HER-0008', prefijo: 'HER', correlativo: 8 });
+    expect((repo as any).nombreCategoria).toHaveBeenCalledWith(3);
+    expect((repo as any).mayorCorrelativoSku).toHaveBeenCalledWith('HER');
+    expect(repo.actualizarSiExiste).not.toHaveBeenCalled();
+  });
+
+  it('sin categoría → GEN-0001; con nombre en texto no consulta la categoría', async () => {
+    const { servicio, repo } = conSku(0);
+    await expect(servicio.siguienteSku(undefined)).resolves.toMatchObject({ sugerencia: 'GEN-0001' });
+    await expect(servicio.siguienteSku('Pinturas')).resolves.toMatchObject({ prefijo: 'PIN' });
+    expect((repo as any).nombreCategoria).not.toHaveBeenCalled();
+  });
+
+  it('salta los que ya son SKU o código de barras de otro; categoría inexistente → 404', async () => {
+    const { servicio } = conSku(1, ['HER-0002', 'HER-0003']);
+    await expect(servicio.siguienteSku('3')).resolves.toMatchObject({ sugerencia: 'HER-0004', correlativo: 4 });
+    const sinCat = conSku(0, [], null);
+    await expect(sinCat.servicio.siguienteSku('99')).rejects.toBeInstanceOf(NotFoundException);
   });
 });

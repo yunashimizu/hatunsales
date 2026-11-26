@@ -34,6 +34,16 @@ export const CodigoErrorCaja = {
   FECHA_INVALIDA: 'FECHA_INVALIDA',
   /** 503: la BD no respondió a tiempo o hubo un conflicto de concurrencia; reintentar. */
   CAJA_REINTENTAR: 'CAJA_REINTENTAR',
+  /** Fase 7.1 · 404: la venta indicada no existe. */
+  VENTA_NO_ENCONTRADA: 'VENTA_NO_ENCONTRADA',
+  /** Fase 7.1 · 400: `reembolso_efectivo` mal formado (no positivo, más de 2 decimales). */
+  REEMBOLSO_INVALIDO: 'REEMBOLSO_INVALIDO',
+  /** Fase 7.1 · 400: el reembolso supera lo cobrado en efectivo menos lo ya devuelto (o el total de la nota). */
+  REEMBOLSO_EXCEDE: 'REEMBOLSO_EXCEDE',
+  /** Fase 7.1 · 503: falta sql/fase20 para enlazar el egreso con la venta (no se anuló nada). */
+  REEMBOLSO_NO_DISPONIBLE: 'REEMBOLSO_NO_DISPONIBLE',
+  /** Fase 7.2 (D3) · 409: la venta a crédito ya tiene abonos; se guía a nota de crédito + devolución. */
+  ANULACION_CREDITO_CON_ABONOS: 'ANULACION_CREDITO_CON_ABONOS',
 } as const;
 
 export type CodigoErrorCajaTipo = (typeof CodigoErrorCaja)[keyof typeof CodigoErrorCaja];

@@ -1,4 +1,4 @@
-import { IsBoolean, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsNumber, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 
 /**
  * POST /venta/:id/anular (PLAN V3, D9). Si el comprobante de la venta ya fue aceptado por SUNAT se
@@ -36,4 +36,15 @@ export class AnularVentaRequest {
   @IsString({ message: 'La nota debe ser texto' })
   @MaxLength(300, { message: 'La nota admite hasta 300 caracteres' })
   nota?: string;
+
+  /**
+   * Fase 7.1: efectivo que el cajero confirma haber devuelto al cliente. Solo genera egreso si la venta es de
+   * un turno ya cerrado (o sin turno); si es de un turno abierto la anulación ya la descuenta del esperado.
+   * Sin este campo la anulación funciona exactamente como antes. Ver GET caja/devolucion/:id_venta.
+   */
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 }, { message: 'El reembolso en efectivo debe ser un número con hasta 2 decimales' })
+  @Min(0, { message: 'El reembolso en efectivo no puede ser negativo' })
+  @Max(10_000_000, { message: 'El reembolso en efectivo es demasiado alto' })
+  reembolso_efectivo?: number;
 }

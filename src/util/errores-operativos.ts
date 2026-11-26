@@ -29,6 +29,12 @@ export const CodigoError = {
   CAJA_DESACTIVADA: 'CAJA_DESACTIVADA',
   CLIENTE_CON_HISTORIAL: 'CLIENTE_CON_HISTORIAL',
   EMPRESA_CON_HISTORIAL: 'EMPRESA_CON_HISTORIAL',
+  /** 409 (Fase 9.3): el producto tiene historial; se propone desactivarlo en vez de borrarlo. */
+  PRODUCTO_CON_HISTORIAL: 'PRODUCTO_CON_HISTORIAL',
+  /** 409 (Fase 9.5): ya existe otro proveedor con ese RUC. */
+  PROVEEDOR_RUC_REPETIDO: 'PROVEEDOR_RUC_REPETIDO',
+  /** 409 (Fase 9.4): deuda vencida hace más de los días de gracia; no se da un crédito nuevo. */
+  CREDITO_BLOQUEADO_POR_MORA: 'CREDITO_BLOQUEADO_POR_MORA',
   COTIZACION_SIN_ITEMS: 'COTIZACION_SIN_ITEMS',
   COTIZACION_SIN_CLIENTE: 'COTIZACION_SIN_CLIENTE',
   COTIZACION_TELEFONO_INVALIDO: 'COTIZACION_TELEFONO_INVALIDO',

@@ -1,8 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 import { ConfiguracionRepository } from '../configuracion.repository';
 import { planificarSalidas } from '../../../caja/ventas/plan-salida-stock';
+import { EsquemaCajaService } from '../../../caja/esquema/esquema-caja.service';
+import { columnasRastro, extrasFila, RastroMovimiento, sufijo } from '../../../stock/rastro-movimiento';
 
 export interface LineaReserva {
   id_producto: number;
@@ -43,6 +45,8 @@ export class StockTiendaRepository {
     @InjectDataSource('pgConnection')
     private readonly dataSource: DataSource,
     private readonly config: ConfiguracionRepository,
+    /** Fase 8.1 (fase21): rastro del movimiento (documento `pedido`). Sin él se guarda como antes. */
+    @Optional() private readonly esquema?: EsquemaCajaService,
   ) {}
 
   /** Lee una clave de la tabla `configuraciones` (con la caché de ConfiguracionRepository). */
@@ -87,6 +91,8 @@ export class StockTiendaRepository {
     idAlmacenPreferido?: number,
     modo: ModoStockTienda = 'exclusivo',
     managerExterno?: EntityManager,
+    /** Fase 8.1: el pedido que reserva (documento `pedido`). */
+    rastro?: RastroMovimiento,
   ): Promise<ReservaAplicada[]> {
     if (lineas.length === 0) return [];
 
@@ -139,7 +145,7 @@ export class StockTiendaRepository {
         id_almacen: s.id_almacen,
         cantidad: s.cantidad,
       }));
-      await this.registrarMovimientos(manager, aplicadas, 'salida', 'Reserva por pedido web');
+      await this.registrarMovimientos(manager, aplicadas, 'salida', 'Reserva por pedido web', rastro);
       return aplicadas;
     };
 
@@ -155,7 +161,7 @@ export class StockTiendaRepository {
    * Repone en el orden fijo (id_producto, id_almacen) de `reservar` y del POS para no
    * cruzar candados con un checkout simultáneo.
    */
-  async devolver(idPedido: number, managerExterno?: EntityManager): Promise<void> {
+  async devolver(idPedido: number, managerExterno?: EntityManager, rastro?: RastroMovimiento): Promise<void> {
     const ejecutar = async (manager: EntityManager) => {
       const lineas = await manager.query(
         `SELECT id_producto, id_almacen, cantidad
@@ -191,7 +197,13 @@ export class StockTiendaRepository {
         cantidad: Number(l.cantidad),
       }));
 
-      await this.registrarMovimientos(manager, aplicadas, 'entrada', 'Devolución por pedido cancelado');
+      await this.registrarMovimientos(
+        manager,
+        aplicadas,
+        'entrada',
+        'Devolución por pedido cancelado',
+        rastro ?? { tipo_documento: 'pedido', id_documento: idPedido },
+      );
     };
 
     if (managerExterno) return ejecutar(managerExterno);
@@ -204,8 +216,11 @@ export class StockTiendaRepository {
     lineas: ReservaAplicada[],
     tipo: 'entrada' | 'salida',
     descripcion: string,
+    rastro?: RastroMovimiento,
   ): Promise<void> {
+    const columnas = lineas.length ? await columnasRastro(this.esquema) : null;
     for (const linea of lineas) {
+      const extras = extrasFila(columnas!, rastro, linea.id_almacen, 7);
       const sucursal = await manager.query(
         'SELECT id_sucursal FROM almacenes WHERE id_almacen = $1 LIMIT 1',
         [linea.id_almacen],
@@ -214,8 +229,8 @@ export class StockTiendaRepository {
 
       await manager.query(
         `INSERT INTO movimientos_inventario
-           (id_producto, tipo, cantidad, id_sucursal_origen, id_sucursal_destino, descripcion, fecha)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+           (id_producto, tipo, cantidad, id_sucursal_origen, id_sucursal_destino, descripcion, fecha${sufijo(extras.columnas)})
+         VALUES ($1, $2, $3, $4, $5, $6, NOW()${sufijo(extras.expresiones)})`,
         [
           linea.id_producto,
           tipo,
@@ -223,6 +238,7 @@ export class StockTiendaRepository {
           tipo === 'salida' ? idSucursal : null,
           tipo === 'entrada' ? idSucursal : null,
           descripcion,
+          ...extras.valores,
         ],
       );
 

@@ -17,6 +17,19 @@ const MAXIMO_BYTES_EN_CACHE = 32 * 1024 * 1024;
 /** Evita decodificar imágenes desmesuradas (una foto de 50 Mpx ya es mucho más de lo normal). */
 const MAXIMO_PIXELES_ENTRADA = 80_000_000;
 
+let sharpConfigurado = false;
+
+/**
+ * Contenedor pequeño: poca memoria interna de libvips y pocos hilos. La usan el redimensionador
+ * de `?w=` y el mejorador de fotos (src/fotos); es idempotente, así nadie la pisa con otros valores.
+ */
+export function configurarSharp(): void {
+  if (sharpConfigurado) return;
+  sharp.cache({ memory: 48, files: 0, items: 40 });
+  sharp.concurrency(2);
+  sharpConfigurado = true;
+}
+
 export interface VarianteImagen {
   contenido: Buffer;
   mime: string;
@@ -72,9 +85,7 @@ export class RedimensionadorImagen {
   private readonly enCurso = new Map<string, Promise<VarianteImagen | null>>();
 
   constructor() {
-    // Contenedor pequeño: poca memoria interna de libvips y pocos hilos.
-    sharp.cache({ memory: 48, files: 0, items: 40 });
-    sharp.concurrency(2);
+    configurarSharp();
   }
 
   /**

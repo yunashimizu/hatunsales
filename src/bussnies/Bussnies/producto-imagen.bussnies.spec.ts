@@ -398,3 +398,207 @@ describe('ProductoImagenBussnies.actualizarDescripcion', () => {
   });
 });
 
+
+// ── Mejora automática de fotos (tanda B2 de doc/PLAN_MEJORA_AUTOMATICA_DE_FOTOS.md) ─────────────
+// Con el servicio de verdad (src/fotos) y fotos de verdad generadas en memoria; la tabla y el almacén
+// son dobles en memoria con las mismas reglas que el SQL. Las 29 pruebas de arriba construyen el
+// servicio SIN mejora y no cambiaron: así se comprueba que sin ella todo sigue como antes.
+import { MejoraFotosService } from '../../fotos/mejora-fotos.service';
+import { AlmacenEnMemoria, RepoMejoraEnMemoria } from '../../fotos/mejora-fotos.doble';
+import { generarMuestras, MuestrasPrueba } from '../../fotos/muestras-prueba';
+
+describe('ProductoImagenBussnies · con mejora automática de fotos', () => {
+  jest.setTimeout(60_000);
+  let m: MuestrasPrueba;
+  beforeAll(async () => {
+    m = await generarMuestras();
+  });
+
+  function armarConMejora({ tabla = true, interruptor = true } = {}) {
+    const tablaMejora = new RepoMejoraEnMemoria();
+    tablaMejora.tabla = tabla;
+    const almacen = new AlmacenEnMemoria();
+    let siguienteId = 1;
+    const imagenes = tablaMejora.imagenes;
+    const repo = {
+      resumenGaleria: jest.fn().mockResolvedValue({ total: 0, siguienteOrden: 0 }),
+      crearVarias: jest.fn().mockImplementation(async (filas: any[]) => {
+        for (const f of filas) {
+          f.id_imagen = siguienteId++;
+          imagenes.set(f.id_imagen, { ...f, id_producto: 3 });
+        }
+        return filas;
+      }),
+      findOneById: jest.fn(async (id: number) => {
+        const i = imagenes.get(id);
+        return i ? { ...i, producto: { id_producto: i.id_producto } } : null;
+      }),
+      actualizarArchivo: jest.fn(async (id: number, datos: any) => {
+        Object.assign(imagenes.get(id)!, datos);
+      }),
+      eliminar: jest.fn(async (id: number) => {
+        imagenes.delete(id);
+        tablaMejora.filas.delete(id); // ON DELETE CASCADE
+      }),
+      asegurarPrincipal: jest.fn().mockResolvedValue(undefined),
+      findByProducto: jest.fn(async () => [...imagenes.values()]),
+    };
+    const config = { obtenerBooleano: jest.fn(async () => interruptor) };
+    const almacenes = { resolver: () => almacen, leer: jest.fn() };
+    const mejora = new MejoraFotosService(tablaMejora as any, config as any, repo as any, almacenes as any, almacen as any);
+    const servicio = new ProductoImagenBussnies(repo as any, { getById: jest.fn().mockResolvedValue({ id_producto: 3 }) } as any, almacen as any, mejora);
+    return { servicio, repo, almacen, tablaMejora, mejora };
+  }
+
+  const foto = (buffer: Buffer, nombre = 'foto.jpg') => ({ originalname: nombre, mimetype: 'image/jpeg', buffer, size: buffer.length });
+  const esperarBorrados = () => new Promise((r) => setTimeout(r, 30));
+
+  it('foto con borde ⇒ dos guardar (original y mejorada), fila «mejorada» y la imagen publicada es la mejorada', async () => {
+    const { servicio, almacen, tablaMejora } = armarConMejora();
+
+    const [imagen] = await servicio.subirVarias(3, [foto(m.borde)]);
+
+    expect(almacen.guardar).toHaveBeenCalledTimes(2);
+    const [original, mejorada] = await Promise.all(almacen.guardar.mock.results.map((r) => r.value));
+    expect(tablaMejora.filas.get(imagen.id_imagen)).toMatchObject({ estado: 'mejorada', url_original: original.url, url_mejorada: mejorada.url });
+    expect(imagen.url).toBe(mejorada.url);
+    expect(imagen.clave_almacen).toBe(mejorada.clave);
+    expect(tablaMejora.imagenes.get(imagen.id_imagen)!.url).toBe(mejorada.url);
+    expect(almacen.eliminar).not.toHaveBeenCalled();
+  });
+
+  it('foto buena ⇒ un solo guardar, fila «sin_cambios» y la URL publicada es la original', async () => {
+    const { servicio, almacen, tablaMejora } = armarConMejora();
+
+    const [imagen] = await servicio.subirVarias(3, [foto(m.buena)]);
+
+    expect(almacen.guardar).toHaveBeenCalledTimes(1);
+    const original = await almacen.guardar.mock.results[0].value;
+    expect(imagen.url).toBe(original.url);
+    expect(tablaMejora.filas.get(imagen.id_imagen)).toMatchObject({ estado: 'sin_cambios', url_original: original.url, url_mejorada: null });
+  });
+
+  it('con el interruptor apagado o sin la tabla: un solo guardar, sin filas de mejora y sin analizar (como hoy)', async () => {
+    for (const opciones of [{ interruptor: false }, { tabla: false }]) {
+      const { servicio, almacen, tablaMejora, mejora } = armarConMejora(opciones);
+      const analizar = jest.spyOn(mejora as any, 'ejecutarMejora');
+
+      const [imagen] = await servicio.subirVarias(3, [foto(m.borde)]);
+
+      expect(almacen.guardar).toHaveBeenCalledTimes(1);
+      expect(imagen.url).toBe('/archivos/100');
+      expect(tablaMejora.filas.size).toBe(0);
+      expect(analizar).not.toHaveBeenCalled();
+    }
+  });
+
+  it('si falla la publicación, la imagen queda en la original y se borra la clave de la mejorada', async () => {
+    const { servicio, almacen, tablaMejora } = armarConMejora();
+    tablaMejora.fallarPublicar = new Error('fallo de BD');
+
+    const [imagen] = await servicio.subirVarias(3, [foto(m.borde)]);
+
+    const [original, mejorada] = await Promise.all(almacen.guardar.mock.results.map((r) => r.value));
+    expect(imagen.url).toBe(original.url);
+    expect(tablaMejora.imagenes.get(imagen.id_imagen)!.url).toBe(original.url);
+    expect(almacen.eliminar.mock.calls.map((c) => c[0])).toEqual([mejorada.clave]);
+  });
+
+  it('si el lote falla a mitad, se borran TODAS las claves subidas, incluidas las mejoradas', async () => {
+    const { servicio, almacen, repo } = armarConMejora();
+    repo.crearVarias.mockRejectedValue(new Error('fallo de BD'));
+
+    await expect(servicio.subirVarias(3, [foto(m.borde, 'a.jpg'), foto(m.oscura, 'b.jpg')])).rejects.toThrow('fallo de BD');
+
+    const claves = (await Promise.all(almacen.guardar.mock.results.map((r) => r.value))).map((g: any) => g.clave);
+    expect(claves).toHaveLength(4); // dos originales y dos mejoradas
+    expect(almacen.eliminar.mock.calls.map((c) => c[0]).sort()).toEqual([...claves].sort());
+  });
+
+  it('si el almacén falla a mitad del lote, también se borran las mejoradas ya guardadas', async () => {
+    const { servicio, almacen } = armarConMejora();
+    almacen.fallarGuardar = (entrada) => (entrada.nombre_original === 'c.jpg' ? new Error('almacén caído') : null);
+
+    await expect(servicio.subirVarias(3, [foto(m.borde, 'a.jpg'), foto(m.buena, 'b.jpg'), foto(m.oscura, 'c.jpg')])).rejects.toThrow('almacén caído');
+
+    const guardadas = (await Promise.all(almacen.guardar.mock.results.map((r) => r.value.catch(() => null)))).filter(Boolean).map((g: any) => g.clave);
+    expect(almacen.eliminar.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(guardadas)].sort());
+    expect(guardadas.length).toBeGreaterThanOrEqual(3); // a, su mejorada y b (la de c falló)
+  });
+
+  it('presupuesto: con 100 ms por foto y 240 ms de presupuesto, de 4 fotos la tercera y la cuarta quedan pendientes y la petición responde', async () => {
+    const { servicio, mejora, tablaMejora, almacen } = armarConMejora();
+    mejora.presupuestoPorPeticionMs = 240;
+    // El análisis de verdad se hace antes; durante la subida cada foto «tarda» 100 ms exactos.
+    const real = (mejora as any).ejecutarMejora.bind(mejora);
+    const hechos = new Map<Buffer, unknown>();
+    for (const b of [m.borde, m.oscura, m.lavada, m.desenfocada]) hechos.set(b, await real(b));
+    jest.spyOn(mejora as any, 'ejecutarMejora').mockImplementation(async (buffer: any) => {
+      await new Promise((r) => setTimeout(r, 100));
+      return hechos.get(buffer);
+    });
+    const inicio = Date.now();
+
+    const imagenes = await servicio.subirVarias(3, [foto(m.borde, 'a.jpg'), foto(m.oscura, 'b.jpg'), foto(m.lavada, 'c.jpg'), foto(m.desenfocada, 'd.jpg')]);
+
+    expect(Date.now() - inicio).toBeLessThan(3000);
+    const estados = imagenes.map((i) => tablaMejora.filas.get(i.id_imagen)?.estado ?? 'pendiente');
+    expect(estados).toEqual(['mejorada', 'mejorada', 'pendiente', 'pendiente']);
+    // Las pendientes quedan publicadas tal como llegaron.
+    const originales = await Promise.all(almacen.guardar.mock.results.map((r) => r.value));
+    expect(originales.map((g: any) => g.url)).toEqual(expect.arrayContaining([imagenes[2].url, imagenes[3].url]));
+  });
+
+  it('remove: quita la fila y después pide borrar las DOS claves (original y mejorada)', async () => {
+    const { servicio, almacen, repo } = armarConMejora();
+    const [imagen] = await servicio.subirVarias(3, [foto(m.borde)]);
+    const [original, mejorada] = await Promise.all(almacen.guardar.mock.results.map((r) => r.value));
+
+    await servicio.remove(3, imagen.id_imagen);
+    await esperarBorrados();
+
+    expect(almacen.eliminar.mock.calls.map((c) => c[0]).sort()).toEqual([original.clave, mejorada.clave].sort());
+    expect(repo.eliminar.mock.invocationCallOrder[0]).toBeLessThan(almacen.eliminar.mock.invocationCallOrder[0]);
+  });
+
+  it('reemplazar: procesa la nueva, actualiza ambas filas y recién entonces borra las dos claves viejas', async () => {
+    const { servicio, almacen, repo, tablaMejora } = armarConMejora();
+    const [imagen] = await servicio.subirVarias(3, [foto(m.borde)]);
+    const [viejaOriginal, viejaMejorada] = await Promise.all(almacen.guardar.mock.results.map((r) => r.value));
+
+    await servicio.reemplazar(3, imagen.id_imagen, foto(m.oscura, 'nueva.jpg'));
+    await esperarBorrados();
+
+    const fila = tablaMejora.filas.get(imagen.id_imagen)!;
+    expect(fila.estado).toBe('mejorada');
+    expect(fila.url_original).not.toBe(viejaOriginal.url);
+    expect(tablaMejora.imagenes.get(imagen.id_imagen)!.url).toBe(fila.url_mejorada);
+    expect(almacen.eliminar.mock.calls.map((c) => c[0]).sort()).toEqual([viejaOriginal.clave, viejaMejorada.clave].sort());
+    expect(repo.actualizarArchivo.mock.invocationCallOrder[0]).toBeLessThan(almacen.eliminar.mock.invocationCallOrder[0]);
+  });
+
+  it('reemplazar con el interruptor apagado: la fila vieja se quita (ya no vale) y se borran las dos claves viejas', async () => {
+    const ctx = armarConMejora();
+    const [imagen] = await ctx.servicio.subirVarias(3, [foto(m.borde)]);
+    const [viejaOriginal, viejaMejorada] = await Promise.all(ctx.almacen.guardar.mock.results.map((r) => r.value));
+    ctx.mejora.interruptor = jest.fn().mockResolvedValue(false);
+
+    await ctx.servicio.reemplazar(3, imagen.id_imagen, foto(m.buena, 'nueva.jpg'));
+    await esperarBorrados();
+
+    expect(ctx.tablaMejora.filas.has(imagen.id_imagen)).toBe(false);
+    expect(ctx.almacen.eliminar.mock.calls.map((c) => c[0]).sort()).toEqual([viejaOriginal.clave, viejaMejorada.clave].sort());
+  });
+
+  it('reemplazar: si la fila vieja no se puede quitar, NO se borran los archivos viejos (la fila todavía los nombra)', async () => {
+    const ctx = armarConMejora();
+    const [imagen] = await ctx.servicio.subirVarias(3, [foto(m.borde)]);
+    ctx.mejora.interruptor = jest.fn().mockResolvedValue(false);
+    ctx.tablaMejora.eliminarFila.mockRejectedValue(new Error('fallo de BD'));
+
+    await ctx.servicio.reemplazar(3, imagen.id_imagen, foto(m.buena, 'nueva.jpg'));
+    await esperarBorrados();
+
+    expect(ctx.almacen.eliminar).not.toHaveBeenCalled();
+  });
+});

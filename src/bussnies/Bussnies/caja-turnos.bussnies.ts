@@ -8,7 +8,9 @@ import { Dinero } from '../../caja/dominio/dinero';
 import { CalculadoraEsperado, EsperadoCaja } from '../../caja/dominio/esperado-caja';
 import { CodigoErrorCaja, ErrorCaja } from '../../caja/dominio/errores-caja';
 import { relanzarHttp } from '../../caja/http/errores-caja.http';
-import { hoyLima, parsearFiltroFechasLima } from '../../util/fecha-lima';
+import { hoyLima, parsearFiltroFechasLima, validarFechaYmd } from '../../util/fecha-lima';
+import { ControlCajaService } from '../../caja/configuracion/control-caja.service';
+import { ocultaEsperadoA } from '../../caja/configuracion/control-caja';
 import { ConfiguracionRepository } from '../../repository/Repository/configuracion.repository';
 import { emisorConfig } from '../../config/emisor.config';
 import { obtenerLogoEmisor } from '../../util/documentos/logo-emisor';
@@ -58,6 +60,10 @@ export interface AperturaListada {
   efectivo_contado: number | null;
   diferencia: number | null;
   estado: 'abierto' | 'cerrado';
+  /** Fase 7.3: solo presente (true) en un turno abierto con el arqueo ciego (efectivo_esperado y diferencia van en null). */
+  esperado_oculto?: true;
+  /** Fase 7.4: solo presente (true) si lo cerró la tarea de turnos olvidados (requiere sql/fase20). */
+  cierre_automatico?: true;
 }
 
 export interface ResumenSucursal {
@@ -67,11 +73,16 @@ export interface ResumenSucursal {
   turnos_abiertos: number;
   /** null si ningún turno del grupo tiene monto inicial guardado (turnos antiguos): «sin dato», no 0. */
   efectivo_inicial: number | null;
-  ventas_total: number;
+  /** null solo con el arqueo ciego y un turno abierto propio en el grupo (Fase 7.3). */
+  ventas_total: number | null;
+  /** [] con el arqueo ciego y un turno abierto propio en el grupo (Fase 7.3). */
   por_metodo: { metodo: string; monto: number }[];
-  efectivo_esperado: number;
+  /** null solo con el arqueo ciego y un turno abierto propio en el grupo (Fase 7.3). */
+  efectivo_esperado: number | null;
   efectivo_contado: number;
   diferencia: number;
+  /** Fase 7.3: solo presente (true) cuando ventas_total, por_metodo y efectivo_esperado se ocultaron. */
+  esperado_oculto?: true;
 }
 
 class Acumulado {
@@ -84,6 +95,8 @@ class Acumulado {
   esperado = Dinero.CERO;
   contado = Dinero.CERO;
   diferencia = Dinero.CERO;
+  /** Fase 7.3: hay un turno abierto cuyo esperado no se puede mostrar a quien pregunta. */
+  oculto = false;
   readonly metodos = new Map<string, { metodo: string; monto: Dinero }>();
 
   constructor(
@@ -106,6 +119,7 @@ class Acumulado {
     this.esperado = this.esperado.sumar(otro.esperado);
     this.contado = this.contado.sumar(otro.contado);
     this.diferencia = this.diferencia.sumar(otro.diferencia);
+    this.oculto = this.oculto || otro.oculto;
     for (const [clave, { metodo, monto }] of otro.metodos) this.sumarMetodo(clave, metodo, monto);
   }
 
@@ -116,13 +130,16 @@ class Acumulado {
       turnos: this.turnos,
       turnos_abiertos: this.abiertos,
       efectivo_inicial: this.conInicial > 0 ? this.inicial.aNumero() : null,
-      ventas_total: this.ventas.aNumero(),
-      por_metodo: [...this.metodos.values()]
-        .sort((a, b) => b.monto.centimos - a.monto.centimos || a.metodo.localeCompare(b.metodo, 'es'))
-        .map((m) => ({ metodo: m.metodo, monto: m.monto.aNumero() })),
-      efectivo_esperado: this.esperado.aNumero(),
+      ventas_total: this.oculto ? null : this.ventas.aNumero(),
+      por_metodo: this.oculto
+        ? []
+        : [...this.metodos.values()]
+            .sort((a, b) => b.monto.centimos - a.monto.centimos || a.metodo.localeCompare(b.metodo, 'es'))
+            .map((m) => ({ metodo: m.metodo, monto: m.monto.aNumero() })),
+      efectivo_esperado: this.oculto ? null : this.esperado.aNumero(),
       efectivo_contado: this.contado.aNumero(),
       diferencia: this.diferencia.aNumero(),
+      ...(this.oculto ? { esperado_oculto: true as const } : {}),
     };
   }
 }
@@ -143,7 +160,15 @@ export class CajaTurnosBussnies {
     private readonly sesiones: CajaSesionRepository,
     private readonly arqueos: CajaArqueoRepository,
     @Optional() private readonly config?: ConfiguracionRepository,
+    /** Fase 7.3 (arqueo ciego). Nest siempre lo inyecta; sin él, todo como antes. */
+    @Optional() private readonly controlCaja?: ControlCajaService,
   ) {}
+
+  /** Fase 7.3: con `arqueo_ciego`, caja y vendedor no ven el esperado de sus turnos ABIERTOS. Nunca lanza. */
+  private async ocultaEsperado(usuario: UsuarioToken): Promise<boolean> {
+    if (!this.controlCaja) return false;
+    return ocultaEsperadoA(normalizarRol(usuario?.rol), await this.controlCaja.arqueoCiego());
+  }
 
   // ── GET /caja/aperturas ──────────────────────────────────────
 
@@ -164,10 +189,10 @@ export class CajaTurnosBussnies {
         limite: porPagina,
         offset: (pagina - 1) * porPagina,
       });
-      const esperados = await this.esperados(filas);
+      const [esperados, ocultar] = await Promise.all([this.esperados(filas), this.ocultaEsperado(usuario)]);
 
       return {
-        items: filas.map((f, i) => this.itemApertura(f, esperados[i])),
+        items: filas.map((f, i) => this.itemApertura(f, esperados[i], ocultar && !f.cerrada)),
         total,
         pagina,
         por_pagina: porPagina,
@@ -177,8 +202,8 @@ export class CajaTurnosBussnies {
     }
   }
 
-  private itemApertura(f: FilaTurno, esperado: EsperadoCaja | null): AperturaListada {
-    const esperadoEfectivo = esperado?.efectivo.esperado ?? null;
+  private itemApertura(f: FilaTurno, esperado: EsperadoCaja | null, oculto = false): AperturaListada {
+    const esperadoEfectivo = oculto ? null : (esperado?.efectivo.esperado ?? null);
     const contado = f.cerrada ? f.monto_conteo : null;
     return {
       id_apertura: f.id_apertura,
@@ -195,6 +220,8 @@ export class CajaTurnosBussnies {
       efectivo_contado: contado ? contado.aNumero() : null,
       diferencia: contado && esperadoEfectivo ? contado.restar(esperadoEfectivo).aNumero() : null,
       estado: f.cerrada ? 'cerrado' : 'abierto',
+      ...(oculto ? { esperado_oculto: true as const } : {}),
+      ...(f.cierre_automatico === true ? { cierre_automatico: true as const } : {}),
     };
   }
 
@@ -215,7 +242,7 @@ export class CajaTurnosBussnies {
       const filtro = await this.filtroAutorizado(usuario, { id_sucursal: consulta.id_sucursal }, desde, hasta);
 
       const { filas } = await this.sesiones.listarTurnos(filtro);
-      const esperados = await this.esperados(filas);
+      const [esperados, ocultar] = await Promise.all([this.esperados(filas), this.ocultaEsperado(usuario)]);
 
       const grupos = new Map<string, Acumulado>();
       filas.forEach((f, i) => {
@@ -228,6 +255,7 @@ export class CajaTurnosBussnies {
           grupos.set(clave, grupo);
         }
         this.acumularTurno(grupo, f, esperados[i]);
+        if (ocultar && !f.cerrada) grupo.oculto = true;
       });
 
       const lista = [...grupos.values()].sort((a, b) => {
@@ -243,6 +271,38 @@ export class CajaTurnosBussnies {
         hasta,
         sucursales: lista.map((g) => g.aRespuesta()),
         total: total.aRespuesta(),
+      };
+    } catch (error) {
+      relanzarHttp(error);
+    }
+  }
+
+  // ── GET /caja/ventas-sin-turno (Fase 7.6) ────────────────────
+
+  /**
+   * Solo lectura: cuántas ventas de mostrador del día quedaron sin turno (caja «blanda» sin ninguna caja
+   * abierta), por local, para el aviso del Inicio. No cambia la regla de la caja blanda (D6). El monto
+   * solo lo recibe el admin (al resto le llega null).
+   */
+  async ventasSinTurno(usuario: UsuarioToken, fecha?: string) {
+    try {
+      const dia = fecha?.trim() ? validarFechaYmd(fecha.trim(), 'fecha') : hoyLima();
+      const esAdmin = normalizarRol(usuario?.rol) === 'admin';
+      const filas = await this.sesiones.ventasSinTurno(dia);
+      const total = filas.reduce((acc, f) => ({ cantidad: acc.cantidad + f.cantidad, monto: acc.monto.sumar(f.monto) }), {
+        cantidad: 0,
+        monto: Dinero.CERO,
+      });
+      return {
+        fecha: dia,
+        cantidad: total.cantidad,
+        monto: esAdmin ? total.monto.aNumero() : null,
+        por_local: filas.map((f) => ({
+          id_sucursal: f.id_sucursal,
+          nombre: f.id_sucursal == null ? 'Sin local' : f.sucursal_nombre?.trim() || `Sucursal ${f.id_sucursal}`,
+          cantidad: f.cantidad,
+          monto: esAdmin ? f.monto.aNumero() : null,
+        })),
       };
     } catch (error) {
       relanzarHttp(error);

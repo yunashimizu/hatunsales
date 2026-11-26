@@ -1,5 +1,5 @@
 import sharp from 'sharp';
-import { BaseDatosAlmacen } from './base-datos.almacen';
+import { BaseDatosAlmacen, SQL_BORRAR_ARCHIVO_SIN_USO, SQL_BORRAR_ARCHIVO_SIN_USO_CON_MEJORA } from './base-datos.almacen';
 
 /**
  * Una misma foto (mismo hash) se guarda una sola vez en `archivos` y la comparten
@@ -64,5 +64,53 @@ describe('BaseDatosAlmacen.guardar · medidas de la foto', () => {
     expect(guardada.url).toBe('/archivos/9');
     expect(guardada.width).toBeUndefined();
     expect(guardada.height).toBeUndefined();
+  });
+});
+
+describe('BaseDatosAlmacen.eliminar · mejora de fotos (sql/fase23)', () => {
+  const conEsquema = (existe: boolean, query = jest.fn().mockResolvedValue([[], 0])) => {
+    const esquema = { disponible: jest.fn().mockResolvedValue(existe) };
+    return { almacen: new BaseDatosAlmacen({ query } as any, esquema as any), query, esquema };
+  };
+
+  it('con la tabla: tampoco borra un archivo que es la original o la mejorada guardada de otra foto', async () => {
+    const { almacen, query } = conEsquema(true);
+
+    await almacen.eliminar('42');
+
+    expect(query).toHaveBeenCalledTimes(1);
+    const [sql, parametros] = query.mock.calls[0];
+    expect(sql).toBe(SQL_BORRAR_ARCHIVO_SIN_USO_CON_MEJORA);
+    expect(sql).toMatch(/NOT EXISTS[\s\S]*productos_imagenes_mejora m[\s\S]*m.url_original = \$2 OR m.url_mejorada = \$2/);
+    // Conserva todas las condiciones de siempre.
+    expect(sql.startsWith(SQL_BORRAR_ARCHIVO_SIN_USO)).toBe(true);
+    expect(parametros).toEqual([42, '/archivos/42', '42']);
+  });
+
+  it('sin la tabla (o sin detector) usa el texto de hoy, que no la nombra', async () => {
+    const { almacen, query } = conEsquema(false);
+    await almacen.eliminar('42');
+    expect(query.mock.calls[0][0]).toBe(SQL_BORRAR_ARCHIVO_SIN_USO);
+    expect(query.mock.calls[0][0]).not.toMatch(/productos_imagenes_mejora/);
+  });
+
+  it('si el borrado falla, conserva el archivo y no corta la operación', async () => {
+    const { almacen } = conEsquema(true, jest.fn().mockRejectedValue(new Error('timeout')));
+    await expect(almacen.eliminar('7')).resolves.toBeUndefined();
+  });
+});
+
+describe('BaseDatosAlmacen.leerOriginal', () => {
+  it('devuelve los bytes de la fila y su tipo, solo con un SELECT', async () => {
+    const { almacen, query } = armar(jest.fn().mockResolvedValue([{ contenido: Buffer.from('abc'), mime: 'image/png', hash: 'h' }]));
+    await expect(almacen.leerOriginal({ clave: '42', url: '/archivos/42' })).resolves.toEqual({ buffer: Buffer.from('abc'), mime: 'image/png' });
+    expect(query.mock.calls[0][0]).toMatch(/^SELECT/);
+  });
+
+  it('null si la clave no es un id o la fila ya no está', async () => {
+    const { almacen, query } = armar(jest.fn().mockResolvedValue([]));
+    await expect(almacen.leerOriginal({ clave: 'productos/1/a.jpg', url: '' })).resolves.toBeNull();
+    expect(query).not.toHaveBeenCalled();
+    await expect(almacen.leerOriginal({ clave: '9', url: '/archivos/9' })).resolves.toBeNull();
   });
 });

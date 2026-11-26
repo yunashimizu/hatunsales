@@ -152,6 +152,12 @@ export interface MovimientoCajaResponse {
   fecha: string;
   id_usuario: number | null;
   usuario_nombre: string | null;
+  /** Fase 7 (null sin sql/fase20 o en movimientos manuales): venta cuyo efectivo devuelve este egreso. */
+  id_venta: number | null;
+  /** Fase 7.5: categoría del gasto (`CATEGORIAS_GASTO`) y su etiqueta; null si no tiene. */
+  categoria: string | null;
+  categoria_etiqueta: string | null;
+  nro_comprobante: string | null;
 }
 
 export interface MovimientosTurnoResponse {

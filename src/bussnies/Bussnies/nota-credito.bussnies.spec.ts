@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpException, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { FiscalConfigError } from '../../sunat/config/fiscal-errores';
 import type { LoteVista, ResultadoLote } from '../../sunat/documentos/lotes.contrato';
 import type { Comprobante } from '../../models/DBModel/c-electronico/comprobante.entity';
@@ -14,6 +14,9 @@ import type {
 import type { ModoEmision } from '../../sunat/emision/emision.contrato';
 import { CODIGO_RECARGO_TARJETA } from '../../util/precios/recargo-tarjeta';
 import { ComprobanteBussnies } from './comprobante.bussnies';
+import { DevolucionCajaService } from '../../caja/devolucion/devolucion-caja.service';
+import { Dinero } from '../../caja/dominio/dinero';
+import { CodigoErrorCaja, ErrorCaja } from '../../caja/dominio/errores-caja';
 import {
   COLUMNAS_COMPLETAS,
   CONTEXTO_PRODUCCION,
@@ -121,7 +124,7 @@ function venta(parcial: Partial<VentaDeNota> = {}): VentaDeNota {
 
 // ── Servicio con dobles ──────────────────────────────────────
 
-function crear(opciones: { esquema?: boolean; origen?: OrigenNota | null; notas?: NotaDeOrigen[]; lineas?: LineaNotaVigente[]; lotes?: unknown } = {}) {
+function crear(opciones: { esquema?: boolean; origen?: OrigenNota | null; notas?: NotaDeOrigen[]; lineas?: LineaNotaVigente[]; lotes?: unknown; bitacora?: unknown; devoluciones?: unknown } = {}) {
   const tx = { query: jest.fn() };
   const repo = {
     esquemaListo: jest.fn(async () => opciones.esquema ?? true),
@@ -162,7 +165,7 @@ function crear(opciones: { esquema?: boolean; origen?: OrigenNota | null; notas?
     confirmarAceptadoManual: jest.fn(async () => ({ aceptado: true })),
   };
   const auditoria = { registrar: jest.fn(async () => undefined) };
-  const servicio = new NotaCreditoBussnies(repo as never, ventas as never, emisor as never, emision as never, auditoria as never, opciones.lotes as never);
+  const servicio = new NotaCreditoBussnies(repo as never, ventas as never, emisor as never, emision as never, auditoria as never, opciones.lotes as never, opciones.bitacora as never, opciones.devoluciones as never);
   return { servicio, repo, ventas, emisor, emision, auditoria, solicitudes, tx };
 }
 
@@ -517,6 +520,8 @@ describe('NotaCreditoBussnies', () => {
       expect(ventas.devolverStockParcial).toHaveBeenCalledWith(tx, 9, [{ id_producto: 7, cantidad: 1 }], {
         reingresar: true,
         descripcion: 'Devolución por nota de crédito FC01-00000002',
+        // Fase 8.1: el movimiento guarda la nota como documento de origen (sin usuario: lo aplica el sistema).
+        rastro: { tipo_documento: 'nota_credito', id_documento: 70 },
       });
       expect(ventas.ajustarCxcPorNota).toHaveBeenCalledWith(tx, 9, 10.3);
       expect(efectos).toMatchObject({ unidades_reingresadas: 1, deuda_descontada: 10.3, venta_anulada: false });
@@ -528,7 +533,11 @@ describe('NotaCreditoBussnies', () => {
 
       const efectos = await servicio.aplicarEfectos(70);
 
-      expect(ventas.anularVentaCompleta).toHaveBeenCalledWith(9, { consultor: tx, descripcion: 'Anulación de la venta 9 con la nota de crédito FC01-00000002' });
+      expect(ventas.anularVentaCompleta).toHaveBeenCalledWith(9, {
+        consultor: tx,
+        descripcion: 'Anulación de la venta 9 con la nota de crédito FC01-00000002',
+        rastro: { tipo_documento: 'nota_credito', id_documento: 70 },
+      });
       expect(repo.marcarAnulados).toHaveBeenCalledWith(tx, [40], 'Anulado con la nota de crédito FC01-00000002');
       expect(efectos).toMatchObject({ venta_anulada: true, origen_anulado: true });
     });
@@ -564,7 +573,12 @@ describe('NotaCreditoBussnies', () => {
 
       const resultado = await servicio.anularVenta(9, {}, 1);
 
-      expect(ventas.anularVentaCompleta).toHaveBeenCalledWith(9, { consultor: tx, descripcion: 'Devolución por venta 9 anulada' });
+      expect(ventas.anularVentaCompleta).toHaveBeenCalledWith(9, {
+        consultor: tx,
+        descripcion: 'Devolución por venta 9 anulada',
+        // Fase 8.1: quién anuló y la venta como documento de origen.
+        rastro: { id_usuario: 1, tipo_documento: 'anulacion', id_documento: 9 },
+      });
       expect(resultado).toMatchObject({ estado: 'anulada', anulada: true, stock_devuelto: true });
       expect(resultado.avisos.join(' ')).toContain('no tenía comprobante electrónico');
     });
@@ -1211,7 +1225,11 @@ describe('anular sin nota de crédito: la baja (RA) o el resumen (RC) en SUNAT',
 
       expect(lotes.obtener).toHaveBeenCalledWith(700);
       expect(repo.transaccion).toHaveBeenCalledTimes(1);
-      expect(ventas.anularVentaCompleta).toHaveBeenCalledWith(9, { consultor: tx, descripcion: 'Devolución por venta 9 anulada' });
+      expect(ventas.anularVentaCompleta).toHaveBeenCalledWith(9, {
+        consultor: tx,
+        descripcion: 'Devolución por venta 9 anulada',
+        rastro: { id_usuario: null, tipo_documento: 'anulacion', id_documento: 9 },
+      });
       expect(repo.marcarAnulados).toHaveBeenCalledWith(tx, [40, 41], 'Baja aceptada por SUNAT (RA-20261105-00001)');
     });
 
@@ -1540,5 +1558,221 @@ describe('banderas de Documentos con el negocio de notas registrado (puede_nota_
     expect(await banderas(resumen(), INACTIVA)).toEqual({ nota: false, anular: false });
     expect(await banderas(resumen({ saldo: 0 }), INACTIVA)).toEqual({ nota: false, anular: true });
     expect(await banderas(null, INACTIVA, entidadOrigen({ proveedor_fiscal: 'nubefact', ambiente_fiscal: null }))).toEqual({ nota: false, anular: true });
+  });
+});
+
+describe('bitácora de anulaciones y notas (Fase 6.3)', () => {
+  function conBitacora() {
+    const bitacora = dobleBitacora();
+    return { ...crear({ bitacora }), bitacora };
+  }
+
+  it('anular una venta sin comprobante anota venta.anulada con quién, el resultado y el motivo, después de la transacción', async () => {
+    const { servicio, repo, bitacora } = conBitacora();
+    repo.principalesDeVenta.mockResolvedValue([]);
+
+    await servicio.anularVenta(9, { motivo: 'Cliente desiste' }, 4);
+
+    expect(bitacora.registrar).toHaveBeenCalledTimes(1);
+    expect(bitacora.registrar).toHaveBeenCalledWith(expect.objectContaining({
+      accion: 'venta.anulada',
+      id_usuario: 4,
+      entidad: 'venta',
+      id_entidad: 9,
+      motivo: 'Cliente desiste',
+      despues: expect.objectContaining({ estado: 'anulada', venta_anulada: true, stock_devuelto: true }),
+    }));
+    const ordenTx = repo.transaccion.mock.invocationCallOrder[0];
+    expect(bitacora.registrar.mock.invocationCallOrder[0]).toBeGreaterThan(ordenTx);
+  });
+
+  it('anular con comprobante aceptado anota la nota emitida y la anulación en curso', async () => {
+    const { servicio, bitacora } = conBitacora();
+
+    await servicio.anularVenta(9, { motivo: 'El cliente desiste' }, 4);
+
+    const acciones = bitacora.registrar.mock.calls.map((c: any[]) => c[0].accion);
+    expect(acciones).toEqual(['nota_credito.emitida', 'venta.anulada']);
+    expect(bitacora.registrar.mock.calls[0][0]).toMatchObject({ entidad: 'comprobante', id_entidad: 70, despues: { numero: 'FC01-00000002', efecto: 'anular_venta' } });
+    expect(bitacora.registrar.mock.calls[1][0]).toMatchObject({ despues: { estado: 'anulacion_en_curso', nota: 'FC01-00000002' } });
+  });
+
+  it('si la anulación falla no anota nada; una venta ya anulada tampoco se vuelve a anotar', async () => {
+    const { servicio, repo, bitacora } = conBitacora();
+    repo.principalesDeVenta.mockResolvedValue([]);
+    repo.transaccion.mockRejectedValueOnce(new Error('falló la base'));
+    await expect(servicio.anularVenta(9, {}, 4)).rejects.toThrow('falló la base');
+
+    repo.ventaDeNota.mockResolvedValue(venta({ estado: 'anulada' }));
+    await servicio.anularVenta(9, {}, 4);
+
+    expect(bitacora.registrar).not.toHaveBeenCalled();
+  });
+});
+
+
+/** Doble de BitacoraService: `registrarCon` arma el evento (como el servicio real) y lo pasa a `registrar`, que es lo que miran las pruebas. */
+function dobleBitacora() {
+  const registrar = jest.fn(async (_evento: any) => undefined);
+  const registrarCon = jest.fn(async (fabrica: () => any) => {
+    const r = fabrica();
+    for (const e of Array.isArray(r) ? r : [r]) if (e) await registrar(e);
+  });
+  return { registrar, registrarCon };
+}
+
+
+// ── Fase 7: caja (7.1 reembolso como egreso, 7.2 crédito con abonos) ──
+
+describe('Fase 7 · anular una venta a crédito con abonos (7.2, D3)', () => {
+  /** DevolucionCajaService real con dobles: abonos de la venta y el modo configurado. */
+  function devolucionesReales(abonado: number, modo: 'bloquear' | 'permitir' | null) {
+    const repoCaja = { abonosDeVenta: jest.fn(async () => Dinero.desdeNumeroRedondeado(abonado)) };
+    const control = modo ? { modoAnulacionCredito: jest.fn(async () => modo) } : undefined;
+    return new DevolucionCajaService(repoCaja as never, {} as never, {} as never, {} as never, control as never, undefined);
+  }
+
+  it('por defecto (bloquear) responde 409 con el monto abonado y no toca nada', async () => {
+    const { servicio, repo, ventas } = crear({ devoluciones: devolucionesReales(50, 'bloquear') });
+    repo.ventaDeNota.mockResolvedValue(venta({ a_credito: true, saldo_cxc: 53, contado: 0 }));
+    const error = await servicio.anularVenta(9, {}, 1).catch((e: unknown) => e);
+    expect((error as HttpException).getStatus()).toBe(409);
+    const cuerpo = (error as HttpException).getResponse() as { codigo: string; message: string };
+    expect(cuerpo.codigo).toBe('ANULACION_CREDITO_CON_ABONOS');
+    expect(cuerpo.message).toBe('Esta venta a crédito ya tiene abonos por S/ 50.00. Emita una nota de crédito y registre la devolución de lo abonado.');
+    expect(repo.principalesDeVenta).not.toHaveBeenCalled();
+    expect(repo.transaccion).not.toHaveBeenCalled();
+    expect(ventas.anularVentaCompleta).not.toHaveBeenCalled();
+  });
+
+  it('sin la clave guardada (servicio de configuración ausente) también bloquea: la regla nace encendida', async () => {
+    const { servicio, repo } = crear({ devoluciones: devolucionesReales(10, null) });
+    repo.ventaDeNota.mockResolvedValue(venta({ a_credito: true, contado: 0 }));
+    await expect(servicio.anularVenta(9, {}, 1)).rejects.toMatchObject({ status: 409, response: { codigo: 'ANULACION_CREDITO_CON_ABONOS' } });
+  });
+
+  it('con «permitir» anula como antes', async () => {
+    const { servicio, repo } = crear({ devoluciones: devolucionesReales(50, 'permitir') });
+    repo.ventaDeNota.mockResolvedValue(venta({ a_credito: true, saldo_cxc: 53, contado: 0 }));
+    repo.principalesDeVenta.mockResolvedValue([]);
+    expect(await servicio.anularVenta(9, {}, 1)).toMatchObject({ estado: 'anulada' });
+  });
+
+  it('a crédito sin abonos y al contado: no se bloquea (al contado ni siquiera consulta los abonos)', async () => {
+    const sinAbonos = crear({ devoluciones: devolucionesReales(0, 'bloquear') });
+    sinAbonos.repo.ventaDeNota.mockResolvedValue(venta({ a_credito: true, saldo_cxc: 103, contado: 0 }));
+    sinAbonos.repo.principalesDeVenta.mockResolvedValue([]);
+    expect(await sinAbonos.servicio.anularVenta(9, {}, 1)).toMatchObject({ estado: 'anulada' });
+
+    const consultas = { exigirAnulacionCreditoPermitida: jest.fn(), turnoDeVenta: jest.fn(async () => null) };
+    const contado = crear({ devoluciones: consultas });
+    contado.repo.principalesDeVenta.mockResolvedValue([]);
+    await contado.servicio.anularVenta(9, {}, 1);
+    expect(consultas.exigirAnulacionCreditoPermitida).not.toHaveBeenCalled();
+  });
+
+  it('POST comprobante/anular aplica la misma regla cuando hay una venta activa', async () => {
+    const { servicio, repo } = crear({ devoluciones: devolucionesReales(20, 'bloquear') });
+    repo.ventaDeNota.mockResolvedValue(venta({ a_credito: true, contado: 0 }));
+    const error = await servicio.anularComprobante({ id_comprobante: 40 } as never, 1).catch((e: unknown) => e);
+    expect((error as HttpException).getStatus()).toBe(409);
+    expect(repo.transaccion).not.toHaveBeenCalled();
+  });
+});
+
+describe('Fase 7 · reembolso_efectivo al anular y con nota de crédito (7.1)', () => {
+  const plan = { id_venta: 9, monto: Dinero.deSoles(103), tipo: 'anulacion', id_apertura: 77, id_usuario: 1 };
+  function devoluciones(opciones: { prevalidar?: unknown; turno?: unknown } = {}) {
+    return {
+      exigirAnulacionCreditoPermitida: jest.fn(async () => undefined),
+      prevalidar: jest.fn(async () => (opciones.prevalidar === undefined ? plan : opciones.prevalidar)),
+      registrar: jest.fn(async () => ({ registrado: true, id_movimiento: 501, monto: 103, id_apertura: 77, aviso: null })),
+      turnoDeVenta: jest.fn(async () => opciones.turno ?? null),
+    };
+  }
+
+  it('sin reembolso_efectivo: ni valida ni registra nada y la respuesta no trae `reembolso` (como hoy)', async () => {
+    const caja = devoluciones();
+    const { servicio, repo } = crear({ devoluciones: caja });
+    repo.principalesDeVenta.mockResolvedValue([]);
+    const resultado = await servicio.anularVenta(9, {}, 1);
+    expect(caja.prevalidar).not.toHaveBeenCalled();
+    expect(caja.registrar).not.toHaveBeenCalled();
+    expect(resultado).not.toHaveProperty('reembolso');
+  });
+
+  it('valida ANTES de anular y registra el egreso DESPUÉS, con el rol de quien anula', async () => {
+    const caja = devoluciones();
+    const { servicio, repo } = crear({ devoluciones: caja });
+    repo.principalesDeVenta.mockResolvedValue([]);
+    const resultado = await servicio.anularVenta(9, { reembolso_efectivo: 103 }, 1, 'admin');
+    expect(caja.prevalidar).toHaveBeenCalledWith(9, 103, 'anulacion', { id_usuario: 1, rol: 'admin' }, undefined);
+    expect(caja.prevalidar.mock.invocationCallOrder[0]).toBeLessThan(repo.transaccion.mock.invocationCallOrder[0]);
+    expect(caja.registrar).toHaveBeenCalledWith(plan, { id_usuario: 1, rol: 'admin' }, 'anulación');
+    expect(resultado).toMatchObject({ estado: 'anulada', reembolso: { registrado: true, id_movimiento: 501, monto: 103 } });
+  });
+
+  it('si la validación falla (p. ej. sin caja abierta) no se anula nada y el error sale con su código', async () => {
+    const caja = devoluciones();
+    caja.prevalidar.mockRejectedValue(ErrorCaja.conflicto(CodigoErrorCaja.CAJA_NO_ABIERTA, 'Para devolver S/ 103.00 en efectivo abra su caja.'));
+    const { servicio, repo, ventas } = crear({ devoluciones: caja });
+    repo.principalesDeVenta.mockResolvedValue([]);
+    const error = await servicio.anularVenta(9, { reembolso_efectivo: 103 }, 1).catch((e: unknown) => e);
+    expect((error as HttpException).getStatus()).toBe(409);
+    expect(((error as HttpException).getResponse() as { codigo: string }).codigo).toBe('CAJA_NO_ABIERTA');
+    expect(repo.transaccion).not.toHaveBeenCalled();
+    expect(ventas.anularVentaCompleta).not.toHaveBeenCalled();
+  });
+
+  it('nota de anulación rechazada por SUNAT: no registra el egreso y avisa que no entregue el dinero', async () => {
+    const caja = devoluciones();
+    const { servicio, emisor } = crear({ devoluciones: caja });
+    emisor.emitirNotaCredito.mockResolvedValue({ id_comprobante: 70, serie: 'FC01', numero: 2, numero_formateado: 'FC01-00000002', estado: 'error', aceptada_sunat: false, error: 'rechazo' } as never);
+    const resultado = await servicio.anularVenta(9, { reembolso_efectivo: 103 }, 1);
+    expect(resultado.estado).toBe('anulacion_rechazada');
+    expect(caja.registrar).not.toHaveBeenCalled();
+    expect(resultado.reembolso).toMatchObject({ registrado: false, id_movimiento: null });
+    expect(resultado.avisos.join(' ')).toContain('No entregue el dinero todavía');
+  });
+
+  it('sin el servicio de caja y con reembolso pedido: 503 sin anular nada', async () => {
+    const { servicio, repo } = crear();
+    repo.principalesDeVenta.mockResolvedValue([]);
+    await expect(servicio.anularVenta(9, { reembolso_efectivo: 10 }, 1)).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(repo.transaccion).not.toHaveBeenCalled();
+  });
+
+  it('venta de un turno ABIERTO sin reembolso: el aviso «registre en Caja» se cambia por «no registre un egreso»', async () => {
+    const caja = devoluciones({ turno: { id_apertura: 5, abierto: true, caja_nombre: 'Caja 1', usuario_nombre: 'Rosa', id_usuario: 7 } });
+    const { servicio, repo } = crear({ devoluciones: caja });
+    repo.principalesDeVenta.mockResolvedValue([]);
+    const resultado = await servicio.anularVenta(9, {}, 1);
+    const texto = resultado.avisos.join(' ');
+    expect(texto).toContain('NO registre un egreso');
+    expect(texto).not.toContain('registre en Caja la devolución');
+    // Turno cerrado: el aviso de siempre.
+    const cerrado = crear({ devoluciones: devoluciones({ turno: { id_apertura: 4, abierto: false, caja_nombre: 'Caja 1', usuario_nombre: null, id_usuario: 7 } }) });
+    cerrado.repo.principalesDeVenta.mockResolvedValue([]);
+    expect((await cerrado.servicio.anularVenta(9, {}, 1)).avisos.join(' ')).toContain('registre en Caja la devolución');
+  });
+
+  it('nota parcial (07): valida como devolución parcial con el total de la nota como límite y registra el egreso', async () => {
+    const caja = devoluciones({ prevalidar: { ...plan, tipo: 'parcial', monto: Dinero.deSoles(10) } });
+    const { servicio } = crear({ devoluciones: caja });
+    const respuesta = await servicio.emitir(40, { motivo: '07', sustento: 'Devolución', items: [{ id_item: 401, cantidad: 1 }], reembolso_efectivo: 10 }, 3, 'vendedor');
+    const [idVenta, monto, tipo, quien, limite] = caja.prevalidar.mock.calls[0] as unknown as [number, number, string, unknown, { monto: Dinero; texto: string }];
+    expect([idVenta, monto, tipo, quien]).toEqual([9, 10, 'parcial', { id_usuario: 3, rol: 'vendedor' }]);
+    expect(limite.monto.aNumero()).toBe(10.3);
+    expect(limite.texto).toBe('el total de la nota');
+    expect(caja.registrar).toHaveBeenCalledWith(expect.objectContaining({ tipo: 'parcial' }), { id_usuario: 3, rol: 'vendedor' }, 'nota FC01-00000002');
+    expect(respuesta.reembolso).toMatchObject({ registrado: true });
+  });
+
+  it('nota sin reembolso_efectivo: todo como antes', async () => {
+    const caja = devoluciones();
+    const { servicio } = crear({ devoluciones: caja });
+    const respuesta = await servicio.emitir(40, { motivo: '07', sustento: 'Devolución', items: [{ id_item: 401, cantidad: 1 }] }, 3);
+    expect(caja.prevalidar).not.toHaveBeenCalled();
+    expect(respuesta).not.toHaveProperty('reembolso');
   });
 });

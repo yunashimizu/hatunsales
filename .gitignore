@@ -66,3 +66,7 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 # Copias de seguridad de la base de datos (npm run respaldo:base): contienen datos reales
 /respaldos
 *.dump
+
+# Salidas de pruebas locales: no son parte del sistema
+logs.sqlite
+resultados.json

@@ -5,6 +5,7 @@ import { ReceptorResponse, SugerenciaReceptor } from '../../models/model/recepto
 import { TIPO_DOC_DNI, TIPO_DOC_RUC } from '../../util/fiscal/tipos-comprobante';
 import { Cliente } from '../../models/DBModel/cliente.entity';
 import { Empresa } from '../../models/DBModel/empresa.entity';
+import { esRucValido } from '../../sunat/nucleo/documentos-identidad';
 
 /**
  * Resuelve quién recibe un comprobante.
@@ -96,6 +97,8 @@ export class ReceptorBussnies {
   async buscarEmpresa(ruc: string, guardar = true): Promise<ReceptorResponse> {
     const enBase = await this.repo.buscarEmpresaPorRuc(ruc);
     if (enBase) return this.desdeEmpresa(enBase, 'base');
+    // Después de la base local (un RUC ya guardado se sigue devolviendo) y antes de la consulta externa.
+    if (!esRucValido(ruc)) throw new BadRequestException('RUC no válido');
 
     try {
       const datos = await this.consulta.consultarRuc(ruc);
@@ -114,6 +117,7 @@ export class ReceptorBussnies {
           telefono: datos.telefonos,
           estado: datos.estado,
           condicion: datos.condicion,
+          ...this.ubicacion(datos),
           ...this.evaluarRuc(datos.estado, datos.condicion),
         };
       }
@@ -212,6 +216,8 @@ export class ReceptorBussnies {
     }
 
     if (numero.length === 11) {
+      // Un RUC con dígito verificador malo no puede existir: la factura fallaría al emitirse.
+      if (!esRucValido(numero)) throw new BadRequestException('RUC no válido');
       const empresa = await this.repo.guardarEmpresa({
         ruc: numero,
         razon_social: nombre,
@@ -293,12 +299,24 @@ export class ReceptorBussnies {
       denominacion: empresa.razon_social ?? empresa.nombre_comercial ?? empresa.ruc,
       nombre_comercial: empresa.nombre_comercial ?? '',
       direccion: empresa.direccion ?? '',
-      email: '',
+      // Fase 3.4: el correo guardado de la empresa (antes siempre vacío: la entidad no leía la columna).
+      email: empresa.email ?? '',
       telefono: empresa.telefonos ?? '',
       estado: empresa.estado ?? '',
       condicion: empresa.condicion ?? '',
+      ...this.ubicacion(empresa),
       ...this.evaluarRuc(empresa.estado, empresa.condicion),
     };
+  }
+
+  /** Fase 3.5: ubigeo y departamento/provincia/distrito, solo los que traen texto (campos opcionales). */
+  private ubicacion(fuente: { ubigeo?: string | null; departamento?: string | null; provincia?: string | null; distrito?: string | null }) {
+    const salida: Pick<ReceptorResponse, 'ubigeo' | 'departamento' | 'provincia' | 'distrito'> = {};
+    for (const campo of ['ubigeo', 'departamento', 'provincia', 'distrito'] as const) {
+      const valor = String(fuente?.[campo] ?? '').trim();
+      if (valor && valor !== '-') salida[campo] = valor;
+    }
+    return salida;
   }
 
   /**

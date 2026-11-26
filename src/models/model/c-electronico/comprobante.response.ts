@@ -1,3 +1,4 @@
+import type { RebajaVisible } from '../../../util/precios/control-rebaja';
 import type { LoteDeComprobante } from '../../../sunat/documentos/lotes.contrato';
 import { ReceptorResponse } from '../receptor.response';
 
@@ -350,6 +351,12 @@ export interface PreviewComprobanteResponse {
     /** Total de los productos antes del recargo. */
     total_sin_recargo: number;
   };
+  /**
+   * Fase 6.4 (solo POS, opcional): líneas con rebaja sobre el tope o bajo el costo, que en modo `autorizar`
+   * pedirán la autorización de un administrador y en `registrar` quedarán anotadas. Nunca trae el costo.
+   * Ausente para administración, cotizaciones convertidas, control apagado o si no se pudo evaluar.
+   */
+  rebajas?: RebajaVisible[];
 }
 
 /** Motivo de nota del catálogo SUNAT con la forma en que el asistente arma la nota. */

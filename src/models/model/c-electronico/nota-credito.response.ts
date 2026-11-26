@@ -95,6 +95,17 @@ export interface NotaCreditoEmitidaResponse extends ComprobanteResponse {
   /** true si SUNAT ya la aceptó y sus efectos (stock, cuenta por cobrar) quedaron aplicados. */
   efectos_aplicados: boolean;
   avisos: string[];
+  /** Fase 7.1: solo si llegó `reembolso_efectivo` (> 0). Egreso de caja que devolvió el efectivo. */
+  reembolso?: ReembolsoEfectivoResponse;
+}
+
+/** Fase 7.1: el egreso de caja de la devolución en efectivo (o por qué no se registró: ver `aviso`). */
+export interface ReembolsoEfectivoResponse {
+  registrado: boolean;
+  id_movimiento: number | null;
+  monto: number;
+  id_apertura: number | null;
+  aviso: string | null;
 }
 
 /** Nota de crédito con la que se anula un comprobante aceptado (D9, rama c). */
@@ -148,6 +159,8 @@ export interface AnulacionVentaResponse {
   avisos: string[];
   /** Solo con `sin_nota`: la baja o el resumen enviado a SUNAT. */
   baja?: BajaAnulacionResponse;
+  /** Fase 7.1: solo si llegó `reembolso_efectivo` (> 0). */
+  reembolso?: ReembolsoEfectivoResponse;
 }
 
 /** POST /comprobante/anular (D9 aplicado al comprobante). Conserva los campos de la respuesta anterior. */

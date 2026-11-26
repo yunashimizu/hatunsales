@@ -141,3 +141,78 @@ describe('ReportesRepository · Fase F (rentabilidad, estancados, problemas, ped
     expect(await repo.contarPedidosWeb()).toEqual({ pendientes: 0, pagados: 3 });
   });
 });
+
+describe('ReportesRepository · costo guardado y ventas por vendedor (fase19, Fase 6.2)', () => {
+  function armarCon(capacidades: string[] | null, respuestas: any[] = []) {
+    const consultas: { sql: string; params: any[] }[] = [];
+    const manager = {
+      query: jest.fn(async (sql: string, params: any[] = []) => {
+        consultas.push({ sql, params });
+        return respuestas.shift() ?? [];
+      }),
+    };
+    const esquema = capacidades ? { tiene: jest.fn(async (c: string) => capacidades.includes(c)) } : undefined;
+    return { repo: new ReportesRepository({ manager } as any, esquema as any), consultas };
+  }
+
+  it('rentabilidad con costo guardado: usa el de la venta del comprobante (la NC por su id_venta) y si no el vigente, avisando costo_estimado', async () => {
+    const { repo, consultas } = armarCon(['ventaCosto']);
+
+    await repo.obtenerRentabilidadProductos([1, 2], 10);
+
+    const sql = consultas[0].sql.replace(/\s+/g, ' ');
+    expect(sql).toContain('FROM detalle_venta d WHERE d.id_venta = c.id_venta AND d.id_producto = ci.id_producto AND d.costo_unitario IS NOT NULL');
+    expect(sql).toContain('(CASE WHEN c.id_tipo = $2 THEN -1 ELSE 1 END) * COALESCE(ci.cantidad, 0) * COALESCE(dv.costo_unitario, pr.precio_compra, 0)');
+    expect(sql).toContain('BOOL_OR(COALESCE(dv.costo_unitario, pr.precio_compra, 0) = 0) AS sin_costo');
+    expect(sql).toContain('BOOL_OR(dv.costo_unitario IS NULL AND COALESCE(pr.precio_compra, 0) > 0) AS costo_estimado');
+    expect(consultas[0].params).toEqual([[1, 2], 7, 10]);
+  });
+
+  it('rentabilidad sin la columna (o sin el servicio): el costo vigente de siempre, sin tocar detalle_venta', async () => {
+    for (const capacidades of [[], null]) {
+      const { repo, consultas } = armarCon(capacidades);
+      await repo.obtenerRentabilidadProductos([1], 10);
+      const sql = consultas[0].sql;
+      expect(sql).not.toContain('detalle_venta');
+      expect(sql).toContain('(CASE WHEN c.id_tipo = $2 THEN -1 ELSE 1 END) * COALESCE(ci.cantidad, 0) * COALESCE(pr.precio_compra, 0)');
+      expect(sql).toContain('BOOL_OR(COALESCE(pr.precio_compra, 0) = 0) AS sin_costo');
+    }
+  });
+
+  it('ventas por vendedor con autor: agrupa por usuario, canal y local (almacén y si no la caja), con fechas UTC y local opcional', async () => {
+    const { repo, consultas } = armarCon(['ventaAutor', 'ventaEstado', 'ventaDescuento', 'bitacora', 'ventaReferencia']);
+
+    await repo.obtenerVentasPorVendedor(new Date('2026-11-01T05:00:00Z'), new Date('2026-11-26T05:00:00Z'), 3);
+
+    const sql = consultas[0].sql.replace(/\s+/g, ' ');
+    expect(sql).toContain('v.id_usuario AS id_usuario');
+    expect(sql).toContain('COALESCE(al.id_sucursal, cj.id_sucursal) AS id_sucursal');
+    expect(sql).toContain('LEFT JOIN almacenes al ON al.id_almacen = v.id_almacen');
+    expect(sql).toContain("COALESCE(v.estado, 'activa') AS estado");
+    expect(sql).toContain('COALESCE(v.total_descuento, 0) AS descuento');
+    expect(sql).toContain("b.accion = 'venta.rebaja_sobre_tope'");
+    // Rebaja en soles por línea, solo positiva, sobre la referencia guardada.
+    expect(sql).toContain('GREATEST(dv.precio_referencia - COALESCE(dv.precio_unitario_final, dv.precio), 0) * dv.cantidad');
+    expect(sql).toContain('dv.precio_referencia IS NOT NULL');
+    expect(sql).toContain("ROUND(COALESCE(SUM(vv.rebaja_monto) FILTER (WHERE vv.estado <> 'anulada'), 0), 2) AS rebajas_monto");
+    expect(sql).toContain('WHERE v.fecha >= $1 AND v.fecha < $2');
+    expect(sql).toContain('($3::int IS NULL OR vv.id_sucursal = $3::int)');
+    expect(consultas[0].params).toEqual(['2026-11-01 05:00:00.000', '2026-11-26 05:00:00.000', 3]);
+  });
+
+  it('ventas por vendedor sin fase19: todas sin autor, el local por la caja y sin leer la bitácora', async () => {
+    const { repo, consultas } = armarCon(['ventaEstado']);
+
+    await repo.obtenerVentasPorVendedor(new Date('2026-11-01T05:00:00Z'), new Date('2026-11-26T05:00:00Z'));
+
+    const sql = consultas[0].sql.replace(/\s+/g, ' ');
+    expect(sql).toContain('NULL::int AS id_usuario');
+    expect(sql).toContain('cj.id_sucursal AS id_sucursal');
+    expect(sql).not.toContain('v.id_almacen');
+    expect(sql).not.toContain('bitacora_acciones');
+    expect(sql).toContain('0 AS descuento');
+    expect(sql).toContain('0 AS rebaja_monto');
+    expect(sql).not.toContain('precio_referencia');
+    expect(consultas[0].params[2]).toBeNull();
+  });
+});

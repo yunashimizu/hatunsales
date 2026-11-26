@@ -236,6 +236,8 @@ export interface FilaRentabilidad {
   ultima_venta: string | null;
   /** El producto no tiene precio de compra registrado: su costo y su margen no son confiables. */
   sin_costo: boolean;
+  /** Parte del costo salió del precio de compra ACTUAL (la venta no guardó el suyo): es una estimación. */
+  costo_estimado: boolean;
 }
 
 export interface FilaRentabilidadCategoria {
@@ -320,6 +322,51 @@ const SEMANAS_MAPA_MAX = 12;
 export const NOTA_COSTO_RENTABILIDAD =
   'Margen = venta sin IGV − costo. El costo es la cantidad vendida por el precio de compra actual de cada producto ' +
   '(el sistema no guarda el costo de cada venta). Si los precios de compra incluyen IGV, el margen real es algo mayor.';
+/** Nota cuando las ventas ya guardan su costo (fase19). */
+export const NOTA_COSTO_RENTABILIDAD_GUARDADO =
+  'Margen = venta sin IGV − costo. El costo es el que tenía cada producto al momento de venderse; en las ventas ' +
+  'anteriores a ese registro se usa el precio de compra actual y la fila lo marca como «costo estimado». ' +
+  'Si los precios de compra incluyen IGV, el margen real es algo mayor.';
+
+/** Fila de «Ventas por vendedor y por local» (Fase 6.2). */
+export interface FilaVentasVendedor {
+  /** null: venta sin autor (anterior al registro, o de la tienda web). */
+  id_usuario: number | null;
+  /** Nombre a mostrar: el del usuario, «Tienda web» o «Sin registrar (anteriores)». */
+  vendedor: string;
+  canal: 'mostrador' | 'tienda';
+  id_sucursal: number | null;
+  local: string;
+  /** Ventas no anuladas. */
+  ventas: number;
+  total: number;
+  /** Suma de ventas.total_descuento (descuentos de catálogo, mayoristas y manuales). */
+  descuentos: number;
+  /** Ventas con una rebaja manual sobre el tope anotada en la bitácora (Tanda B2; 0 hasta entonces). */
+  rebajas_sobre_tope: number;
+  /**
+   * Soles rebajados sobre el precio de catálogo neto: suma de (precio_referencia − precio final) × cantidad de
+   * cada línea cuando es positiva. Ve también la rebaja hecha cambiando el precio. 0 sin sql/fase19 o en ventas
+   * anteriores.
+   */
+  rebajas_monto: number;
+  anuladas: number;
+  total_anulado: number;
+  /** total / ventas, 2 decimales; 0 sin ventas. */
+  ticket_promedio: number;
+}
+
+export interface VentasPorVendedorResponse {
+  fecha_inicio: string;
+  fecha_fin: string;
+  id_sucursal: number | null;
+  filas: FilaVentasVendedor[];
+  totales: { ventas: number; total: number; descuentos: number; rebajas_sobre_tope: number; rebajas_monto: number; anuladas: number; total_anulado: number; ticket_promedio: number };
+}
+
+export const VENDEDOR_SIN_REGISTRAR = 'Sin registrar (anteriores)';
+export const VENDEDOR_TIENDA_WEB = 'Tienda web';
+export const LOCAL_SIN_REGISTRAR = 'Sin local';
 
 /** Día de la semana (0 = domingo) de un 'YYYY-MM-DD', sin depender de la zona del servidor. */
 function diaSemanaYmd(ymd: string): number {
@@ -850,6 +897,7 @@ export class ReportesBussnies implements IReportesBussniees {
           margen_pct: porcentaje(margen, sinIgv),
           ultima_venta: ultimaVentaLima(f.ultima_venta),
           sin_costo: f.sin_costo === true,
+          costo_estimado: f.costo_estimado === true,
         };
       })
       .filter((p) => p.cantidad !== 0 || p.ingreso !== 0);
@@ -909,7 +957,86 @@ export class ReportesBussnies implements IReportesBussniees {
         margen_pct: porcentaje(margenTotal, sinIgvTotal),
       },
       recortado,
-      nota_costo: NOTA_COSTO_RENTABILIDAD,
+      // Con costos guardados (fase19) alguna fila tiene costo real: ni estimado ni faltante.
+      nota_costo: filas.some((f) => f.costo_estimado === false && f.sin_costo !== true)
+        ? NOTA_COSTO_RENTABILIDAD_GUARDADO
+        : NOTA_COSTO_RENTABILIDAD,
+    };
+  }
+
+  /**
+   * «Ventas por vendedor y por local» (Fase 6.2, solo admin): por usuario y sucursal, ventas no anuladas, total,
+   * descuentos, rebajas sobre el tope, anuladas y ticket promedio, en el rango de días de Lima (sin fechas, el mes
+   * en curso). Las ventas sin autor salen como «Sin registrar (anteriores)» y las de la tienda web como «Tienda web».
+   */
+  async ventasPorVendedor(
+    filters: { fecha_inicio?: string; fecha_fin?: string; id_sucursal?: number } = {},
+  ): Promise<VentasPorVendedorResponse> {
+    const rango = this.resolverRango('mensual', filters);
+    const idSucursal = filters.id_sucursal && filters.id_sucursal > 0 ? filters.id_sucursal : undefined;
+    const crudas = await this.repo.obtenerVentasPorVendedor(rango.desde, rango.hasta, idSucursal);
+
+    let ventasTot = 0;
+    let rebajasTot = 0;
+    let anuladasTot = 0;
+    let total = Dinero.cero();
+    let descuentos = Dinero.cero();
+    let rebajasMonto = Dinero.cero();
+    let anulado = Dinero.cero();
+    const ticket = (monto: Dinero, n: number) => (n > 0 ? Math.round(monto.centimos / n) / 100 : 0);
+
+    const filas: FilaVentasVendedor[] = crudas.map((f) => {
+      const idUsuario = f.id_usuario === null || f.id_usuario === undefined ? null : Number(f.id_usuario);
+      const canal = f.canal === 'tienda' ? 'tienda' : 'mostrador';
+      const ventas = Number(f.ventas ?? 0);
+      const rebajas = Number(f.rebajas_sobre_tope ?? 0);
+      const anuladas = Number(f.anuladas ?? 0);
+      const monto = Dinero.desdeBd(f.total);
+      const desc = Dinero.desdeBd(f.descuentos);
+      const rebajado = Dinero.desdeBd(f.rebajas_monto ?? 0);
+      const montoAnulado = Dinero.desdeBd(f.total_anulado);
+      ventasTot += ventas;
+      rebajasTot += rebajas;
+      anuladasTot += anuladas;
+      total = total.sumar(monto);
+      descuentos = descuentos.sumar(desc);
+      rebajasMonto = rebajasMonto.sumar(rebajado);
+      anulado = anulado.sumar(montoAnulado);
+      const nombre = String(f.usuario ?? '').trim();
+      return {
+        id_usuario: idUsuario,
+        vendedor: idUsuario !== null
+          ? nombre || `Usuario ${idUsuario}`
+          : canal === 'tienda' ? VENDEDOR_TIENDA_WEB : VENDEDOR_SIN_REGISTRAR,
+        canal,
+        id_sucursal: f.id_sucursal === null || f.id_sucursal === undefined ? null : Number(f.id_sucursal),
+        local: String(f.sucursal ?? '').trim() || LOCAL_SIN_REGISTRAR,
+        ventas,
+        total: monto.aNumero(),
+        descuentos: desc.aNumero(),
+        rebajas_sobre_tope: rebajas,
+        rebajas_monto: rebajado.aNumero(),
+        anuladas,
+        total_anulado: montoAnulado.aNumero(),
+        ticket_promedio: ticket(monto, ventas),
+      };
+    });
+
+    return {
+      fecha_inicio: aFechaLima(rango.desde),
+      fecha_fin: aFechaLima(rango.fin),
+      id_sucursal: idSucursal ?? null,
+      filas,
+      totales: {
+        ventas: ventasTot,
+        total: total.aNumero(),
+        descuentos: descuentos.aNumero(),
+        rebajas_sobre_tope: rebajasTot,
+        rebajas_monto: rebajasMonto.aNumero(),
+        anuladas: anuladasTot,
+        total_anulado: anulado.aNumero(),
+        ticket_promedio: ticket(total, ventasTot),
+      },
     };
   }
 

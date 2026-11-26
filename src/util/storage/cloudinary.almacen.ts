@@ -2,7 +2,7 @@ import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common'
 import axios from 'axios';
 import { createHash } from 'crypto';
 import { almacenamientoConfig } from '../../config/almacenamiento.config';
-import { AlmacenArchivos, ArchivoEntrada, ArchivoGuardado } from './almacen.interface';
+import { AlmacenArchivos, ArchivoEntrada, ArchivoGuardado, ArchivoLeido, BYTES_MAXIMOS_LECTURA } from './almacen.interface';
 
 /**
  * Subida a Cloudinary usando su API REST firmada.
@@ -87,6 +87,29 @@ export class CloudinaryAlmacen implements AlmacenArchivos {
     } catch (error: any) {
       // Que no se pueda borrar en el CDN no debe impedir quitarla del catálogo.
       this.logger.warn(`No se pudo eliminar ${clave} de Cloudinary: ${error?.message}`);
+    }
+  }
+
+  /**
+   * El archivo subido, sin las transformaciones de entrega. La dirección se arma con la cuenta
+   * configurada y la clave: nunca se pide una dirección cualquiera que venga de la base.
+   */
+  async leerOriginal(guardado: { clave: string; url: string }): Promise<ArchivoLeido | null> {
+    const base = `https://res.cloudinary.com/${this.config.cloud_name}/image/upload/`;
+    const formato = /\.([a-z0-9]{2,5})$/i.exec(guardado.url ?? '')?.[1];
+    const clave = guardado.clave ?? '';
+    if (!this.config.cloud_name || !formato || !clave || clave.includes('..') || !guardado.url.startsWith(base)) return null;
+    try {
+      const respuesta = await axios.get<ArrayBuffer>(`${base}${encodeURI(clave)}.${formato}`, {
+        responseType: 'arraybuffer',
+        timeout: 20_000,
+        maxContentLength: BYTES_MAXIMOS_LECTURA,
+      });
+      const mime = String(respuesta.headers?.['content-type'] ?? `image/${formato}`);
+      return { buffer: Buffer.from(respuesta.data), mime };
+    } catch (error: any) {
+      if (error?.response?.status === 404) return null;
+      throw error;
     }
   }
 

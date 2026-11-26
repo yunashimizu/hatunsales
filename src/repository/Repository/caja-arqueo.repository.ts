@@ -10,6 +10,7 @@ import {
   ICajaArqueoRepository,
   MovimientoGuardado,
   NuevoArqueo,
+  NuevoMovimientoCaja,
   TurnoArqueo,
 } from '../Irepository/ICajaArqueoRepository';
 
@@ -121,6 +122,7 @@ export class CajaArqueoRepository implements ICajaArqueoRepository {
       movimientosPorTurno: s.tiene('movimientosPorTurno'),
       conEstado: s.tieneColumna('ventas', 'estado'),
       conOrigen: s.tieneColumna('ventas', 'origen'),
+      devolucionesEnlazadas: s.tiene('movimientoVenta'),
     });
     const q: Consultor = manager ?? this.dataSource;
     const filas: any[] = await q.query(sql, [idApertura]);
@@ -231,23 +233,41 @@ export class CajaArqueoRepository implements ICajaArqueoRepository {
     await manager.query(`UPDATE caja_arqueos SET id_cierre = $2 WHERE id_arqueo = $1`, [idArqueo, idCierre]);
   }
 
-  async registrarMovimiento(
-    manager: EntityManager,
-    d: { id_apertura: number; id_caja: number; id_usuario: number; tipo: 'ingreso' | 'egreso'; monto: Dinero; descripcion: string },
-  ): Promise<number> {
+  /**
+   * INSERT del ingreso/egreso. id_venta, categoria y nro_comprobante (fase20) se agregan solo si llegan y
+   * su columna existe; sin ellos el INSERT es exactamente el de antes.
+   */
+  async registrarMovimiento(manager: EntityManager, d: NuevoMovimientoCaja): Promise<number> {
+    const extras: { columna: string; valor: unknown }[] = [];
+    if (d.id_venta != null || d.categoria != null || d.nro_comprobante != null) {
+      const s = await this.esquema.snapshot();
+      const agregar = (columna: string, valor: unknown) => {
+        if (valor !== undefined && valor !== null && s.tieneColumna('movimientos_caja', columna)) extras.push({ columna, valor });
+      };
+      agregar('id_venta', d.id_venta);
+      agregar('categoria', d.categoria);
+      agregar('nro_comprobante', d.nro_comprobante);
+    }
+    const columnasExtra = extras.map((e) => `, ${e.columna}`).join('');
+    const marcadoresExtra = extras.map((_, i) => `, $${7 + i}`).join('');
     const filas = await manager.query(
-      `INSERT INTO movimientos_caja (id_caja, tipo, monto, descripcion, fecha, id_apertura, id_usuario)
-       VALUES ($1, $2, $3::numeric, $4, NOW(), $5, $6)
+      `INSERT INTO movimientos_caja (id_caja, tipo, monto, descripcion, fecha, id_apertura, id_usuario${columnasExtra})
+       VALUES ($1, $2, $3::numeric, $4, NOW(), $5, $6${marcadoresExtra})
        RETURNING id_movimiento`,
-      [d.id_caja, d.tipo, d.monto.aTexto(), d.descripcion, d.id_apertura, d.id_usuario],
+      [d.id_caja, d.tipo, d.monto.aTexto(), d.descripcion, d.id_apertura, d.id_usuario, ...extras.map((e) => e.valor)],
     );
     return Number(filas[0]?.id_movimiento);
   }
 
   async listarMovimientos(idApertura: number, limite: number): Promise<MovimientoGuardado[]> {
+    const s = await this.esquema.snapshot();
+    const col = (c: string, tipo: string) => (s.tieneColumna('movimientos_caja', c) ? `m.${c}` : `NULL::${tipo}`);
     const filas = await this.dataSource.query(
       `SELECT m.id_movimiento, m.id_apertura, m.id_caja, m.tipo::text AS tipo, m.monto::text AS monto,
               COALESCE(m.descripcion, '') AS descripcion,
+              ${col('id_venta', 'int')} AS id_venta,
+              ${col('categoria', 'text')} AS categoria,
+              ${col('nro_comprobante', 'text')} AS nro_comprobante,
               to_char(m.fecha, ${ISO_UTC}) AS fecha,
               m.id_usuario,
               NULLIF(TRIM(CONCAT_WS(' ', u.nombre, u.apellido_paterno)), '') AS usuario_nombre
@@ -275,6 +295,9 @@ export class CajaArqueoRepository implements ICajaArqueoRepository {
       fecha: instante(f.fecha) ?? new Date(0),
       id_usuario: f.id_usuario != null ? Number(f.id_usuario) : null,
       usuario_nombre: f.usuario_nombre ?? null,
+      id_venta: f.id_venta != null ? Number(f.id_venta) : null,
+      categoria: f.categoria ?? null,
+      nro_comprobante: f.nro_comprobante ?? null,
     }));
   }
 

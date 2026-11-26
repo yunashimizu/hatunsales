@@ -12,6 +12,8 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
+import { CATEGORIAS_GASTO } from '../../caja/configuracion/control-caja';
+import type { CategoriaGasto } from '../../caja/configuracion/control-caja';
 
 const MAX_MONTO_CAJA = 10_000_000;
 
@@ -178,6 +180,25 @@ export class MovimientoCajaRequest {
   @IsInt()
   @Min(1)
   id_apertura?: number;
+
+  /** Fase 7.5 (solo egresos): categoría del gasto. Sin sql/fase20 se ignora. */
+  @IsOptional()
+  @IsIn([...CATEGORIAS_GASTO], { message: `La categoría debe ser una de: ${CATEGORIAS_GASTO.join(', ')}` })
+  categoria?: CategoriaGasto;
+
+  /** Fase 7.5 (solo egresos): número del comprobante del gasto (boleta, recibo). Sin sql/fase20 se ignora. */
+  @IsOptional()
+  @IsString({ message: 'El número de comprobante debe ser texto' })
+  @MaxLength(40, { message: 'El número de comprobante admite hasta 40 caracteres' })
+  nro_comprobante?: string;
+}
+
+/** GET /caja/ventas-sin-turno (Fase 7.6). */
+export class VentasSinTurnoQuery {
+  /** Día de Lima (AAAA-MM-DD); por defecto, hoy. */
+  @IsOptional()
+  @IsString()
+  fecha?: string;
 }
 
 /** POST /caja/cuentas-bancarias */

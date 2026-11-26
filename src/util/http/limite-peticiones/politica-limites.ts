@@ -8,6 +8,9 @@ import type { ConsumoLimite } from './almacen-limites';
  *  - auth: login, registro, Google, alta pública de clientes y PUT /auth/perfil
  *    (bcrypt cuesta CPU; fuerza bruta de la contraseña actual).
  *  - auth_cuenta: además, login por IP + correo (frena la fuerza bruta contra una cuenta).
+ *  - autorizacion: POST /venta/autorizacion, 30 cada 5 min por IP: freno grueso (todas las cajas del local
+ *    comparten IP y cuentan también los aciertos). El fino, solo de fallos y por solicitante/correo, está en
+ *    ControlRebajaService.
  *  - documentos: consultas DNI/RUC (cuota de pago de ApiPeru).
  *  - consulta_publica: consulta pública de comprobantes (/cpe/*).
  *  - publico: escrituras anónimas de la tienda (carrito, validar cupón).
@@ -17,6 +20,7 @@ import type { ConsumoLimite } from './almacen-limites';
 export type NombreCubeta =
   | 'auth'
   | 'auth_cuenta'
+  | 'autorizacion'
   | 'documentos'
   | 'consulta_publica'
   | 'publico'
@@ -61,6 +65,7 @@ export function configLimitesDesdeEntorno(): ConfigLimites {
     cubetas: {
       auth: porMinuto('LIMITE_AUTH_POR_MIN', 20),
       auth_cuenta: { limite: entero('LIMITE_LOGIN_POR_CUENTA', 10, 1_000), ventanaMs: 10 * MINUTO_MS },
+      autorizacion: { limite: entero('LIMITE_AUTORIZACION_VENTA', 30, 1_000), ventanaMs: 5 * MINUTO_MS },
       documentos: porMinuto('LIMITE_DOCUMENTOS_POR_MIN', 40),
       consulta_publica: porMinuto('LIMITE_CONSULTA_PUBLICA_POR_MIN', 20),
       publico: porMinuto('LIMITE_PUBLICO_POR_MIN', 60),
@@ -89,6 +94,8 @@ const REGLAS: readonly Regla[] = [
   { cubeta: 'auth', metodos: SOLO_POST, exactas: ['/auth/login', '/auth/register', '/auth/google', '/cliente/registro'] },
   // Cambiar contraseña o correo compara con bcrypt la contraseña actual: mismo freno.
   { cubeta: 'auth', metodos: SOLO_PUT, exactas: ['/auth/perfil'] },
+  // Fase 6.4: la caja prueba la contraseña de un administrador; freno grueso propio (el fino va en ControlRebajaService).
+  { cubeta: 'autorizacion', metodos: SOLO_POST, exactas: ['/venta/autorizacion'] },
   { cubeta: 'consulta_publica', metodos: CUALQUIERA, prefijos: ['/cpe'] },
   {
     cubeta: 'documentos',
@@ -106,6 +113,7 @@ const RUTAS_EXENTAS: ReadonlySet<string> = new Set(['/', '/salud']);
 const MENSAJES: Readonly<Record<NombreCubeta, string>> = {
   auth: 'Demasiados intentos de acceso desde esta conexión.',
   auth_cuenta: 'Demasiados intentos de inicio de sesión para esta cuenta.',
+  autorizacion: 'Demasiados intentos de autorización desde esta conexión.',
   documentos: 'Demasiadas consultas de DNI/RUC seguidas.',
   consulta_publica: 'Demasiadas consultas de comprobantes seguidas.',
   publico: 'Demasiadas solicitudes seguidas.',

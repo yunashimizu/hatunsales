@@ -75,6 +75,21 @@ export class ReportesController {
     return this.service.rentabilidadProductos({ fecha_inicio, fecha_fin });
   }
 
+  /**
+   * Ventas por vendedor y por local (Fase 6.2): fechas en días de Lima (sin fechas, el mes en curso) y local
+   * opcional (`id_sucursal`). Solo el administrador.
+   */
+  @Get('ventas-por-vendedor')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin')
+  ventasPorVendedor(
+    @Query('fecha_inicio') fecha_inicio?: string,
+    @Query('fecha_fin') fecha_fin?: string,
+    @Query('id_sucursal') id_sucursal?: string,
+  ) {
+    return this.service.ventasPorVendedor({ fecha_inicio, fecha_fin, id_sucursal: enteroPositivo(id_sucursal) });
+  }
+
   /** Productos con existencias sin ventas en 30, 60 o 90 días. */
   @Get('productos/estancados')
   @UseGuards(JwtGuard, RolesGuard)

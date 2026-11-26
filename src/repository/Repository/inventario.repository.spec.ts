@@ -270,7 +270,8 @@ describe('InventarioRepository.transferir · candados y stock esperado', () => {
       message:
         'El stock de este producto en ese almacén cambió mientras lo editaba: ahora hay 6. Recargue la ficha y vuelva a intentar.',
     });
-    expect(repo.transferir).toHaveBeenCalledWith(9, 1, 2, 2, 'Transferencia entre almacenes', 8);
+    // Fase 8.1: el último argumento es el rastro (quién transfiere; sin usuario en esta llamada).
+    expect(repo.transferir).toHaveBeenCalledWith(9, 1, 2, 2, 'Transferencia entre almacenes', 8, { id_usuario: null });
 
     const deBase = errorPg('40P01', 'deadlock detected');
     repo.transferir.mockRejectedValueOnce(deBase);
@@ -326,5 +327,141 @@ describe('InventarioRepository.listarDetallado · comodines escritos por el usua
     conteo.resolver([{ total: 0 }]);
     filas.resolver([]);
     await promesa;
+  });
+});
+
+describe('InventarioBussnies.ajustar · bitácora (Fase 6.3)', () => {
+  it('después del ajuste anota quién, el almacén, el stock antes y después y el motivo', async () => {
+    const repo = { ajustar: jest.fn().mockResolvedValue(7) };
+    const bitacora = dobleBitacora();
+    const negocio = new InventarioBussnies(repo as any, { getById: jest.fn().mockResolvedValue({ id_producto: 9 }) } as any, bitacora as any);
+
+    const r = await negocio.ajustar(
+      { id_producto: 9, id_almacen: 2, cantidad: -3, motivo: 'merma', comentario: 'caja rota' },
+      { id_usuario: 4, rol: 'vendedor' } as any,
+    );
+
+    expect(r).toEqual({ id_producto: 9, id_almacen: 2, stock: 7 });
+    expect(bitacora.registrar).toHaveBeenCalledWith({
+      accion: 'inventario.ajuste',
+      id_usuario: 4,
+      rol: 'vendedor',
+      id_almacen: 2,
+      entidad: 'producto',
+      id_entidad: 9,
+      antes: { stock: 10 },
+      despues: { stock: 7, cantidad: -3, motivo: 'merma' },
+      motivo: 'Merma o producto dañado · caja rota',
+    });
+    expect(bitacora.registrar.mock.invocationCallOrder[0]).toBeGreaterThan(repo.ajustar.mock.invocationCallOrder[0]);
+  });
+
+  it('si el ajuste falla no anota; sin bitácora (o sin usuario) el ajuste funciona como antes', async () => {
+    const bitacora = dobleBitacora();
+    const falla = new InventarioBussnies(
+      { ajustar: jest.fn().mockRejectedValue(new Error('STOCK_NEGATIVO:1')) } as any,
+      { getById: jest.fn().mockResolvedValue({ id_producto: 9 }) } as any,
+      bitacora as any,
+    );
+    await expect(falla.ajustar({ id_producto: 9, id_almacen: 2, cantidad: -3, motivo: 'merma' })).rejects.toBeInstanceOf(BadRequestException);
+    expect(bitacora.registrar).not.toHaveBeenCalled();
+
+    const sinBitacora = new InventarioBussnies({ ajustar: jest.fn().mockResolvedValue(5) } as any, { getById: jest.fn().mockResolvedValue({ id_producto: 9 }) } as any);
+    await expect(sinBitacora.ajustar({ id_producto: 9, id_almacen: 2, cantidad: 2, motivo: 'compra' })).resolves.toEqual({ id_producto: 9, id_almacen: 2, stock: 5 });
+  });
+});
+
+
+/** Doble de BitacoraService: `registrarCon` arma el evento (como el servicio real) y lo pasa a `registrar`, que es lo que miran las pruebas. */
+function dobleBitacora() {
+  const registrar = jest.fn(async (_evento: any) => undefined);
+  const registrarCon = jest.fn(async (fabrica: () => any) => {
+    const r = fabrica();
+    for (const e of Array.isArray(r) ? r : [r]) if (e) await registrar(e);
+  });
+  return { registrar, registrarCon };
+}
+
+describe('InventarioRepository: rastro de los movimientos (Fase 8.1, fase21)', () => {
+  function armarRastro(capacidades: string[], filasInventario: any[] = [{ id_inventario: 4, stock: '10' }]) {
+    const query = jest.fn(async (sql: string, _params?: unknown[]): Promise<any[]> => {
+      if (sql.includes('FOR UPDATE') && sql.includes('ANY($2::int[])')) {
+        return [{ id_inventario: 4, id_almacen: 1, stock: '10' }];
+      }
+      if (sql.includes('FOR UPDATE')) return filasInventario;
+      if (sql.includes('FROM almacenes')) return [{ id_almacen: 1, id_sucursal: 10 }, { id_almacen: 2, id_sucursal: 20 }];
+      return [];
+    });
+    const dataSource = { query, transaction: jest.fn(async (fn: (m: unknown) => unknown) => fn({ query })) };
+    const esquema = { tiene: jest.fn(async (c: string) => capacidades.includes(c)) };
+    const repo = new InventarioRepository({} as any, dataSource as any, esquema as any);
+    const movimiento = () => query.mock.calls.find((c) => String(c[0]).includes('INSERT INTO movimientos_inventario'))!;
+    return { repo, query, movimiento };
+  }
+  const TODAS = ['movimientoUsuario', 'movimientoAlmacen', 'movimientoDocumento'];
+
+  it('ajuste con fase21 (columnas presentes): guarda usuario, almacén y documento', async () => {
+    const { repo, movimiento } = armarRastro(TODAS);
+
+    await repo.ajustar(9, 2, -3, 'Merma o producto dañado', undefined, undefined, { id_usuario: 7, tipo_documento: 'ajuste', id_documento: null });
+
+    const [sql, params] = movimiento();
+    expect(String(sql)).toContain('descripcion, fecha, id_usuario, id_almacen, tipo_documento, id_documento)');
+    expect(String(sql)).toContain('NOW(), $7::int, $8::int, $9::varchar, $10::int)');
+    expect(params).toEqual([9, 'salida', 3, 10, null, 'Merma o producto dañado', 7, 2, 'ajuste', null]);
+  });
+
+  it('ajuste sin fase21 (columnas ausentes): el INSERT es exactamente el de antes, aunque llegue el rastro', async () => {
+    const { repo, movimiento } = armarRastro([]);
+
+    await repo.ajustar(9, 2, 3, 'x', undefined, undefined, { id_usuario: 7, tipo_documento: 'ajuste' });
+
+    const [sql, params] = movimiento();
+    expect(String(sql)).toMatch(/descripcion, fecha\)\s+VALUES \(\$1, \$2, \$3, \$4, \$5, \$6, NOW\(\)\)/);
+    expect(params).toHaveLength(6);
+  });
+
+  it('transferencia con fase21: tipo transferencia, almacén de origen y quién transfirió', async () => {
+    const { repo, movimiento } = armarRastro(TODAS);
+
+    await repo.transferir(9, 1, 2, 4, 'Transferencia entre almacenes', undefined, { id_usuario: 7 });
+
+    const [sql, params] = movimiento();
+    expect(String(sql)).toContain("VALUES ($1, 'transferencia', $2, $3, $4, $5, NOW(), $6::int, $7::int, $8::varchar, $9::int)");
+    expect(params).toEqual([9, 4, 10, 20, 'Transferencia entre almacenes', 7, 1, 'transferencia', null]);
+  });
+
+  it('lectura del historial del producto: con fase21 trae quién, dónde y por qué; pagina sin COUNT', async () => {
+    const { repo, query } = armarRastro(TODAS);
+    const filas = Array.from({ length: 3 }, (_, i) => ({
+      id_movimiento: 10 - i, fecha: '2026-11-25T10:00:00Z', tipo: 'salida', cantidad: '2', descripcion: 'Venta en mostrador',
+      sucursal_origen: 'Central', sucursal_destino: '', id_usuario: 7, usuario: 'Ana', id_almacen: 1, almacen: 'Principal',
+      tipo_documento: 'venta', id_documento: 50,
+    }));
+    query.mockImplementationOnce(async () => filas);
+
+    const pagina = await repo.movimientosDeProducto(9, { pagina: 1, por_pagina: 2, id_almacen: 1 });
+
+    const [sql, params] = query.mock.calls[0];
+    expect(String(sql)).toContain('LEFT JOIN usuarios u ON u.id_usuario = m.id_usuario');
+    expect(String(sql)).toContain('AND m.id_almacen = $2');
+    expect(params).toEqual([9, 1, 3, 0]);
+    expect(pagina.hay_mas).toBe(true);
+    expect(pagina.datos).toHaveLength(2);
+    expect(pagina.datos[0]).toMatchObject({ usuario: 'Ana', almacen: 'Principal', tipo_documento: 'venta', id_documento: 50, cantidad: 2 });
+    expect(pagina.rastro).toEqual({ usuario: true, almacen: true, documento: true });
+  });
+
+  it('lectura sin fase21: no toca columnas inexistentes y el rastro sale en null', async () => {
+    const { repo, query } = armarRastro([]);
+    query.mockImplementationOnce(async () => [{ id_movimiento: 1, tipo: 'entrada', cantidad: 5, id_usuario: null, usuario: null }]);
+
+    const pagina = await repo.movimientosDeProducto(9, { id_almacen: 1 });
+
+    const [sql, params] = query.mock.calls[0];
+    expect(String(sql)).not.toMatch(/m\.id_usuario|m\.id_almacen|m\.tipo_documento/);
+    expect(params).toEqual([9, 31, 0]);
+    expect(pagina.datos[0]).toMatchObject({ id_usuario: null, almacen: null, tipo_documento: null });
+    expect(pagina.rastro).toEqual({ usuario: false, almacen: false, documento: false });
   });
 });

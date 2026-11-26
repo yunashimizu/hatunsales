@@ -9,6 +9,7 @@ import type { PasarelaPago } from '../../../util/pasarela/pasarela.interface';
 import { RegistrarPagoRequest } from '../../../models/model/tienda/pedido.request';
 import { PedidoResponse } from '../../../models/model/tienda/pedido.response';
 import { pasarelaConfig } from '../../../config/pasarela.config';
+import { CobrosPorDevolverService } from '../../../pedidos-web/cobros-por-devolver.service';
 
 /** Diferencia máxima, en céntimos, entre lo que avisa la pasarela y el total del pedido. */
 const TOLERANCIA_CENTIMOS = 1;
@@ -36,6 +37,8 @@ export class PagoBussnies {
     @Inject(PASARELA_PAGO) private readonly pasarela: PasarelaPago,
     /** Boleta o factura de la venta del pedido (S5). Sin él, el pago se confirma igual y la venta queda sin comprobante. */
     @Optional() private readonly comprobantePedido?: PedidoComprobanteBussnies,
+    /** Fase 8.3: aviso en el panel, bitácora y correo del cobro aprobado sobre un pedido cancelado. */
+    @Optional() private readonly cobrosPorDevolver?: CobrosPorDevolverService,
   ) {}
 
   /** Datos que el frontend necesita para montar el formulario de pago. */
@@ -226,6 +229,7 @@ export class PagoBussnies {
         ? `Cobro recibido para el pedido ${pedido.codigo}, que está cancelado: revisar la devolución`
         : `El pedido ${pedido.codigo} ya estaba en estado ${pedido.estado}`;
       this.log.warn(motivo);
+      if (pedido.estado === 'cancelado') await this.cobroSobreCanceladoDelWebhook(evento, pedido.id_pedido, pedido.codigo, Number(pedido.total ?? 0), pedido.metodo_pago?.id_metodo);
       return motivo;
     }
 
@@ -262,9 +266,62 @@ export class PagoBussnies {
 
     await this.repo.registrarPago({ ...pago, mensaje: 'Cobro aprobado sobre un pedido cancelado: requiere devolución' });
     this.log.error(`Pedido ${idPedido}: cargo ${pago.referencia_externa ?? ''} aprobado con el pedido cancelado; requiere devolución`);
+    // Fase 8.3: además del log, a la vista del panel (lista y contador), en la bitácora y por correo. Nunca lanza.
+    await this.cobrosPorDevolver?.avisar({
+      id_pedido: idPedido,
+      codigo: actual?.codigo,
+      monto: Number(pago.monto ?? 0),
+      proveedor: String(pago.proveedor ?? this.pasarela.nombre),
+      referencia: pago.referencia_externa ?? pago.referencia ?? null,
+      origen: 'pago',
+    });
     throw new ConflictException(
       'Tu pago fue aprobado, pero el pedido ya estaba cancelado. Te contactaremos para devolverte el dinero.',
     );
+  }
+
+  /**
+   * Fase 8.3: la pasarela avisa un cobro aprobado de un pedido ya cancelado (p. ej. lo venció la tarea mientras
+   * el cliente pagaba). Antes solo quedaba en `pasarela_eventos`; ahora el cobro se guarda en `pedido_pagos`
+   * (aprobado, «requiere devolución») para que el panel lo muestre, y se avisa. Un reenvío del mismo evento ya
+   * no llega aquí: lo detiene `buscarPagoPorReferenciaExterna`. Nunca lanza.
+   */
+  private async cobroSobreCanceladoDelWebhook(
+    evento: EventoWebhook,
+    idPedido: number,
+    codigo: string,
+    total: number,
+    idMetodo?: number,
+  ): Promise<void> {
+    if (!this.cobrosPorDevolver) return;
+    const monto = evento.monto ?? total;
+    if (evento.referencia) {
+      try {
+        await this.repo.registrarPago({
+          idPedido,
+          idMetodo,
+          monto,
+          estado: 'aprobado',
+          proveedor: this.pasarela.nombre,
+          referencia_externa: evento.referencia,
+          moneda: pasarelaConfig.moneda,
+          mensaje: 'Cobro aprobado sobre un pedido cancelado: requiere devolución',
+          respuesta: evento.crudo,
+        });
+      } catch (error: any) {
+        // Otro reenvío lo guardó entre medias (índice único proveedor + referencia): ya se avisó.
+        this.log.warn(`Pedido ${idPedido}: no se guardó el cobro ${evento.referencia} sobre el pedido cancelado: ${error?.message}`);
+        return;
+      }
+    }
+    await this.cobrosPorDevolver.avisar({
+      id_pedido: idPedido,
+      codigo,
+      monto,
+      proveedor: this.pasarela.nombre,
+      referencia: evento.referencia ?? null,
+      origen: 'webhook',
+    });
   }
 
   /**

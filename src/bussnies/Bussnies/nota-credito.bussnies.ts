@@ -9,6 +9,8 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
+import { BitacoraService } from '../../bitacora/bitacora.service';
+import { ACCIONES_BITACORA } from '../../bitacora/bitacora.acciones';
 import {
   NotaCreditoRepository,
   CabeceraComprobante,
@@ -60,6 +62,11 @@ import type {
 } from '../../models/model/c-electronico/nota-credito.response';
 import type { AnularVentaRequest } from '../../models/model/venta/anular-venta.request';
 import { FORMA_MOTIVO_NOTA_CREDITO } from './comprobante.bussnies';
+import { DevolucionCajaService } from '../../caja/devolucion/devolucion-caja.service';
+import type { PlanReembolso, ResultadoReembolso } from '../../caja/devolucion/devolucion-caja.service';
+import type { TipoDevolucion } from '../../caja/devolucion/reembolso';
+import { Dinero } from '../../caja/dominio/dinero';
+import { relanzarHttp } from '../../caja/http/errores-caja.http';
 import { EmisorNotasCredito } from './nota-credito.contrato';
 import type {
   EfectoNotaCredito,
@@ -68,6 +75,7 @@ import type {
   ResumenNotasOrigen,
   SolicitudEmisionNotaCredito,
 } from './nota-credito.contrato';
+import type { RastroMovimiento } from '../../stock/rastro-movimiento';
 
 /** Motivos que acreditan el comprobante completo (D8): solo sobre un comprobante sin notas vigentes. */
 const MOTIVOS_TOTALES: ReadonlySet<string> = new Set(['01', '02', '06']);
@@ -620,6 +628,13 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     private readonly auditoria: FiscalAuditoriaRepository,
     /** Baja (RA) y resumen (RC) para anular sin nota; sin él, `sin_nota` responde 409. */
     @Optional() private readonly lotes?: LotesFiscales,
+    /** Bitácora (Fase 6.3): anulaciones y notas emitidas. Nunca hace fallar la operación. */
+    @Optional() private readonly bitacora?: BitacoraService,
+    /**
+     * Fase 7: devolución en efectivo como egreso de caja (`reembolso_efectivo`) y bloqueo de la anulación de
+     * una venta a crédito con abonos (7.2). Nest siempre lo inyecta; sin él todo funciona como antes.
+     */
+    @Optional() private readonly devoluciones?: DevolucionCajaService,
   ) {}
 
   /** El motor de comprobantes delega aquí la anulación desde Documentos y el saldo de cada comprobante. */
@@ -714,7 +729,12 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
 
   // ── Emitir ───────────────────────────────────────────────────
 
-  async emitir(idComprobante: number, dto: EmitirNotaCreditoRequest, idUsuario: number | null): Promise<NotaCreditoEmitidaResponse> {
+  async emitir(
+    idComprobante: number,
+    dto: EmitirNotaCreditoRequest,
+    idUsuario: number | null,
+    rol: string | null = null,
+  ): Promise<NotaCreditoEmitidaResponse> {
     await this.exigirEsquema();
     const motivo = String(dto?.motivo ?? '').trim();
     if (!FORMA_MOTIVO_NOTA_CREDITO[motivo] || !esMotivoNotaCredito(motivo)) {
@@ -749,12 +769,46 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     const solicitud: SolicitudPlanNota = { motivo, items: dto.items, monto: dto.monto, reingresar_stock: dto.reingresar_stock };
     const estado = calcularAcreditable(origen, notas, lineas);
     const plan = planificarNota(origen, estado, solicitud);
+    // Fase 7.1: el reembolso en efectivo se valida antes de emitir (si no cuadra, no se emite nada).
+    const planReembolso = await this.prevalidarReembolso(
+      origen.id_venta ?? null,
+      dto?.reembolso_efectivo,
+      plan.efecto === 'anular_venta' ? 'anulacion' : 'parcial',
+      idUsuario,
+      rol,
+      { monto: Dinero.desdeNumeroRedondeado(plan.total), texto: 'el total de la nota' },
+    );
 
     // Se emite en el acto: la respuesta trae lo que dijo SUNAT (aceptada, rechazada o en envío); con el envío
     // diferido llega «pendiente» (envio_diferido) y los efectos los aplica EfectosNotasTarea al aceptarse.
     const respuesta = await this.emitirPlan(origen, plan, sustento, idUsuario, (o, e) => planificarNota(o, e, solicitud));
     const efectosAplicados = respuesta.aceptada_sunat === true && !!respuesta.id_comprobante
       && (await this.efectosSinFallar(respuesta.id_comprobante, respuesta.numero_formateado ?? ''));
+    if (respuesta.id_comprobante) {
+      await this.bitacora?.registrarCon(() => ({
+        accion: ACCIONES_BITACORA.NOTA_CREDITO_EMITIDA,
+        id_usuario: idUsuario,
+        entidad: 'comprobante',
+        id_entidad: respuesta.id_comprobante,
+        antes: { id_comprobante_origen: origen.id_comprobante, origen: this.numeroDe(origen), id_venta: origen.id_venta ?? null },
+        despues: {
+          numero: respuesta.numero_formateado ?? null,
+          motivo_sunat: motivo,
+          total: plan.total,
+          efecto: plan.efecto,
+          estado: respuesta.estado ?? null,
+          aceptada_sunat: respuesta.aceptada_sunat === true,
+        },
+        motivo: sustento,
+      }));
+    }
+    const reembolso = await this.registrarReembolso(
+      planReembolso,
+      !!respuesta.id_comprobante && respuesta.estado !== 'error',
+      idUsuario,
+      rol,
+      `nota ${respuesta.numero_formateado ?? ''}`.trim(),
+    );
     return {
       ...respuesta,
       // Si el envío no terminó (caída tras el COMMIT) el motor no trae acción ni observaciones de SUNAT.
@@ -762,7 +816,8 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       sunat_observaciones: respuesta.sunat_observaciones ?? [],
       efecto: plan.efecto,
       efectos_aplicados: efectosAplicados,
-      avisos: this.avisosDeEmision(origen, plan, venta, respuesta, efectosAplicados),
+      avisos: [...this.avisosDeEmision(origen, plan, venta, respuesta, efectosAplicados), ...(reembolso?.aviso ? [reembolso.aviso] : [])],
+      ...(reembolso ? { reembolso } : {}),
     };
   }
 
@@ -850,7 +905,12 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
 
   // ── Anular venta y anular comprobante (D9) ───────────────────
 
-  async anularVenta(idVenta: number, dto: AnularVentaRequest = {}, idUsuario: number | null = null): Promise<AnulacionVentaResponse> {
+  async anularVenta(
+    idVenta: number,
+    dto: AnularVentaRequest = {},
+    idUsuario: number | null = null,
+    rol: string | null = null,
+  ): Promise<AnulacionVentaResponse> {
     const venta = await this.repo.ventaDeNota(idVenta);
     if (!venta) throw new NotFoundException(`No existe la venta ${idVenta}`);
     if (venta.estado.trim().toLowerCase() === 'anulada') {
@@ -865,8 +925,19 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
         avisos: [`La venta ${idVenta} ya estaba anulada.`],
       };
     }
+    // Fase 7.2 (D3) y 7.1: antes de tocar nada.
+    await this.exigirCreditoSinAbonos(venta);
+    const planReembolso = await this.prevalidarReembolso(idVenta, dto.reembolso_efectivo, 'anulacion', idUsuario, rol);
     const comprobantes = (await this.repo.principalesDeVenta(idVenta)).filter((c) => !c.anulado);
     const resultado = await this.anularDocumentos(comprobantes, venta, dto, idUsuario);
+    await this.anotarAnulacion(idVenta, resultado, dto.motivo, idUsuario);
+    const reembolso = await this.registrarReembolso(
+      planReembolso,
+      resultado.estado === 'anulada' || resultado.estado === 'anulacion_en_curso',
+      idUsuario,
+      rol,
+      'anulación',
+    );
     return {
       estado: resultado.estado,
       id_venta: idVenta,
@@ -876,8 +947,40 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       comprobantes_anulados: resultado.comprobantes_anulados,
       stock_devuelto: resultado.stock_devuelto,
       cxc_cerradas: resultado.cxc_cerradas,
-      avisos: resultado.avisos,
+      avisos: [
+        ...(planReembolso ? resultado.avisos : await this.avisosConTurnoDeVenta(resultado.avisos, venta)),
+        ...(reembolso?.aviso ? [reembolso.aviso] : []),
+      ],
+      ...(reembolso ? { reembolso } : {}),
     };
+  }
+
+  /**
+   * Fase 6.3: quién pidió anular la venta y en qué quedó (anulada, en curso con nota o con baja). Se anota
+   * después de que la anulación terminó; si lanzó, no se anota nada. Nunca lanza.
+   */
+  private async anotarAnulacion(
+    idVenta: number,
+    resultado: ResultadoAnulacion,
+    motivo: string | undefined,
+    idUsuario: number | null,
+  ): Promise<void> {
+    await this.bitacora?.registrarCon(() => ({
+      accion: ACCIONES_BITACORA.VENTA_ANULADA,
+      id_usuario: idUsuario,
+      entidad: 'venta',
+      id_entidad: idVenta,
+      despues: {
+        estado: resultado.estado,
+        venta_anulada: resultado.venta_anulada,
+        nota: resultado.nota?.numero_formateado ?? null,
+        baja: resultado.baja ? true : null,
+        comprobantes_anulados: resultado.comprobantes_anulados.map((c) => c.numero_formateado),
+        stock_devuelto: resultado.stock_devuelto,
+        cxc_cerradas: resultado.cxc_cerradas,
+      },
+      motivo: this.limpiar(motivo) || null,
+    }));
   }
 
   /** POST /comprobante/anular: D9 sobre el comprobante; si tiene una venta activa, se anula la venta. */
@@ -907,6 +1010,8 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     };
     // Con la venta activa se anula la venta completa; si ya estaba anulada (anulación antigua), solo el comprobante.
     const ventaActiva = venta && venta.estado.trim().toLowerCase() !== 'anulada' ? venta : null;
+    // Fase 7.2 (D3): misma regla que «Anular venta».
+    if (ventaActiva) await this.exigirCreditoSinAbonos(ventaActiva);
     const resultado = ventaActiva
       ? await this.anularDocumentos(
           (await this.repo.principalesDeVenta(ventaActiva.id_venta)).filter((c) => !c.anulado),
@@ -915,6 +1020,8 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
           idUsuario,
         )
       : await this.anularDocumentos([comprobante], null, opciones, idUsuario);
+    // Solo si había una venta activa que anular: el comprobante suelto ya queda en su auditoría fiscal.
+    if (ventaActiva) await this.anotarAnulacion(ventaActiva.id_venta, resultado, dto.motivo, idUsuario);
 
     const ventaEstado = !venta ? null : (resultado.venta_anulada || !ventaActiva) ? 'anulada' : venta.estado;
     return {
@@ -1082,7 +1189,11 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
         );
       }
       const anulacion = venta
-        ? await this.anularVentaEn(tx, venta.id_venta, `Devolución por venta ${venta.id_venta} anulada`)
+        ? await this.anularVentaEn(tx, venta.id_venta, `Devolución por venta ${venta.id_venta} anulada`, {
+            id_usuario: idUsuario,
+            tipo_documento: 'anulacion',
+            id_documento: venta.id_venta,
+          })
         : { stock_devuelto: false, cxc_cerradas: 0, ya_anulada: false };
       const anulados = await this.repo.marcarAnulados(tx, comprobantes.map((c) => c.id_comprobante), motivo);
       return { anulacion, anulados };
@@ -1186,6 +1297,18 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     const sustento = motivo.length >= 3 ? motivo : venta ? `Anulación de la venta ${venta.id_venta}` : `Anulación de ${numero}`;
     const respuesta = await this.emitirPlan(origen, plan, sustento, idUsuario, (o, e) => planificarAnulacion(o, e));
     const nota = this.notaDeRespuesta(respuesta, plan);
+    // Fase 6.3: la nota que anula ya quedó guardada (y enviada o en envío). Una nota previa no se vuelve a anotar.
+    if (nota.id_comprobante) {
+      await this.bitacora?.registrarCon(() => ({
+        accion: ACCIONES_BITACORA.NOTA_CREDITO_EMITIDA,
+        id_usuario: idUsuario,
+        entidad: 'comprobante',
+        id_entidad: nota.id_comprobante,
+        antes: { id_comprobante_origen: origen.id_comprobante, origen: numero, id_venta: venta?.id_venta ?? null },
+        despues: { numero: nota.numero_formateado, motivo_sunat: nota.motivo, total: nota.total, efecto: 'anular_venta', estado: nota.estado, aceptada_sunat: nota.aceptada_sunat },
+        motivo: sustento,
+      }));
+    }
 
     if (respuesta.aceptada_sunat) {
       if (await this.efectosSinFallar(nota.id_comprobante, nota.numero_formateado)) {
@@ -1589,7 +1712,10 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
 
     if (nota.efecto === 'anular_venta') {
       if (nota.id_venta) {
-        const anulacion = await this.anularVentaEn(tx, nota.id_venta, `Anulación de la venta ${nota.id_venta} con la nota de crédito ${numero}`);
+        const anulacion = await this.anularVentaEn(tx, nota.id_venta, `Anulación de la venta ${nota.id_venta} con la nota de crédito ${numero}`, {
+          tipo_documento: 'nota_credito',
+          id_documento: nota.id_comprobante,
+        });
         resultado.venta_anulada = !anulacion.ya_anulada;
       }
       // Con la venta anulada no queda vigente ninguno de sus comprobantes: el origen y los que nunca valieron.
@@ -1611,6 +1737,8 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
       const reingresadas = await this.ventas.devolverStockParcial(tx, nota.id_venta, productos, {
         reingresar: nota.reingresar_stock,
         descripcion: `Devolución por nota de crédito ${numero}`,
+        // Fase 8.1: los efectos de la nota los aplica el sistema cuando SUNAT la acepta (sin usuario).
+        rastro: { tipo_documento: 'nota_credito', id_documento: nota.id_comprobante },
       });
       resultado.unidades_reingresadas = reingresadas.reduce((suma, r) => suma + r.cantidad, 0);
     }
@@ -1626,13 +1754,97 @@ export class NotaCreditoBussnies implements OnModuleInit, GestorNotasCredito {
     return resultado;
   }
 
+  // ── Fase 7: caja (devolución en efectivo y crédito con abonos) ─
+
+  /**
+   * 7.1: el aviso «registre en Caja la devolución» es engañoso si la venta cae en un turno ABIERTO: su esperado
+   * ya la excluye al anularse y un egreso a mano la descontaría dos veces. En ese caso se cambia por la
+   * indicación correcta. Nunca lanza (ante cualquier fallo, los avisos de siempre).
+   */
+  private async avisosConTurnoDeVenta(avisos: string[], venta: VentaDeNota): Promise<string[]> {
+    if (!this.devoluciones || venta.contado <= 0) return avisos;
+    try {
+      const turno = await this.devoluciones.turnoDeVenta(venta.id_venta);
+      if (!turno?.abierto) return avisos;
+      const genericos = new Set([...this.avisoDevolucionDinero(venta, true), ...this.avisoDevolucionDinero(venta, false)]);
+      const correcto =
+        `La venta es del turno abierto de ${turno.caja_nombre}${turno.usuario_nombre ? ` (${turno.usuario_nombre})` : ''}: al anularse, ` +
+        'su efectivo esperado ya la descuenta. Devuelva el efectivo desde esa caja y NO registre un egreso por él (se descontaría dos veces); ' +
+        'lo cobrado por Yape, tarjeta o transferencia se devuelve por ese mismo medio.';
+      return avisos.map((a) => (genericos.has(a) ? correcto : a));
+    } catch {
+      return avisos;
+    }
+  }
+
+  /** 7.2 (D3): una venta a crédito con abonos no se anula (409) salvo `anulacion_credito_con_abonos = permitir`. */
+  private async exigirCreditoSinAbonos(venta: VentaDeNota): Promise<void> {
+    if (!this.devoluciones || !venta.a_credito) return;
+    try {
+      await this.devoluciones.exigirAnulacionCreditoPermitida(venta.id_venta);
+    } catch (error) {
+      relanzarHttp(error);
+    }
+  }
+
+  /** 7.1: null si no se pidió reembolso (todo como antes); si se pidió, lo valida entero antes de la operación. */
+  private async prevalidarReembolso(
+    idVenta: number | null,
+    monto: unknown,
+    tipo: TipoDevolucion,
+    idUsuario: number | null,
+    rol: string | null,
+    limite?: { monto: Dinero; texto: string },
+  ): Promise<PlanReembolso | null> {
+    if (monto === undefined || monto === null || monto === 0) return null;
+    if (!this.devoluciones) {
+      throw new ServiceUnavailableException({
+        codigo: 'REEMBOLSO_NO_DISPONIBLE',
+        message: 'La devolución en efectivo no está disponible en este momento. No se hizo nada: repita sin indicar el reembolso y regístrelo a mano en Caja.',
+      });
+    }
+    if (!idVenta) {
+      throw new BadRequestException({
+        codigo: 'REEMBOLSO_INVALIDO',
+        message: 'El comprobante no tiene una venta enlazada: no se puede registrar la devolución en efectivo. No se hizo nada.',
+      });
+    }
+    try {
+      return await this.devoluciones.prevalidar(idVenta, monto, tipo, { id_usuario: idUsuario, rol }, limite);
+    } catch (error) {
+      relanzarHttp(error);
+    }
+  }
+
+  /** 7.1: registra el egreso si la operación siguió adelante; si no, deja el aviso. Nunca lanza. */
+  private async registrarReembolso(
+    plan: PlanReembolso | null,
+    siguio: boolean,
+    idUsuario: number | null,
+    rol: string | null,
+    detalle: string,
+  ): Promise<ResultadoReembolso | null> {
+    if (!plan || !this.devoluciones) return null;
+    if (!siguio) {
+      return {
+        registrado: false,
+        id_movimiento: null,
+        monto: plan.monto.aNumero(),
+        id_apertura: plan.id_apertura,
+        aviso: `No se registró en Caja la devolución de ${plan.monto.formatear()}: la operación no se completó. No entregue el dinero todavía.`,
+      };
+    }
+    return this.devoluciones.registrar(plan, { id_usuario: idUsuario, rol }, detalle);
+  }
+
   private async anularVentaEn(
     tx: EntityManager,
     idVenta: number,
     descripcion: string,
+    rastro?: RastroMovimiento,
   ): Promise<{ stock_devuelto: boolean; cxc_cerradas: number; ya_anulada: boolean }> {
     try {
-      return await this.ventas.anularVentaCompleta(idVenta, { consultor: tx, descripcion });
+      return await this.ventas.anularVentaCompleta(idVenta, { consultor: tx, descripcion, ...(rastro ? { rastro } : {}) });
     } catch (error) {
       if ((error as Error)?.message === 'VENTA_NO_ENCONTRADA') throw new NotFoundException(`No existe la venta ${idVenta}`);
       throw error;

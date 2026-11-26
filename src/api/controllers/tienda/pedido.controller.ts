@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Post, Put, Query, Res, StreamableFile, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Optional, Param, ServiceUnavailableException, Post, Put, Query, Res, StreamableFile, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { PedidoBussnies } from '../../../bussnies/Bussnies/tienda/pedido.bussnies';
 import { PagoBussnies } from '../../../bussnies/Bussnies/tienda/pago.bussnies';
@@ -13,6 +13,7 @@ import { UsuarioActual } from '../../../guards/usuario-actual.decorator';
 import type { UsuarioToken } from '../../../guards/usuario-actual.decorator';
 import { CambiarEstadoPedidoRequest, CrearPedidoRequest, RegistrarPagoRequest } from '../../../models/model/tienda/pedido.request';
 import { IdEnteroPipe } from '../../../util/http/pipes/id-entero.pipe';
+import { CobrosPorDevolverService } from '../../../pedidos-web/cobros-por-devolver.service';
 
 /** Pedidos web del cliente autenticado. */
 @Controller('tienda/pedidos')
@@ -121,6 +122,8 @@ export class PedidoAdminController {
   constructor(
     private readonly service: PedidoBussnies,
     private readonly pagos: PagoBussnies,
+    /** Fase 8.3: cobros aprobados sobre pedidos cancelados. Nest siempre lo inyecta. */
+    @Optional() private readonly cobros?: CobrosPorDevolverService,
   ) {}
 
   @Get()
@@ -128,10 +131,37 @@ export class PedidoAdminController {
     return this.service.listarTodos(estado);
   }
 
-  /** Conteo de pedidos por preparar. Declarado antes de ':id' para que «resumen» no caiga en IdEnteroPipe. */
+  /**
+   * Conteo de pedidos por preparar. Declarado antes de ':id' para que «resumen» no caiga en IdEnteroPipe.
+   * Fase 8.3 (solo se añade): `cobros_por_devolver`, cobros aprobados sobre pedidos cancelados sin devolver.
+   */
   @Get('resumen')
-  resumen() {
-    return this.service.resumenPorPreparar();
+  async resumen() {
+    const base = await this.service.resumenPorPreparar();
+    return this.cobros ? { ...base, cobros_por_devolver: await this.cobros.contar() } : base;
+  }
+
+  /** Fase 8.3: cobros aprobados por la pasarela sobre pedidos ya cancelados, sin devolver (solo admin). */
+  @Get('cobros-por-devolver')
+  @Roles('admin')
+  cobrosPorDevolver() {
+    return this.cobrosServicio().listar();
+  }
+
+  /** Fase 8.3: el admin ya devolvió el dinero desde la pasarela; el cobro sale de la lista (solo admin). */
+  @Put('pagos/:id_pago/devuelto')
+  @Roles('admin')
+  marcarDevuelto(
+    @Param('id_pago', IdEnteroPipe) idPago: number,
+    @Body() body: { referencia?: string },
+    @UsuarioActual() usuario: UsuarioToken,
+  ) {
+    return this.cobrosServicio().marcarDevuelto(idPago, usuario, typeof body?.referencia === 'string' ? body.referencia : undefined);
+  }
+
+  private cobrosServicio(): CobrosPorDevolverService {
+    if (!this.cobros) throw new ServiceUnavailableException('Los cobros por devolver no están disponibles en este momento.');
+    return this.cobros;
   }
 
   @Get(':id')

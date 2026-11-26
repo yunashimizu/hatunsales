@@ -1205,3 +1205,76 @@ describe('ReportesBussnies · caché de 45 s del Inicio', () => {
     });
   });
 });
+
+describe('ReportesBussnies · costo guardado y ventas por vendedor (Fase 6.2)', () => {
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }));
+  afterEach(() => jest.useRealTimers());
+
+  it('rentabilidad: la fila avisa costo_estimado y la nota cambia cuando hay costos guardados', async () => {
+    jest.setSystemTime(new Date('2026-11-25T15:00:00Z'));
+    const { servicio } = armarF([comprobante(1)], {
+      obtenerRentabilidadProductos: jest.fn().mockResolvedValue([
+        filaRent({ costo_estimado: false }),
+        filaRent({ id_producto: 2, producto: 'Clavo', costo_estimado: true }),
+      ]),
+    });
+
+    const r = await servicio.rentabilidadProductos({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-25' });
+
+    expect(r.productos.map((p) => p.costo_estimado)).toEqual([false, true]);
+    expect(r.nota_costo).toContain('al momento de venderse');
+  });
+
+  it('rentabilidad sin fase19 (todo estimado): conserva la nota de siempre', async () => {
+    jest.setSystemTime(new Date('2026-11-25T15:00:00Z'));
+    const { servicio } = armarF([comprobante(1)], {
+      obtenerRentabilidadProductos: jest.fn().mockResolvedValue([filaRent({ costo_estimado: true })]),
+    });
+
+    const r = await servicio.rentabilidadProductos({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-25' });
+
+    expect(r.productos[0].costo_estimado).toBe(true);
+    expect(r.nota_costo).toContain('el sistema no guarda el costo de cada venta');
+  });
+
+  it('ventas por vendedor: nombres, «Sin registrar (anteriores)», «Tienda web», ticket promedio y totales; rango en días de Lima', async () => {
+    jest.setSystemTime(new Date('2026-11-25T15:00:00Z'));
+    const obtenerVentasPorVendedor = jest.fn().mockResolvedValue([
+      { id_usuario: 4, usuario: 'Ana Vende', canal: 'mostrador', id_sucursal: 1, sucursal: 'Principal', ventas: '3', total: '100.00', descuentos: '5.50', rebajas_sobre_tope: '1', rebajas_monto: '30.00', anuladas: '1', total_anulado: '20.00' },
+      { id_usuario: null, usuario: null, canal: 'mostrador', id_sucursal: 1, sucursal: 'Principal', ventas: '2', total: '50.00', descuentos: '0', rebajas_sobre_tope: '0', rebajas_monto: '0.15', anuladas: '0', total_anulado: '0' },
+      { id_usuario: null, usuario: null, canal: 'tienda', id_sucursal: null, sucursal: null, ventas: '1', total: '30.00', descuentos: '0', rebajas_sobre_tope: '0', anuladas: '0', total_anulado: '0' },
+      { id_usuario: 9, usuario: null, canal: 'mostrador', id_sucursal: 2, sucursal: 'Lurín', ventas: '0', total: '0', descuentos: '0', rebajas_sobre_tope: '0', anuladas: '2', total_anulado: '40.00' },
+    ]);
+    const { servicio } = armarF([], { obtenerVentasPorVendedor });
+
+    const r = await servicio.ventasPorVendedor({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-25', id_sucursal: 1 });
+
+    const [desde, hasta, idSucursal] = obtenerVentasPorVendedor.mock.calls[0];
+    expect((desde as Date).toISOString()).toBe('2026-11-01T05:00:00.000Z');
+    expect((hasta as Date).toISOString()).toBe('2026-11-26T05:00:00.000Z');
+    expect(idSucursal).toBe(1);
+    expect(r).toMatchObject({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-25', id_sucursal: 1 });
+    expect(r.filas.map((f) => [f.vendedor, f.local, f.ticket_promedio])).toEqual([
+      ['Ana Vende', 'Principal', 33.33],
+      ['Sin registrar (anteriores)', 'Principal', 25],
+      ['Tienda web', 'Sin local', 30],
+      ['Usuario 9', 'Lurín', 0],
+    ]);
+    expect(r.filas[0]).toMatchObject({ id_usuario: 4, ventas: 3, total: 100, descuentos: 5.5, rebajas_sobre_tope: 1, rebajas_monto: 30, anuladas: 1, total_anulado: 20 });
+    // Sin la columna en la fila (repositorio sin la capacidad o filas viejas): 0, no NaN.
+    expect(r.filas.map((f) => f.rebajas_monto)).toEqual([30, 0.15, 0, 0]);
+    expect(r.totales).toEqual({ ventas: 6, total: 180, descuentos: 5.5, rebajas_sobre_tope: 1, rebajas_monto: 30.15, anuladas: 3, total_anulado: 60, ticket_promedio: 30 });
+  });
+
+  it('ventas por vendedor sin fechas: el mes en curso y sin filtro de local', async () => {
+    jest.setSystemTime(new Date('2026-11-25T15:00:00Z'));
+    const obtenerVentasPorVendedor = jest.fn().mockResolvedValue([]);
+    const { servicio } = armarF([], { obtenerVentasPorVendedor });
+
+    const r = await servicio.ventasPorVendedor();
+
+    expect(obtenerVentasPorVendedor.mock.calls[0][2]).toBeUndefined();
+    expect(r).toMatchObject({ fecha_inicio: '2026-11-01', fecha_fin: '2026-11-25', id_sucursal: null, filas: [] });
+    expect(r.totales.ticket_promedio).toBe(0);
+  });
+});

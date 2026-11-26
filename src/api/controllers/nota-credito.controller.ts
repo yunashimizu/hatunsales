@@ -38,6 +38,6 @@ export class NotaCreditoController {
     @Body() body: EmitirNotaCreditoRequest,
     @UsuarioActual() usuario: UsuarioToken,
   ) {
-    return this.notas.emitir(id, body, usuario?.id_usuario ?? null);
+    return this.notas.emitir(id, body, usuario?.id_usuario ?? null, usuario?.rol ?? null);
   }
 }

@@ -1,11 +1,16 @@
 import {
   BadRequestException, ConflictException, HttpException, Injectable, InternalServerErrorException, Logger,
-  NotFoundException,
+  NotFoundException, Optional,
 } from '@nestjs/common';
+import { BitacoraService } from '../../bitacora/bitacora.service';
+import { ACCIONES_BITACORA } from '../../bitacora/bitacora.acciones';
+import type { UsuarioToken } from '../../guards/usuario-actual.decorator';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, DeepPartial, EntityManager } from 'typeorm';
 import { Producto } from '../../models/DBModel/producto.entity';
 import { ProductoRepository, FilaProducto, FilaProductoSinCodigoSunat } from '../../repository/Repository/producto.repository';
+import type { HistorialProducto } from '../../repository/Repository/producto.repository';
+import { CodigoError, cuerpoError } from '../../util/errores-operativos';
 import { InventarioRepository } from '../../repository/Repository/inventario.repository';
 import { CrearProductoRequest, ActualizarProductoRequest } from '../../models/model/producto.request';
 import { ProductoResponse } from '../../models/model/producto.response';
@@ -15,6 +20,7 @@ import { ALIAS_UNIDADES, normalizarUnidad } from '../../sunat/catalogos/sunat.ca
 import { GRUPOS_UNIDADES, UNIDADES_AMIGABLES } from '../../sunat/catalogos/unidades-amigables';
 import type { UnidadAmigable } from '../../sunat/catalogos/unidades-amigables';
 import { ean13Interno } from '../../util/codigo-barras.util';
+import { formatearSku, prefijoDeCategoria } from '../../util/codigo-sku';
 
 /** Código de producto SUNAT (catálogo 25, UNSPSC): exactamente 8 dígitos. */
 const PATRON_CODIGO_SUNAT = /^\d{8}$/;
@@ -29,6 +35,22 @@ export interface ResultadoAsignacionCodigosSunat {
 /** Intentos máximos al buscar un código interno que no exista ya en productos. */
 const MAX_INTENTOS_CODIGO_INTERNO = 5;
 
+/** Campos cuyo cambio queda en la bitácora como `producto.precio_cambiado` (R7). */
+const CAMPOS_PRECIO = ['precio_venta', 'precio_compra', 'descuento'] as const;
+
+interface PreciosProducto {
+  nombre: string;
+  precio_venta: number | null;
+  precio_compra: number | null;
+  descuento: number | null;
+}
+
+function numeroONulo(valor: unknown): number | null {
+  if (valor === null || valor === undefined || valor === '') return null;
+  const n = Number(valor);
+  return Number.isFinite(n) ? n : null;
+}
+
 @Injectable()
 export class ProductoBussnies implements IProductoBussniees {
 
@@ -42,6 +64,8 @@ export class ProductoBussnies implements IProductoBussniees {
     // Para el ajuste de stock dentro del mismo PUT de edición (misma etiqueta de kardex que
     // POST /inventario/ajuste). No hay ciclo: InventarioBussnies depende del repositorio.
     private readonly inventarioBussnies: InventarioBussnies,
+    /** Bitácora (Fase 6.3, R7): cambios de precio/costo/descuento y borrados. Nunca hace fallar la edición. */
+    @Optional() private readonly bitacora?: BitacoraService,
   ) {}
 
   async getAll(): Promise<ProductoResponse[]> {
@@ -139,6 +163,8 @@ export class ProductoBussnies implements IProductoBussniees {
     if (stock > 0) {
       await this.inventarioRepo.ajustar(
         idProducto, almacenId, stock, 'Stock inicial · Alta de producto', manager,
+        // Fase 8.1: el alta no recibe el usuario (POST producto no lo pasa); queda el producto como documento.
+        undefined, { tipo_documento: 'alta_producto', id_documento: idProducto },
       );
     } else {
       // El producto nació en esta misma transacción: no puede tener fila todavía.
@@ -176,7 +202,7 @@ export class ProductoBussnies implements IProductoBussniees {
    * en UNA transacción: el ajuste solo se aplica si el stock real sigue siendo el que vio la
    * ficha (si no, 409 `STOCK_DESACTUALIZADO` y no queda nada escrito, ni siquiera el producto).
    */
-  async update(dto: ActualizarProductoRequest, id: number): Promise<ProductoResponse> {
+  async update(dto: ActualizarProductoRequest, id: number, usuario?: UsuarioToken): Promise<ProductoResponse> {
     // Validaciones sin base de datos primero: un 400 no debe costar viajes.
     const codigoSunat = this.normalizarCodigoSunat(dto.codigo_sunat);
     const cambios = this.cambiosDeEdicion(dto, codigoSunat);
@@ -184,6 +210,12 @@ export class ProductoBussnies implements IProductoBussniees {
 
     const hayCambios = Object.keys(cambios).length > 0;
     const ajuste = dto.ajuste_stock;
+    // Fase 6.3 (R7, obligatorio): precio, costo y descuento ANTES del cambio, solo si la edición los trae.
+    const tocaPrecios = CAMPOS_PRECIO.some((c) => cambios[c] !== undefined);
+    const preciosAntes = tocaPrecios && (await this.bitacora?.disponible()) ? await this.leerPrecios(id) : null;
+
+    // Fase 8.5: ajustar el stock desde la ficha fuera de sus locales → 403, antes de escribir nada.
+    if (ajuste) await this.inventarioBussnies.exigirAlmacenParaAjuste(usuario, Number(ajuste.id_almacen));
 
     try {
       if (ajuste) {
@@ -209,7 +241,7 @@ export class ProductoBussnies implements IProductoBussniees {
               motivo: 'correccion',
               comentario: 'Ajuste de stock desde edición de producto',
               stock_esperado: stockAnterior,
-            });
+            }, { id_usuario: usuario?.id_usuario ?? null, tipo_documento: 'ajuste', id_documento: null });
           }
         });
       } else if (hayCambios) {
@@ -222,7 +254,60 @@ export class ProductoBussnies implements IProductoBussniees {
     }
 
     // Sin cambios ni ajuste, esta lectura es también la que responde 404 si no existe.
-    return this.getById(id);
+    const actualizado = await this.getById(id);
+    if (preciosAntes) await this.anotarCambioDePrecio(id, preciosAntes, actualizado, usuario);
+    return actualizado;
+  }
+
+  /** Precio de venta, costo y descuento guardados (null si el producto no existe o la lectura falla). */
+  private async leerPrecios(id: number): Promise<PreciosProducto | null> {
+    try {
+      const filas = await this.dataSource.query(
+        'SELECT nombre, precio_venta, precio_compra, descuento FROM productos WHERE id_producto = $1',
+        [id],
+      );
+      const f = filas?.[0];
+      if (!f) return null;
+      return {
+        nombre: String(f.nombre ?? ''),
+        precio_venta: numeroONulo(f.precio_venta),
+        precio_compra: numeroONulo(f.precio_compra),
+        descuento: numeroONulo(f.descuento),
+      };
+    } catch (error) {
+      // La bitácora nunca frena la edición: sin el «antes» no se anota.
+      this.logger.warn(`No se pudieron leer los precios del producto ${id} para la bitácora: ${(error as Error)?.message ?? error}`);
+      return null;
+    }
+  }
+
+  /** Anota `producto.precio_cambiado` solo si cambió algo de precio, costo o descuento. Nunca lanza. */
+  private async anotarCambioDePrecio(
+    id: number,
+    antes: PreciosProducto,
+    despues: ProductoResponse,
+    usuario?: UsuarioToken,
+  ): Promise<void> {
+    // Todo el armado va dentro de la fábrica: si algo lanza, la edición ya guardada responde igual.
+    await this.bitacora?.registrarCon(() => {
+      const ahora: PreciosProducto = {
+        nombre: String(despues.nombre ?? antes.nombre),
+        precio_venta: numeroONulo(despues.precio_venta),
+        precio_compra: numeroONulo(despues.precio_compra),
+        descuento: numeroONulo(despues.descuento),
+      };
+      const distinto = (a: number | null, b: number | null) => Math.round((a ?? 0) * 10000) !== Math.round((b ?? 0) * 10000);
+      if (!CAMPOS_PRECIO.some((c) => distinto(antes[c], ahora[c]))) return null;
+      return {
+        accion: ACCIONES_BITACORA.PRODUCTO_PRECIO_CAMBIADO,
+        id_usuario: usuario?.id_usuario ?? null,
+        rol: usuario?.rol ?? null,
+        entidad: 'producto',
+        id_entidad: id,
+        antes: { nombre: antes.nombre, precio_venta: antes.precio_venta, precio_compra: antes.precio_compra, descuento: antes.descuento },
+        despues: { nombre: ahora.nombre, precio_venta: ahora.precio_venta, precio_compra: ahora.precio_compra, descuento: ahora.descuento },
+      };
+    });
   }
 
   /**
@@ -352,22 +437,58 @@ export class ProductoBussnies implements IProductoBussniees {
     return { actualizados, rechazados };
   }
 
-  /** Borrado directo: `affected` dice si existía (antes se leía el producto primero). */
-  async delete(id: number): Promise<number> {
-    let borrados: number;
+  /**
+   * Fase 9.3: archivar en vez de borrar. Un producto con historial (ventas, comprobantes, pedidos web,
+   * cotizaciones, recepciones, guías, movimientos, stock o fotos) NO se borra: 409
+   * `PRODUCTO_CON_HISTORIAL` con el detalle y la propuesta de desactivarlo (PUT producto/:id
+   * `{ estado: false }`). Solo el que no tiene historial se borra de verdad (con sus filas de
+   * configuración vacías), y queda en la bitácora como antes.
+   */
+  async delete(id: number, usuario?: UsuarioToken): Promise<number> {
+    // Fase 6.3: lo que se borra, leído antes (solo si hay bitácora; un fallo de lectura no frena el borrado).
+    const antes = (await this.bitacora?.disponible()) ? await this.leerPrecios(id) : null;
+    let resultado: { borrados: number; historial: HistorialProducto | null };
     try {
-      borrados = await this.repo.delete(id);
+      resultado = await this.repo.eliminarSiNoTieneHistorial(id);
     } catch (error: any) {
-      // 23503: tiene ventas, inventario, kardex u otros registros que lo referencian.
+      // 23503: otra tabla que lo referencia y que la lista de historial no conoce. Mismo 409, mensaje general.
       if (String(error?.code ?? error?.driverError?.code ?? '') === '23503') {
-        throw new ConflictException(
-          'No se puede eliminar: el producto tiene ventas, stock o movimientos registrados. Desactívelo en su lugar.',
-        );
+        throw new ConflictException({
+          ...cuerpoError(
+            CodigoError.PRODUCTO_CON_HISTORIAL,
+            'No se puede eliminar: el producto tiene ventas, stock o movimientos registrados. Desactívelo en su lugar.',
+          ),
+          historial: {},
+          sugerencia: 'desactivar',
+        });
       }
       throw error;
     }
-    if (!borrados) throw new NotFoundException(`Producto ${id} no encontrado`);
-    return borrados;
+    if (resultado.historial && resultado.historial.total > 0) {
+      const nombre = antes?.nombre ? ` «${antes.nombre}»` : '';
+      const detalle = Object.entries(resultado.historial.detalle)
+        .map(([tipo, n]) => `${tipo}: ${n >= 1000 ? 'más de 1000' : n}`)
+        .join(', ');
+      throw new ConflictException({
+        ...cuerpoError(
+          CodigoError.PRODUCTO_CON_HISTORIAL,
+          `No se puede eliminar el producto${nombre}: tiene historial (${detalle}). ` +
+            'Desactívelo en su lugar: deja de aparecer en el punto de venta y en la tienda, y su historial se conserva.',
+        ),
+        historial: resultado.historial.detalle,
+        sugerencia: 'desactivar',
+      });
+    }
+    if (!resultado.borrados) throw new NotFoundException(`Producto ${id} no encontrado`);
+    await this.bitacora?.registrarCon(() => ({
+      accion: ACCIONES_BITACORA.PRODUCTO_ELIMINADO,
+      id_usuario: usuario?.id_usuario ?? null,
+      rol: usuario?.rol ?? null,
+      entidad: 'producto',
+      id_entidad: id,
+      antes: antes ? { ...antes } : null,
+    }));
+    return resultado.borrados;
   }
 
   async buscarPorCodigoBarras(codigo_barras: string): Promise<ProductoResponse> {
@@ -401,6 +522,28 @@ export class ProductoBussnies implements IProductoBussniees {
       if (!(await this.repo.buscarPorCodigoBarras(candidato))) return { codigo: candidato };
     }
     throw new InternalServerErrorException('No se pudo generar un código interno libre; intente de nuevo');
+  }
+
+  /**
+   * Fase 2.8: SKU sugerido para la categoría (id numérico, o el nombre como texto; vacío → GEN).
+   * Solo lectura: no reserva nada. Si el siguiente ya está usado como SKU o código de barras, prueba los
+   * que siguen (hasta 20).
+   */
+  async siguienteSku(categoria?: string | null): Promise<{ sugerencia: string; prefijo: string; correlativo: number }> {
+    const texto = String(categoria ?? '').trim();
+    let nombre: string | null = texto;
+    if (/^\d+$/.test(texto)) {
+      nombre = await this.repo.nombreCategoria(Number(texto));
+      if (nombre === null) throw new NotFoundException(`Categoría ${texto} no encontrada`);
+    }
+    const prefijo = prefijoDeCategoria(nombre);
+    let correlativo = (await this.repo.mayorCorrelativoSku(prefijo)) + 1;
+    for (let intento = 0; intento < 20; intento++) {
+      const sugerencia = formatearSku(prefijo, correlativo);
+      if (!(await this.repo.codigoEnUso(sugerencia))) return { sugerencia, prefijo, correlativo };
+      correlativo++;
+    }
+    throw new ConflictException('No se encontró un SKU libre para esa categoría; escríbalo a mano.');
   }
 
   // ── Auxiliares ───────────────────────────────────────────────

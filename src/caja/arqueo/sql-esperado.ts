@@ -19,12 +19,28 @@ export interface OpcionesSqlEsperado {
   conEstado: boolean;
   /** ventas.origen existe (para separar ventas web). */
   conOrigen: boolean;
+  /**
+   * Fase 7.1 (movimientos_caja.id_venta, sql/fase20). Una venta anulada cuyo efectivo se devolvió con un egreso
+   * enlazado registrado DESPUÉS del cierre de este turno sigue contando en este turno: ese efectivo sí entró en
+   * su gaveta (y se contó al cerrar) y salió por el egreso del turno de quien lo devolvió. Sin esto, al recalcular
+   * el turno cerrado la venta desaparecería y se descontaría dos veces (aquí y con el egreso). Solo afecta a
+   * ventas con ese egreso (no existen antes de fase20): todo lo demás calcula exactamente igual que antes.
+   */
+  devolucionesEnlazadas?: boolean;
 }
 
 export function sqlEsperadoTurno(o: OpcionesSqlEsperado): string {
   const estado = o.conEstado ? `COALESCE(v.estado, 'activa')` : `'activa'`;
   const origen = o.conOrigen ? `COALESCE(v.origen, 'mostrador')` : `'mostrador'`;
   const ventanaMovimiento = `m.id_caja = ap.id_caja AND m.fecha >= ap.desde AND (ap.hasta IS NULL OR m.fecha < ap.hasta)`;
+  // Fase 7.1: «devuelta después»: egreso enlazado a la venta, posterior al cierre de este turno.
+  const devueltaDespues = o.devolucionesEnlazadas
+    ? `EXISTS (SELECT 1 FROM movimientos_caja mr
+                WHERE mr.id_venta = v.id_venta AND mr.tipo = 'egreso'
+                  AND ap.hasta IS NOT NULL AND mr.fecha >= ap.hasta)`
+    : 'FALSE';
+  const cuentaComoCobrada = o.devolucionesEnlazadas ? `(vs.estado <> 'anulada' OR vs.devuelta_despues)` : `vs.estado <> 'anulada'`;
+  const cuentaComoAnulada = o.devolucionesEnlazadas ? `vs.estado = 'anulada' AND NOT vs.devuelta_despues` : `vs.estado = 'anulada'`;
   const condicionMovimiento = o.movimientosPorTurno
     ? `(m.id_apertura = ap.id_apertura OR (m.id_apertura IS NULL AND ${ventanaMovimiento}))`
     : `(${ventanaMovimiento})`;
@@ -50,7 +66,8 @@ SELECT 'abono', ab.id_metodo, mp.nombre, mp.tipo,
    WHERE a.id_apertura = $1
 ),
 vs AS (
-  SELECT v.id_venta, v.total, ${estado} AS estado, ${origen} AS origen
+  SELECT v.id_venta, v.total, ${estado} AS estado, ${origen} AS origen${o.devolucionesEnlazadas ? `,
+         ${devueltaDespues} AS devuelta_despues` : ''}
     FROM ap
     JOIN ventas v
       ON v.id_caja = ap.id_caja
@@ -62,7 +79,7 @@ SELECT 'venta' AS fuente, vp.id_metodo, mp.nombre, mp.tipo,
   FROM vs
   JOIN venta_pago vp ON vp.id_venta = vs.id_venta
   LEFT JOIN metodos_pago mp ON mp.id_metodo = vp.id_metodo
- WHERE vs.estado <> 'anulada' AND vs.origen = 'mostrador'
+ WHERE ${cuentaComoCobrada} AND vs.origen = 'mostrador'
  GROUP BY vp.id_metodo, mp.nombre, mp.tipo${abonos}
 UNION ALL
 SELECT m.tipo::text, NULL, NULL, NULL, SUM(m.monto)::text, COUNT(*)::int, '0'
@@ -77,6 +94,6 @@ HAVING COUNT(*) > 0
 UNION ALL
 SELECT 'venta_anulada', NULL, NULL, NULL, COALESCE(SUM(vs.total), 0)::text, COUNT(*)::int, '0'
   FROM vs
- WHERE vs.estado = 'anulada'
+ WHERE ${cuentaComoAnulada}
 HAVING COUNT(*) > 0`;
 }

@@ -1,9 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { join, extname } from 'path';
+import { join, extname, resolve, sep } from 'path';
 import { promises as fs } from 'fs';
 import { randomUUID } from 'crypto';
 import { almacenamientoConfig } from '../../config/almacenamiento.config';
-import { AlmacenArchivos, ArchivoEntrada, ArchivoGuardado } from './almacen.interface';
+import { AlmacenArchivos, ArchivoEntrada, ArchivoGuardado, ArchivoLeido, BYTES_MAXIMOS_LECTURA } from './almacen.interface';
 
 /**
  * Escribe en el disco del servidor. Pensado para desarrollo local.
@@ -47,6 +47,29 @@ export class DiscoAlmacen implements AlmacenArchivos {
     } catch (error: any) {
       this.logger.warn(`No se pudo eliminar ${clave}: ${error?.message}`);
     }
+  }
+
+  /** `null` si el archivo ya no está (en Railway el disco se pierde en cada despliegue) o pesa demasiado. */
+  async leerOriginal(guardado: { clave: string; url: string }): Promise<ArchivoLeido | null> {
+    const raiz = resolve(this.config.ruta);
+    const ruta = resolve(raiz, guardado.clave ?? '');
+    if (!guardado.clave || !ruta.startsWith(raiz + sep)) return null;
+    try {
+      const datos = await fs.stat(ruta);
+      if (!datos.isFile() || datos.size > BYTES_MAXIMOS_LECTURA) return null;
+      return { buffer: await fs.readFile(ruta), mime: this.mimeDesdeExtension(extname(ruta)) };
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  private mimeDesdeExtension(extension: string): string {
+    const mapa: Record<string, string> = {
+      '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+      '.webp': 'image/webp', '.avif': 'image/avif', '.gif': 'image/gif',
+    };
+    return mapa[extension.toLowerCase()] ?? 'application/octet-stream';
   }
 
   private extensionDesdeMime(mime: string): string {

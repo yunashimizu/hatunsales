@@ -13,6 +13,7 @@ import { IClienteBussniees } from '../Ibussnies/IClienteBussniees';
 import { Cliente } from '../../models/DBModel/cliente.entity';
 import { Empresa } from 'src/models/DBModel/empresa.entity';
 import { CodigoError, cuerpoError } from '../../util/errores-operativos';
+import { esRucValido } from '../../sunat/nucleo/documentos-identidad';
 
 @Injectable()
 export class ClienteBussnies implements IClienteBussniees {
@@ -187,6 +188,8 @@ async crearDesdeSunatRuc(ruc: string): Promise<any> {
 
   const enBD = await this.repo.buscarEmpresaPorRuc(ruc);
   if (enBD) return this.mapEmpresa(enBD);
+  // Después de la base local (un RUC ya guardado se sigue devolviendo) y antes de la consulta externa.
+  if (!esRucValido(ruc)) throw new BadRequestException('RUC no válido');
 
   try {
     const { data } = await axios.get(

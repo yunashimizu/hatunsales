@@ -10,7 +10,7 @@ import { PasarelaSimulada } from '../../../util/pasarela/simulada.pasarela';
 
 type Estado = 'pendiente' | 'pagado' | 'preparando' | 'enviado' | 'entregado' | 'cancelado';
 
-function escenario(opciones: { estado?: Estado; total?: number; emitirDePedido?: jest.Mock } = {}) {
+function escenario(opciones: { estado?: Estado; total?: number; emitirDePedido?: jest.Mock; cobros?: { avisar: jest.Mock } } = {}) {
   const pedidos = new Map<number, any>();
   const crearPedido = (id: number, estado: Estado) =>
     pedidos.set(id, {
@@ -81,6 +81,7 @@ function escenario(opciones: { estado?: Estado; total?: number; emitirDePedido?:
     pedidosBussnies as any,
     pasarela,
     comprobantePedido as any,
+    opciones.cobros as any,
   );
 
   return { servicio, repo, ventaRepo, stockRepo, pedidos, pagos, eventos, historial, cargo, comprobantePedido };
@@ -302,5 +303,44 @@ describe('PagoBussnies · comprobante del pedido web (S5)', () => {
 
     await expect(sinComprobantes.confirmarManual(7, 'OP-1')).resolves.toBeUndefined();
     expect(e.ventaRepo.generarDesdePedido).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PagoBussnies · cobro aprobado sobre un pedido cancelado (Fase 8.3)', () => {
+  it('webhook: el cobro queda en pedido_pagos (aprobado, requiere devolución), se avisa una vez y el pedido sigue cancelado', async () => {
+    enDesarrollo();
+    const cobros = { avisar: jest.fn(async () => undefined) };
+    const { servicio, pedidos, pagos, eventos, ventaRepo } = escenario({ estado: 'cancelado', cobros });
+
+    await servicio.procesarWebhook({ referencia: 'ch_1', monto: 118, metadata: { id_pedido: 7 } }, {});
+    // La pasarela reintenta el mismo aviso: ya no se registra ni se avisa otra vez.
+    await servicio.procesarWebhook({ referencia: 'ch_1', monto: 118, metadata: { id_pedido: 7 } }, {});
+
+    expect(pedidos.get(7).estado).toBe('cancelado');
+    expect(ventaRepo.generarDesdePedido).not.toHaveBeenCalled();
+    expect(pagos).toHaveLength(1);
+    expect(pagos[0]).toMatchObject({ idPedido: 7, estado: 'aprobado', referencia_externa: 'ch_1', monto: 118 });
+    expect(pagos[0].mensaje).toMatch(/requiere devolución/);
+    expect(cobros.avisar).toHaveBeenCalledTimes(1);
+    expect(cobros.avisar).toHaveBeenCalledWith(expect.objectContaining({ id_pedido: 7, monto: 118, referencia: 'ch_1', origen: 'webhook' }));
+    expect(eventos[0].error).toMatch(/cancelado/i);
+  });
+
+  it('pago del checkout que vuelve con el pedido ya cancelado (p. ej. lo venció la tarea): log + aviso + 409 al cliente', async () => {
+    enDesarrollo();
+    const cobros = { avisar: jest.fn(async () => undefined) };
+    const e = escenario({ cobros });
+    // El pedido se cancela mientras la pasarela cobra.
+    e.cargo.mockImplementationOnce(async (datos: any) => {
+      e.pedidos.get(7).estado = 'cancelado';
+      return { aprobado: true, referencia: 'ch_9', proveedor: 'simulada', mensaje: 'ok', crudo: {} } as any;
+    });
+
+    await expect(e.servicio.pagar(7, { token_pasarela: 'tok' }, 3)).rejects.toThrow(/ya estaba cancelado/);
+
+    expect(e.pagos).toHaveLength(1);
+    expect(e.pagos[0]).toMatchObject({ estado: 'aprobado', referencia_externa: 'ch_9' });
+    expect(cobros.avisar).toHaveBeenCalledWith(expect.objectContaining({ id_pedido: 7, origen: 'pago', referencia: 'ch_9' }));
+    expect(e.ventaRepo.generarDesdePedido).not.toHaveBeenCalled();
   });
 });

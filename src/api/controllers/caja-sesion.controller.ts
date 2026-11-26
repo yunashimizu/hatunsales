@@ -14,6 +14,7 @@ import {
   CrearCajaRequest,
   ResumenSucursalesPdfQuery,
   ResumenSucursalesQuery,
+  VentasSinTurnoQuery,
 } from '../../models/model/caja.request';
 
 /**
@@ -86,6 +87,12 @@ export class CajaSesionController {
       disposition: `attachment; filename="${nombreArchivo}"`,
       length: buffer.length,
     });
+  }
+
+  /** Fase 7.6: ventas de mostrador del día que quedaron sin turno (id_caja nulo), por local. Solo lectura. */
+  @Get('ventas-sin-turno')
+  ventasSinTurno(@Query() query: VentasSinTurnoQuery, @UsuarioActual() usuario: UsuarioToken) {
+    return this.turnos.ventasSinTurno(usuario, query.fecha);
   }
 
   @Get('turno-resumen')

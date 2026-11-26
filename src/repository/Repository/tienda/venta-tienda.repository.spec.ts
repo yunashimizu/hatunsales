@@ -135,3 +135,54 @@ describe('VentaTiendaRepository · datos del comprobante del pedido (S5)', () =>
     expect(parametros).toEqual([12, 57]);
   });
 });
+
+describe('VentaTiendaRepository · almacén y costo de la venta web (fase19, R1)', () => {
+  function armarCon(capacidades: string[] | null) {
+    const base = armar(PAGADO);
+    const esquema = capacidades ? { tiene: jest.fn(async (c: string) => capacidades.includes(c)) } : undefined;
+    const dataSource = (base.repo as any).dataSource;
+    return { ...base, repo: new VentaTiendaRepository(dataSource, esquema as any) };
+  }
+
+  it('con las columnas guarda el almacén del pedido, sin vendedor, y el costo vigente de cada línea (NULL si no tiene)', async () => {
+    const { repo, buscar } = armarCon(['ventaAutor', 'ventaCosto']);
+
+    await expect(repo.generarDesdePedido(57)).resolves.toBe(99);
+
+    const venta = buscar(/INSERT INTO ventas/)!;
+    expect(venta.sql).toMatch(/origen, id_usuario, id_almacen\)/);
+    expect(venta.sql).toMatch(/'tienda', NULL,/);
+    expect(venta.sql).toMatch(/to_jsonb\(pe\) ->> 'id_almacen'/);
+    expect(venta.parametros).toEqual([3, 3, 42.37, 7.63, 50, 57]);
+    const detalle = buscar(/INSERT INTO detalle_venta/)!;
+    expect(detalle.sql).toMatch(/precio, costo_unitario\)/);
+    expect(detalle.sql).toMatch(/CASE WHEN p\.precio_compra > 0 THEN p\.precio_compra END/);
+    // Sin ventaReferencia no se escribe la referencia.
+    expect(detalle.sql).not.toMatch(/precio_referencia/);
+  });
+
+  it('con ventaReferencia la referencia es el precio del propio pedido (en la tienda no hay rebaja manual)', async () => {
+    const { repo, buscar } = armarCon(['ventaAutor', 'ventaCosto', 'ventaReferencia']);
+
+    await repo.generarDesdePedido(57);
+
+    const detalle = buscar(/INSERT INTO detalle_venta/)!;
+    expect(detalle.sql).toMatch(/precio, costo_unitario, precio_referencia\)/);
+    expect(detalle.sql).toMatch(/CASE WHEN pi\.precio_unitario > 0 THEN pi\.precio_unitario END/);
+    expect(detalle.sql).toMatch(/GROUP BY pi\.id_producto, pi\.precio_unitario/);
+  });
+
+  it('sin las columnas, o sin el servicio de esquema, la venta web se guarda como antes', async () => {
+    for (const capacidades of [[], null]) {
+      const { repo, buscar } = armarCon(capacidades);
+
+      await repo.generarDesdePedido(57);
+
+      const venta = buscar(/INSERT INTO ventas/)!;
+      expect(venta.sql).not.toMatch(/id_usuario|id_almacen/);
+      expect(venta.parametros).toEqual([3, 3, 42.37, 7.63, 50]);
+      expect(buscar(/INSERT INTO detalle_venta/)!.sql).not.toMatch(/costo_unitario|precio_referencia/);
+      expect(buscar(/INSERT INTO detalle_venta/)!.sql).toMatch(/\(id_venta, id_producto, cantidad, precio\)/);
+    }
+  });
+});

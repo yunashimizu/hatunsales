@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { ProductoImagenRepository } from '../../repository/Repository/producto-imagen.repository';
 import { ProductoRepository } from '../../repository/Repository/producto.repository';
 import { ALMACEN_ARCHIVOS } from '../../util/storage/almacen.interface';
@@ -6,6 +6,9 @@ import type { AlmacenArchivos, ArchivoGuardado } from '../../util/storage/almace
 import { almacenamientoConfig } from '../../config/almacenamiento.config';
 import { ProductoImagen } from '../../models/DBModel/producto-imagen.entity';
 import { enParalelo } from '../../util/concurrencia.util';
+import { MejoraFotosService } from '../../fotos/mejora-fotos.service';
+import type { ProcesadoFoto } from '../../fotos/mejora-fotos.service';
+import type { FilaMejora } from '../../fotos/mejora-fotos.repository';
 
 export interface ArchivoSubido {
   originalname: string;
@@ -29,7 +32,33 @@ export class ProductoImagenBussnies {
     private readonly repo: ProductoImagenRepository,
     private readonly productoRepo: ProductoRepository,
     @Inject(ALMACEN_ARCHIVOS) private readonly almacen: AlmacenArchivos,
+    /**
+     * Mejora automática de fotos (src/fotos, sql/fase23). Opcional: sin el servicio, sin la tabla o con
+     * el interruptor apagado, subir, reemplazar y borrar funcionan exactamente como antes.
+     */
+    @Optional() private readonly mejora?: MejoraFotosService,
   ) {}
+
+  /** El servicio de mejora si hay que usarlo en esta petición; `null` si no (nunca lanza). */
+  private async mejoraActiva(): Promise<MejoraFotosService | null> {
+    if (!this.mejora) return null;
+    try {
+      return (await this.mejora.activa()) ? this.mejora : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** La fila de mejora de una imagen, si existe la tabla (aunque el interruptor esté apagado). */
+  private async filaMejora(id_imagen: number): Promise<FilaMejora | null> {
+    if (!this.mejora) return null;
+    try {
+      return await this.mejora.filaDe(id_imagen);
+    } catch (error: any) {
+      this.logger.warn(`No se pudo leer la mejora de la imagen ${id_imagen}: ${error?.message ?? error}`);
+      return null;
+    }
+  }
 
   listByProduct(id_producto: number) {
     return this.repo.findByProducto(id_producto);
@@ -51,10 +80,15 @@ export class ProductoImagenBussnies {
     // clave se anota apenas el almacén la devuelve, para poder borrarla si algo falla después.
     const clavesSubidas: string[] = [];
 
+    // Mejora automática: se decide una vez por petición, con un presupuesto de tiempo común.
+    const mejora = await this.mejoraActiva();
+    const presupuesto = mejora?.nuevoPresupuesto();
+    const procesados: Array<ProcesadoFoto | undefined> = new Array(archivos.length);
+
     let subidas: ArchivoGuardado[];
     try {
       // De a SUBIDAS_SIMULTANEAS: Cloudinary tarda 0,5–2 s por foto y en fila se sumaban.
-      subidas = await enParalelo(archivos, SUBIDAS_SIMULTANEAS, async (archivo) => {
+      subidas = await enParalelo(archivos, SUBIDAS_SIMULTANEAS, async (archivo, indice) => {
         const subida = await this.almacen.guardar({
           buffer: archivo.buffer,
           nombre_original: archivo.originalname,
@@ -62,6 +96,13 @@ export class ProductoImagenBussnies {
           carpeta: String(id_producto),
         });
         clavesSubidas.push(subida.clave);
+        if (mejora && presupuesto) {
+          // Una foto a la vez dentro del servicio (cola propia); la versión mejorada también es una
+          // clave subida y se borra con las demás si el lote falla.
+          const procesado = await mejora.procesarSubida(archivo, String(id_producto), presupuesto);
+          if (procesado.guardada) clavesSubidas.push(procesado.guardada.clave);
+          procesados[indice] = procesado;
+        }
         return subida;
       });
     } catch (error) {
@@ -91,13 +132,36 @@ export class ProductoImagenBussnies {
       return imagen;
     });
 
+    let guardadas: ProductoImagen[];
     try {
       // Una sola transacción para todas las filas: o entran todas o ninguna.
-      return await this.repo.crearVarias(imagenes);
+      guardadas = await this.repo.crearVarias(imagenes);
     } catch (error) {
       await this.deshacerLote([], clavesSubidas);
       throw error;
     }
+
+    // Las filas ya existen apuntando a la ORIGINAL; ahora, foto por foto, se cambia a la mejorada en
+    // una sola sentencia que también anota la original. Si falla, esa foto queda en la original.
+    if (mejora) {
+      for (let i = 0; i < guardadas.length; i++) {
+        const { publicada } = await mejora.publicarTrasSubida(guardadas[i].id_imagen, subidas[i], procesados[i]);
+        if (publicada) this.apuntarA(guardadas[i], publicada);
+      }
+    }
+    return guardadas;
+  }
+
+  /** Refleja en la entidad devuelta el archivo que quedó publicado. */
+  private apuntarA(imagen: ProductoImagen, archivo: ArchivoGuardado): void {
+    imagen.url = archivo.url;
+    imagen.thumb_url = archivo.thumb_url;
+    imagen.mime = archivo.mime;
+    imagen.size = archivo.size;
+    imagen.width = archivo.width as number;
+    imagen.height = archivo.height as number;
+    imagen.clave_almacen = archivo.clave;
+    imagen.proveedor = archivo.proveedor;
   }
 
   /**
@@ -114,6 +178,9 @@ export class ProductoImagenBussnies {
     this.validar(archivo);
 
     const claveVieja = imagen.clave_almacen;
+    // Antes de tocar nada: la fila de mejora vieja (si hay) nombra la original y la mejorada anteriores.
+    const filaVieja = await this.filaMejora(id_imagen);
+    const mejora = await this.mejoraActiva();
 
     const subida = await this.almacen.guardar({
       buffer: archivo.buffer,
@@ -121,6 +188,7 @@ export class ProductoImagenBussnies {
       mime: archivo.mimetype,
       carpeta: String(id_producto),
     });
+    const procesado = mejora ? await mejora.procesarSubida(archivo, String(id_producto), mejora.nuevoPresupuesto()) : undefined;
 
     try {
       await this.repo.actualizarArchivo(id_imagen, {
@@ -134,18 +202,37 @@ export class ProductoImagenBussnies {
         proveedor: subida.proveedor,
       });
     } catch (error) {
-      // La fila sigue apuntando al archivo viejo: se descarta el nuevo.
+      // La fila sigue apuntando al archivo viejo: se descarta el nuevo (y su versión mejorada).
       await this.borrarDelAlmacen(subida.clave);
+      if (procesado?.guardada) await this.borrarDelAlmacen(procesado.guardada.clave);
       throw error;
     }
 
-    // Si la foto es idéntica, el almacén reutiliza el mismo archivo: no hay nada que borrar.
-    // Sin `await`: la fila ya apunta al archivo nuevo y el usuario no tiene por qué esperar
-    // el `destroy` del almacén. `borrarDelAlmacen` captura y registra sus propios errores.
-    if (claveVieja && claveVieja !== subida.clave) {
-      void this.borrarDelAlmacen(claveVieja);
+    if (!this.mejora || (!mejora && !filaVieja)) {
+      // Como siempre. Si la foto es idéntica, el almacén reutiliza el mismo archivo: no hay nada que borrar.
+      // Sin `await`: la fila ya apunta al archivo nuevo y el usuario no tiene por qué esperar
+      // el `destroy` del almacén. `borrarDelAlmacen` captura y registra sus propios errores.
+      if (claveVieja && claveVieja !== subida.clave) {
+        void this.borrarDelAlmacen(claveVieja);
+      }
+      return this.repo.findByProducto(id_producto);
     }
 
+    // Con mejora: se publica la mejorada de la foto nueva (o se anota), y la fila vieja deja de valer.
+    const { publicada, filaAlDia } = await this.mejora.publicarTrasSubida(id_imagen, subida, procesado, !!filaVieja);
+    // Recién ahora se borran los archivos viejos: el de la imagen y, si los había, la original y la
+    // mejorada anteriores. Nunca los que se acaban de publicar (el almacén reutiliza por contenido).
+    // Si la fila vieja no se pudo quitar, todavía los nombra: se conservan (un huérfano es inocuo).
+    if (filaAlDia) {
+      const nuevas = new Set([subida.clave, procesado?.guardada?.clave, publicada?.clave].filter(Boolean));
+      const viejas = new Map<string, string | null>();
+      if (claveVieja) viejas.set(claveVieja, imagen.proveedor ?? null);
+      if (filaVieja?.clave_original) viejas.set(filaVieja.clave_original, filaVieja.proveedor_original);
+      if (filaVieja?.clave_mejorada) viejas.set(filaVieja.clave_mejorada, filaVieja.proveedor_mejorada);
+      for (const [clave, proveedor] of viejas) {
+        if (!nuevas.has(clave)) void this.mejora.borrar(proveedor, clave);
+      }
+    }
     return this.repo.findByProducto(id_producto);
   }
 
@@ -219,6 +306,9 @@ export class ProductoImagenBussnies {
       throw new NotFoundException('Imagen no encontrada');
     }
 
+    // Se lee ANTES de borrar: el ON DELETE CASCADE se lleva la fila de mejora con la imagen.
+    const filaMejora = await this.filaMejora(id_imagen);
+
     await this.repo.eliminar(id_imagen);
     await this.repo.asegurarPrincipal(id_producto);
 
@@ -226,7 +316,17 @@ export class ProductoImagenBussnies {
     // producto o en una recepción) y el almacén solo lo borra si ya nadie lo usa.
     // Sin `await`: el orden fila → archivo se mantiene (la fila ya se quitó), pero la
     // respuesta no espera al almacén; un fallo se registra y ya no rompe la respuesta.
-    if (imagen.clave_almacen) {
+    if (filaMejora && this.mejora) {
+      // Las dos versiones (original y mejorada), cada una en su almacén.
+      const claves = new Map<string, string | null>();
+      if (imagen.clave_almacen) claves.set(imagen.clave_almacen, imagen.proveedor ?? null);
+      if (filaMejora.clave_original) claves.set(filaMejora.clave_original, filaMejora.proveedor_original);
+      if (filaMejora.clave_mejorada) claves.set(filaMejora.clave_mejorada, filaMejora.proveedor_mejorada);
+      const mejora = this.mejora;
+      void (async () => {
+        for (const [clave, proveedor] of claves) await mejora.borrar(proveedor, clave);
+      })();
+    } else if (imagen.clave_almacen) {
       void this.borrarDelAlmacen(imagen.clave_almacen);
     }
 

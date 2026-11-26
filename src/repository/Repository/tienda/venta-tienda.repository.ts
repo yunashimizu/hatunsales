@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { EsquemaCajaService } from '../../../caja/esquema/esquema-caja.service';
 
 /** Lo que el pedido web pidió para su comprobante, más el cliente y la venta que nació de él. */
 export interface DatosComprobantePedido {
@@ -31,6 +32,8 @@ export class VentaTiendaRepository {
   constructor(
     @InjectDataSource('pgConnection')
     private readonly dataSource: DataSource,
+    /** Capacidades de fase19 (autor y costo). Sin él la venta web se guarda como antes. */
+    @Optional() private readonly esquema?: EsquemaCajaService,
   ) {}
 
   /**
@@ -44,6 +47,11 @@ export class VentaTiendaRepository {
    * devuelve otra vez.
    */
   async generarDesdePedido(idPedido: number): Promise<number | null> {
+    // fase19 (R1): la venta web guarda su almacén y el costo de cada línea; sin vendedor (id_usuario NULL).
+    // Se mira el catálogo antes de abrir la transacción (no se lee con el pedido bloqueado).
+    const conAutor = (await this.esquema?.tiene('ventaAutor')) === true;
+    const conCosto = (await this.esquema?.tiene('ventaCosto')) === true;
+    const conReferencia = (await this.esquema?.tiene('ventaReferencia')) === true;
     return this.dataSource.transaction(async (manager) => {
       const pedidos = await manager.query(
         `SELECT id_pedido, id_cliente, id_venta, estado, stock_reservado, subtotal, igv, total, id_metodo_pago
@@ -63,8 +71,19 @@ export class VentaTiendaRepository {
 
       const idCaja = await this.cajaAbierta(manager);
 
+      // El almacén del pedido (pedidos.id_almacen, leído como JSON por si la columna faltara); sin él, el
+      // único almacén del que salen sus líneas; si salen de varios, NULL.
       const ventas = await manager.query(
-        `INSERT INTO ventas (id_cliente, id_caja, fecha, subtotal, igv, total, origen)
+        conAutor
+          ? `INSERT INTO ventas (id_cliente, id_caja, fecha, subtotal, igv, total, origen, id_usuario, id_almacen)
+             VALUES ($1, $2, NOW(), $3, $4, $5, 'tienda', NULL,
+                     COALESCE(
+                       (SELECT NULLIF(to_jsonb(pe) ->> 'id_almacen', '')::int FROM pedidos pe WHERE pe.id_pedido = $6),
+                       (SELECT MIN(pi.id_almacen) FROM pedido_items pi
+                         WHERE pi.id_pedido = $6 AND pi.id_producto IS NOT NULL
+                        HAVING COUNT(DISTINCT pi.id_almacen) = 1 AND COUNT(pi.id_almacen) = COUNT(*))))
+             RETURNING id_venta`
+          : `INSERT INTO ventas (id_cliente, id_caja, fecha, subtotal, igv, total, origen)
          VALUES ($1, $2, NOW(), $3, $4, $5, 'tienda')
          RETURNING id_venta`,
         [
@@ -73,6 +92,7 @@ export class VentaTiendaRepository {
           Number(pedido.subtotal ?? 0),
           Number(pedido.igv ?? 0),
           Number(pedido.total ?? 0),
+          ...(conAutor ? [idPedido] : []),
         ],
       );
 
@@ -80,10 +100,21 @@ export class VentaTiendaRepository {
       if (!idVenta) return null;
 
       // Un producto puede venir en varias líneas del pedido (una por almacén):
-      // en la venta (y su comprobante) va una sola.
+      // en la venta (y su comprobante) va una sola. Con fase19, el costo es el precio de compra
+      // vigente del producto (NULL si no tiene: «sin costo» no es «costo cero») y la referencia es el
+      // precio del propio pedido (en la tienda no hay rebaja manual).
+      const extraColumnas = [conCosto ? ', costo_unitario' : '', conReferencia ? ', precio_referencia' : ''].join('');
+      const extraValores = [
+        conCosto
+          ? `,
+                (SELECT CASE WHEN p.precio_compra > 0 THEN p.precio_compra END
+                   FROM productos p WHERE p.id_producto = pi.id_producto)`
+          : '',
+        conReferencia ? ', CASE WHEN pi.precio_unitario > 0 THEN pi.precio_unitario END' : '',
+      ].join('');
       await manager.query(
-        `INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio)
-         SELECT $1, pi.id_producto, SUM(pi.cantidad), pi.precio_unitario
+        `INSERT INTO detalle_venta (id_venta, id_producto, cantidad, precio${extraColumnas})
+         SELECT $1, pi.id_producto, SUM(pi.cantidad), pi.precio_unitario${extraValores}
            FROM pedido_items pi
           WHERE pi.id_pedido = $2 AND pi.id_producto IS NOT NULL
           GROUP BY pi.id_producto, pi.precio_unitario

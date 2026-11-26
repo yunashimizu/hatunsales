@@ -36,6 +36,15 @@ const FLUJO_ESTADOS = ['pendiente', 'pagado', 'preparando', 'enviado', 'entregad
 /** En línea, el cliente solo cancela lo que todavía no se cobró. */
 const CANCELABLE_POR_CLIENTE = ['pendiente'];
 
+/** Lo que hizo una cancelación que sí ocurrió (Fase 8.2). */
+export interface ResultadoCancelacion {
+  /** true: el stock reservado volvió al inventario en ESTA cancelación. */
+  stock_devuelto: boolean;
+  /** true: se restó un uso al cupón del pedido en ESTA cancelación. */
+  cupon_devuelto: boolean;
+  id_cupon: number | null;
+}
+
 /** Largo de `pedido_estados.comentario`. */
 const LARGO_COMENTARIO = 255;
 
@@ -146,7 +155,7 @@ export class PedidoBussnies {
 
         await this.repo.asignarCodigo(pedido.id_pedido, codigoPedido(pedido.id_pedido), manager);
 
-        const reservas = await this.reservarStockEnTx(manager, resumen.items);
+        const reservas = await this.reservarStockEnTx(manager, resumen.items, pedido.id_pedido);
         await this.repo.guardarItems(this.lineasDelPedido(pedido.id_pedido, resumen.items, reservas), manager);
         if (reservas) await this.repo.marcarStockReservado(pedido.id_pedido, true, reservas[0]?.id_almacen, manager);
 
@@ -252,7 +261,7 @@ export class PedidoBussnies {
 
     const nota = recortar(comentario) ?? this.comentarioPorEstado(estado);
     const cambiado = estado === 'cancelado'
-      ? await this.cancelarEnTx(idPedido, [pedido.estado], nota)
+      ? (await this.cancelarEnTx(idPedido, [pedido.estado], nota)) !== null
       : (await this.repo.transicionarEstado(idPedido, [pedido.estado], estado, nota)) !== null;
 
     if (!cambiado) {
@@ -284,13 +293,28 @@ export class PedidoBussnies {
       recortar(motivo) ?? 'Cancelado por el cliente',
     );
 
-    if (!cancelado) {
+    if (cancelado === null) {
       // Se cruzó con la confirmación del pago (o con otra cancelación).
       const actual = await this.repo.obtenerPorId(idPedido);
       if (actual?.estado !== 'cancelado') this.exigirCancelablePorCliente(actual?.estado ?? 'pagado');
     }
 
     return this.obtener(idPedido, idCliente);
+  }
+
+  /**
+   * Fase 8.2 (D5): vence un pedido web sin pagar. Es la MISMA cancelación del panel y del cliente
+   * (`cancelarEnTx`): cambio condicional 'pendiente' → 'cancelado' en una transacción con la devolución del
+   * stock y del cupón. Además exige que no haya un cobro en curso o aprobado (dentro del mismo UPDATE).
+   * Devuelve null si no se canceló (ya lo pagaron, lo cancelaron o lo venció otra réplica): nada se devuelve.
+   */
+  async vencer(idPedido: number, horas: number): Promise<ResultadoCancelacion | null> {
+    return this.cancelarEnTx(
+      idPedido,
+      CANCELABLE_POR_CLIENTE,
+      recortar(`Vencido automáticamente: sin pago en ${horas} h`) ?? 'Vencido automáticamente',
+      { sinPagoEnCurso: true },
+    );
   }
 
   // -------------------------------------------------------------- privados
@@ -330,6 +354,7 @@ export class PedidoBussnies {
   private async reservarStockEnTx(
     manager: EntityManager,
     items: CarritoItemTienda[],
+    idPedido?: number,
   ): Promise<ReservaAplicada[] | null> {
     const activa = (await this.stockRepo.configuracion('tienda_reservar_stock')) ?? 'true';
     if (activa !== 'true') return null;
@@ -341,6 +366,8 @@ export class PedidoBussnies {
       politica.idAlmacen,
       politica.exclusivo ? 'exclusivo' : 'spillover',
       manager,
+      // Fase 8.1: el movimiento guarda el pedido como documento de origen (sin usuario: es una compra web).
+      idPedido ? { tipo_documento: 'pedido', id_documento: idPedido } : undefined,
     );
   }
 
@@ -386,20 +413,37 @@ export class PedidoBussnies {
    * en `desde` y no tiene una venta vigente. La devolución se decide con lo que
    * quedó en la fila bloqueada: si el pedido tiene venta, el stock salió con
    * ella (lo repone su anulación) y aquí no se vuelve a sumar.
+   *
+   * Exactamente una vez (Fase 8.2): el UPDATE condicional toma el candado de la fila; de dos cancelaciones
+   * (o de una cancelación y una confirmación de pago) solo una lo encuentra en `desde` y las demás reciben
+   * null sin tocar nada. El stock y el cupón se devuelven en la misma transacción que el cambio de estado
+   * y solo si `stock_reservado` seguía en true (se apaga aquí mismo).
+   * Devuelve null si no se canceló.
    */
-  private async cancelarEnTx(idPedido: number, desde: readonly string[], comentario: string): Promise<boolean> {
+  private async cancelarEnTx(
+    idPedido: number,
+    desde: readonly string[],
+    comentario: string,
+    opciones: { sinPagoEnCurso?: boolean } = {},
+  ): Promise<ResultadoCancelacion | null> {
     try {
-      return await this.dataSource.transaction(async (manager) => {
+      return await this.dataSource.transaction(async (manager): Promise<ResultadoCancelacion | null> => {
         const fila = await this.repo.transicionarEstado(
-          idPedido, desde, 'cancelado', comentario, manager, { sinVentaVigente: true },
+          idPedido, desde, 'cancelado', comentario, manager, { sinVentaVigente: true, ...opciones },
         );
-        if (!fila) return false;
+        if (!fila) return null;
 
+        let stockDevuelto = false;
         if (fila.stock_reservado) {
-          if (fila.id_venta === null) await this.stockRepo.devolver(idPedido, manager);
+          if (fila.id_venta === null) {
+            await this.stockRepo.devolver(idPedido, manager);
+            stockDevuelto = true;
+          }
           await this.repo.marcarStockReservado(idPedido, false, undefined, manager);
         }
-        return true;
+        // Fase 8.2: el uso del cupón vuelve con la cancelación (antes solo se sumaba al comprar).
+        const cuponDevuelto = fila.id_cupon ? await this.checkoutBussnies.devolverUso(fila.id_cupon, manager) : false;
+        return { stock_devuelto: stockDevuelto, cupon_devuelto: cuponDevuelto, id_cupon: fila.id_cupon ?? null };
       });
     } catch (error: any) {
       this.log.error(`No se pudo cancelar el pedido ${idPedido} ni devolver su stock: ${error?.message}`);

@@ -26,6 +26,9 @@ export class ItemVentaRequest {
   @IsOptional()
   descuento?: number;
 
+  /**
+   * Se acepta por compatibilidad y se IGNORA (6.6): la afectación la fija el servidor (gravado).
+   */
   @IsInt()
   @IsOptional()
   tipo_de_igv?: number;
@@ -153,6 +156,15 @@ export class CrearVentaRequest {
   @IsOptional()
   descontar_stock?: boolean;
 
+  /**
+   * Por qué se vende sin descontar stock (solo con `descontar_stock: false`, solo admin). Opcional: si no
+   * llega, la bitácora anota «sin motivo» (el front anterior no lo envía). Fase 6.5.
+   */
+  @IsString()
+  @IsOptional()
+  @MaxLength(250)
+  motivo_sin_stock?: string;
+
   @IsString()
   @IsOptional()
   @MaxLength(1000)
@@ -166,6 +178,15 @@ export class CrearVentaRequest {
   @IsOptional()
   @MaxLength(80)
   clave_idempotencia?: string;
+
+  /**
+   * Fase 6.4: permiso que devolvió `POST venta/autorizacion` (5 minutos, este vendedor, estas líneas).
+   * Solo se mira en modo `autorizar` cuando alguna línea lo necesita. Opcional: el front anterior no lo envía.
+   */
+  @IsString()
+  @IsOptional()
+  @MaxLength(1000)
+  permiso_autorizacion?: string;
 
   @IsArray()
   @ValidateNested({ each: true })

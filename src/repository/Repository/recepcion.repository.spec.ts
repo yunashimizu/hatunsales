@@ -176,3 +176,48 @@ describe('RecepcionRepository · proveedores (UPDATE/DELETE devuelven [filas, af
     await expect(repo.eliminarProveedor(999)).resolves.toBe(false);
   });
 });
+
+describe('RecepcionRepository · costo por ítem recibido (fase19, Fase 6.1)', () => {
+  const params = {
+    id_proveedor: 2, id_almacen: 1, nro_guia: 'G-1', nro_documento: '', observaciones: '', id_usuario: 4,
+    items: [
+      { id_producto: 3, cantidad_ok: 2, cantidad_observada: 0, precio_compra: 12.5 },
+      { id_producto: 4, cantidad_ok: 1, cantidad_observada: 0 },
+    ],
+  };
+  const responder = (sql: string) => {
+    if (sql.includes('INSERT INTO recepciones')) return [{ id_recepcion: 50 }];
+    if (sql.includes('INSERT INTO recepcion_items')) return [{ id_item: 7 }];
+    return [];
+  };
+
+  function armarCon(capacidades: string[] | null) {
+    const base = armar(responder);
+    const esquema = capacidades ? { tiene: jest.fn(async (c: string) => capacidades.includes(c)) } : undefined;
+    const repo = new RecepcionRepository(base.dataSource as any, esquema as any);
+    const items = () => base.enTransaccion().filter((s) => s.sql.includes('INSERT INTO recepcion_items'));
+    return { repo, items };
+  }
+
+  it('con la columna guarda el costo que llegó en cada línea (NULL si no llegó)', async () => {
+    const { repo, items } = armarCon(['recepcionCosto']);
+
+    await repo.registrarRecepcion(params, jest.fn().mockResolvedValue(undefined));
+
+    expect(items()).toHaveLength(2);
+    expect(items()[0].sql).toMatch(/nota, precio_compra\)/);
+    expect(items()[0].params).toEqual([50, 3, 2, 0, '', 12.5]);
+    expect(items()[1].params).toEqual([50, 4, 1, 0, '', null]);
+  });
+
+  it('sin la columna, o sin el servicio de esquema, inserta las líneas como antes', async () => {
+    for (const capacidades of [[], null]) {
+      const { repo, items } = armarCon(capacidades);
+
+      await repo.registrarRecepcion(params, jest.fn().mockResolvedValue(undefined));
+
+      expect(items()[0].sql).not.toMatch(/precio_compra/);
+      expect(items()[0].params).toEqual([50, 3, 2, 0, '']);
+    }
+  });
+});

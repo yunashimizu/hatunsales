@@ -25,6 +25,15 @@ export interface ReceptorResponse {
   estado?: string;
   condicion?: string;
 
+  /**
+   * Fase 3.5: ubicación del domicilio cuando la fuente la tiene (empresas: base local o consulta de RUC).
+   * Ausentes en personas (la consulta de DNI no trae ubigeo) y en los borradores.
+   */
+  ubigeo?: string;
+  departamento?: string;
+  provincia?: string;
+  distrito?: string;
+
   /** Solo con RUC activo y habido se puede emitir factura. */
   admite_factura: boolean;
   /** Aviso a mostrar en pantalla, por ejemplo si el RUC está de baja. */

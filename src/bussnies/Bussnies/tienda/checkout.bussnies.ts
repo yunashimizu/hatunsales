@@ -119,4 +119,12 @@ export class CheckoutBussnies {
     const ok = await this.repo.incrementarUsoCupon(idCupon, manager);
     if (!ok) throw new BadRequestException('El cupón alcanzó su límite de usos');
   }
+
+  /**
+   * Fase 8.2: devuelve el uso del cupón de un pedido que se canceló (a mano, por el cliente o por vencimiento).
+   * Nunca baja de 0. Va en la transacción de la cancelación, que ya garantiza que el pedido se cancela una sola vez.
+   */
+  async devolverUso(idCupon: number, manager?: { query: (sql: string, p?: any[]) => Promise<any> }): Promise<boolean> {
+    return this.repo.devolverUsoCupon(idCupon, manager);
+  }
 }

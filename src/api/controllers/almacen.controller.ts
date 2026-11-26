@@ -6,6 +6,7 @@ import {
   Delete,
   Get,
   NotFoundException,
+  Optional,
   Param,
   Post,
   Put,
@@ -18,6 +19,22 @@ import { RolesGuard } from 'src/guards/roles.guard';
 import { Roles } from 'src/guards/roles.decorator';
 import { Almacen } from 'src/models/DBModel/almacen.entity';
 import { Sucursal } from 'src/models/DBModel/sucursal.entity';
+import { UsuarioActual } from 'src/guards/usuario-actual.decorator';
+import type { UsuarioToken } from 'src/guards/usuario-actual.decorator';
+import { LocalesUsuarioService } from 'src/stock/locales-usuario.service';
+import { AlmacenDireccionService } from 'src/stock/almacen-direccion.service';
+
+/** Cuerpo de alta y edición. Los tres campos de la Fase 4.4 son opcionales (vacío = quitar). */
+interface CuerpoAlmacen {
+  nombre?: string;
+  descripcion?: string;
+  id_sucursal?: number | null;
+  direccion?: string | null;
+  ubigeo?: string | null;
+  codigo_establecimiento?: string | null;
+}
+
+const SIN_DIRECCION = { direccion: null, ubigeo: null, codigo_establecimiento: null };
 
 @Controller('almacen')
 export class AlmacenController {
@@ -28,13 +45,17 @@ export class AlmacenController {
     private readonly sucursalRepo: Repository<Sucursal>,
     @InjectDataSource('pgConnection')
     private readonly dataSource: DataSource,
+    /** Fase 8.5: un usuario atado a locales solo ve los almacenes de sus locales. */
+    @Optional() private readonly locales?: LocalesUsuarioService,
+    /** Fase 4.4 (fase22): dirección, ubigeo y establecimiento del almacén, y la partida para la guía. */
+    @Optional() private readonly direcciones?: AlmacenDireccionService,
   ) {}
 
   /** Listado para el panel e inventario. */
   @Get()
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin', 'vendedor', 'caja')
-  async listar() {
+  async listar(@UsuarioActual() usuario?: UsuarioToken) {
     const filas = await this.dataSource.query(
       `SELECT a.id_almacen, a.nombre, a.descripcion, a.id_sucursal,
               COALESCE(s.nombre, '') AS sucursal,
@@ -44,7 +65,11 @@ export class AlmacenController {
          LEFT JOIN sucursales s ON s.id_sucursal = a.id_sucursal
         ORDER BY a.nombre ASC`,
     );
-    return filas;
+    const visibles = this.locales ? await this.locales.filtrar(usuario, filas) : filas;
+    // Fase 4.4: con fase22 cada fila trae además su dirección propia (sin fase22, en null).
+    if (!this.direcciones) return visibles;
+    const mapa = await this.direcciones.deAlmacenes((visibles as any[]).map((f) => Number(f.id_almacen)));
+    return (visibles as any[]).map((f) => ({ ...f, ...(mapa.get(Number(f.id_almacen)) ?? SIN_DIRECCION) }));
   }
 
   @Get('sucursales')
@@ -63,21 +88,43 @@ export class AlmacenController {
       relations: ['sucursal'],
     });
     if (!almacen) throw new NotFoundException('Almacén no encontrado');
-    return {
+    const base = {
       id_almacen: almacen.id_almacen,
       nombre: almacen.nombre,
       descripcion: almacen.descripcion,
       id_sucursal: almacen.sucursal?.id_sucursal ?? null,
       sucursal: almacen.sucursal?.nombre ?? '',
     };
+    if (!this.direcciones) return base;
+    // Fase 4.4: campos añadidos (null sin fase22) y si se pueden editar.
+    const editable = await this.direcciones.disponible();
+    const propia = (await this.direcciones.deAlmacenes([almacen.id_almacen])).get(almacen.id_almacen) ?? SIN_DIRECCION;
+    return { ...base, ...propia, direccion_editable: editable };
+  }
+
+  /**
+   * Fase 4.4: punto de partida que la guía de remisión propone para este almacén (la dirección propia; si no
+   * tiene, la de su sucursal; si tampoco, la de la configuración fiscal). Solo datos para precargar: la
+   * emisión de la guía no cambia.
+   */
+  @Get(':id/partida')
+  @UseGuards(JwtGuard, RolesGuard)
+  @Roles('admin', 'vendedor', 'caja')
+  partida(@Param('id') id: string) {
+    if (!this.direcciones) throw new NotFoundException('No disponible');
+    const idAlmacen = Number(id);
+    if (!Number.isInteger(idAlmacen) || idAlmacen <= 0) throw new BadRequestException('Almacén no válido');
+    return this.direcciones.partida(idAlmacen);
   }
 
   @Post()
   @UseGuards(JwtGuard, RolesGuard)
   @Roles('admin')
-  async crear(@Body() body: { nombre?: string; descripcion?: string; id_sucursal?: number | null }) {
+  async crear(@Body() body: CuerpoAlmacen) {
     const nombre = (body?.nombre ?? '').trim();
     if (!nombre) throw new BadRequestException('El nombre es obligatorio');
+    // Fase 4.4: validar (400) y comprobar fase22 (503) ANTES de crear nada.
+    const direccion = this.direcciones ? await this.direcciones.preparar(body as any) : {};
 
     const creado = this.almacenRepo.create({
       nombre,
@@ -88,6 +135,7 @@ export class AlmacenController {
     });
 
     const guardado = await this.almacenRepo.save(creado);
+    if (this.direcciones) await this.direcciones.guardar(guardado.id_almacen, direccion);
     return this.porId(String(guardado.id_almacen));
   }
 
@@ -96,8 +144,10 @@ export class AlmacenController {
   @Roles('admin')
   async actualizar(
     @Param('id') id: string,
-    @Body() body: { nombre?: string; descripcion?: string; id_sucursal?: number | null },
+    @Body() body: CuerpoAlmacen,
   ) {
+    // Fase 4.4: validar (400) y comprobar fase22 (503) antes de escribir nada.
+    const direccion = this.direcciones ? await this.direcciones.preparar(body as any) : {};
     const almacen = await this.almacenRepo.findOne({
       where: { id_almacen: Number(id) },
       relations: ['sucursal'],
@@ -119,6 +169,7 @@ export class AlmacenController {
     }
 
     await this.almacenRepo.save(almacen);
+    if (this.direcciones) await this.direcciones.guardar(almacen.id_almacen, direccion);
     return this.porId(id);
   }
 

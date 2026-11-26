@@ -1,4 +1,5 @@
 import { IsString, IsEmail, MinLength, IsOptional, Matches, ValidateIf } from 'class-validator';
+import { CONTRASENA_MINIMA, MENSAJE_CONTRASENA_MINIMA } from '../../util/jwt/contrasena-minima';
 
 export class LoginRequest {
 
@@ -29,7 +30,7 @@ export class RegisterRequest {
   email!: string;
 
   @IsString()
-  @MinLength(8)
+  @MinLength(CONTRASENA_MINIMA, { message: MENSAJE_CONTRASENA_MINIMA })
   password!: string;
 
   @IsOptional()

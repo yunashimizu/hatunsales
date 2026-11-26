@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { ErrorCaja, mensajeScriptPendiente } from '../dominio/errores-caja';
+import { ErrorCaja, mensajeScriptPendiente, SCRIPT_FASE11 } from '../dominio/errores-caja';
 
 /**
  * Lee el catálogo UNA vez (una sola consulta a information_schema) para saber qué columnas y
@@ -30,6 +30,15 @@ const TABLAS = [
   'caja_arqueo_denominaciones',
   'comprobantes',
   'comprobante_items',
+  // fase19 (sql/fase19_control_venta_y_bitacora.sql): costo por línea, costo por ítem recibido y bitácora.
+  'detalle_venta',
+  'recepcion_items',
+  'bitacora_acciones',
+  // fase21 (sql/fase21_stock_y_pedidos.sql): rastro de los movimientos de stock y usuarios por local.
+  'movimientos_inventario',
+  'usuario_sucursal',
+  // fase22 (sql/fase22_almacenes_direccion.sql): dirección, ubigeo y establecimiento del almacén (4.4).
+  'almacenes',
 ] as const;
 
 export type TablaCaja = (typeof TABLAS)[number];
@@ -71,6 +80,39 @@ const REQUISITOS = {
     comprobante_items: ['id_item_origen'],
     venta_stock_salida: ['cantidad_devuelta'],
   },
+  /** fase19: quién vendió y desde qué almacén (ventas.id_usuario, ventas.id_almacen). */
+  ventaAutor: { ventas: ['id_usuario', 'id_almacen'] },
+  /** fase19: costo unitario de cada línea al momento de vender. */
+  ventaCosto: { detalle_venta: ['costo_unitario'] },
+  /** fase19: precio de catálogo neto de cada línea al vender (rebaja en soles del reporte por vendedor). */
+  ventaReferencia: { detalle_venta: ['precio_referencia'] },
+  /** fase19: costo de compra de cada ítem recibido. */
+  recepcionCosto: { recepcion_items: ['precio_compra'] },
+  /** fase19: bitácora de acciones (quién hizo qué). */
+  bitacora: {
+    bitacora_acciones: [
+      'id', 'fecha', 'id_usuario', 'rol', 'id_autorizador', 'id_almacen', 'accion', 'entidad', 'id_entidad',
+      'antes', 'despues', 'motivo', 'ip',
+    ],
+  },
+  /** fase20: el egreso que devuelve efectivo de una venta queda enlazado a ella (7.1, R14). */
+  movimientoVenta: { movimientos_caja: ['id_apertura', 'id_venta'] },
+  /** fase20: categoría del gasto de caja (7.5). */
+  gastoCategoria: { movimientos_caja: ['categoria'] },
+  /** fase20: número del comprobante del gasto de caja (7.5). */
+  gastoComprobante: { movimientos_caja: ['nro_comprobante'] },
+  /** fase20: marca de los cierres hechos por la tarea de turnos olvidados (7.4). */
+  cierreAutomatico: { cierres_caja: ['automatico'] },
+  /** fase21: quién movió el stock (movimientos_inventario.id_usuario, 8.1). */
+  movimientoUsuario: { movimientos_inventario: ['id_usuario'] },
+  /** fase21: en qué almacén se movió el stock (antes solo la sucursal, 8.1). */
+  movimientoAlmacen: { movimientos_inventario: ['id_almacen'] },
+  /** fase21: documento que originó el movimiento (venta, recepción, ajuste…; 8.1). */
+  movimientoDocumento: { movimientos_inventario: ['tipo_documento', 'id_documento'] },
+  /** Usuarios por local (8.5, D7). La tabla ya existe en producción; fase21 solo la crea si faltara. */
+  usuarioSucursal: { usuario_sucursal: ['id_usuario', 'id_sucursal'] },
+  /** fase22: dirección, ubigeo y código de establecimiento del almacén (punto de partida de la guía, 4.4). */
+  almacenDireccion: { almacenes: ['direccion', 'ubigeo', 'codigo_establecimiento'] },
 } satisfies Record<string, Partial<Record<TablaCaja, string[]>>>;
 
 export type CapacidadCaja = keyof typeof REQUISITOS;
@@ -89,13 +131,68 @@ const EFECTO_SI_FALTA: Record<CapacidadCaja, string> = {
   arqueo: 'el arqueo de caja no está disponible (responde 503)',
   ventaStockDevuelto: 'anular una venta devuelve al almacén todo lo que salió, sin descontar devoluciones previas',
   notasCredito: 'las notas de crédito responden 503 y una venta con comprobante aceptado no se puede anular',
+  ventaAutor: 'las ventas no guardan quién vendió ni desde qué almacén (el reporte por vendedor las muestra como «Sin registrar»)',
+  ventaCosto: 'las ventas no guardan el costo de cada línea (la rentabilidad usa el precio de compra vigente)',
+  ventaReferencia: 'las ventas no guardan el precio de catálogo de cada línea (el reporte por vendedor muestra la rebaja en soles como 0)',
+  recepcionCosto: 'las recepciones no guardan el costo de cada ítem (solo actualizan el precio de compra del producto)',
+  bitacora: 'la bitácora de acciones (pantalla Actividad) no guarda nada: los eventos solo van al log',
+  movimientoVenta: 'la devolución en efectivo al anular o con nota de crédito (reembolso_efectivo) responde 503 sin anular nada; sin ese campo todo sigue igual',
+  gastoCategoria: 'los gastos de caja se guardan sin categoría',
+  gastoComprobante: 'los gastos de caja se guardan sin número de comprobante',
+  cierreAutomatico: 'el cierre automático de turnos olvidados se marca solo en la observación y en la bitácora',
+  movimientoUsuario: 'los movimientos de stock no guardan quién los hizo (el historial del producto muestra «sin registrar»)',
+  movimientoAlmacen: 'los movimientos de stock guardan solo la sucursal, no el almacén',
+  movimientoDocumento: 'los movimientos de stock no guardan el documento que los originó (venta, recepción, ajuste…)',
+  usuarioSucursal: 'no se pueden asignar locales a los usuarios: todos venden, transfieren y ajustan en cualquier almacén (como antes)',
+  almacenDireccion: 'los almacenes no guardan dirección propia: la guía propone la dirección de la sucursal o la partida de la configuración fiscal',
 };
 
 /** Script que crea lo que falta, cuando no es el de caja (fase 11). */
 const SCRIPT_POR_CAPACIDAD: Partial<Record<CapacidadCaja, string>> = {
   ventaStockDevuelto: 'sql/fase14_notas_credito_enlace.sql',
   notasCredito: 'sql/fase14_notas_credito_enlace.sql',
+  ventaAutor: 'sql/fase19_control_venta_y_bitacora.sql',
+  ventaCosto: 'sql/fase19_control_venta_y_bitacora.sql',
+  ventaReferencia: 'sql/fase19_control_venta_y_bitacora.sql',
+  recepcionCosto: 'sql/fase19_control_venta_y_bitacora.sql',
+  bitacora: 'sql/fase19_control_venta_y_bitacora.sql',
+  movimientoVenta: 'sql/fase20_caja_devoluciones.sql',
+  gastoCategoria: 'sql/fase20_caja_devoluciones.sql',
+  gastoComprobante: 'sql/fase20_caja_devoluciones.sql',
+  cierreAutomatico: 'sql/fase20_caja_devoluciones.sql',
+  movimientoUsuario: 'sql/fase21_stock_y_pedidos.sql',
+  movimientoAlmacen: 'sql/fase21_stock_y_pedidos.sql',
+  movimientoDocumento: 'sql/fase21_stock_y_pedidos.sql',
+  usuarioSucursal: 'sql/fase21_stock_y_pedidos.sql',
+  almacenDireccion: 'sql/fase22_almacenes_direccion.sql',
 };
+
+
+/** Una capacidad tal como la muestra «Estado del sistema» (8.6). */
+export interface EstadoCapacidad {
+  capacidad: CapacidadCaja;
+  presente: boolean;
+  /** 'tabla' o 'tabla.columna' que faltan (vacío si está presente). */
+  faltan: string[];
+  /** Qué deja de funcionar (o funciona a la antigua) mientras falte. */
+  efecto_si_falta: string;
+  /** Script que la crea. */
+  script: string;
+}
+
+/** Todas las capacidades con su estado, en el orden en que se declararon. */
+export function estadoCapacidades(s: SnapshotEsquema): EstadoCapacidad[] {
+  return (Object.keys(REQUISITOS) as CapacidadCaja[]).map((capacidad) => {
+    const faltan = s.faltantes(capacidad);
+    return {
+      capacidad,
+      presente: faltan.length === 0,
+      faltan,
+      efecto_si_falta: EFECTO_SI_FALTA[capacidad],
+      script: SCRIPT_POR_CAPACIDAD[capacidad] ?? SCRIPT_FASE11,
+    };
+  });
+}
 
 const RELECTURA_SI_FALTA_MS = 60_000;
 

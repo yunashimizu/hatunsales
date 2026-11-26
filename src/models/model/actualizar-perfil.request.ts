@@ -1,4 +1,5 @@
 import { IsEmail, IsOptional, IsString, MaxLength, MinLength, ValidateIf } from 'class-validator';
+import { CONTRASENA_MINIMA, MENSAJE_CONTRASENA_MINIMA } from '../../util/jwt/contrasena-minima';
 
 export class ActualizarPerfilRequest {
   @IsOptional()
@@ -18,7 +19,7 @@ export class ActualizarPerfilRequest {
 
   @IsOptional()
   @IsString()
-  @MinLength(6)
+  @MinLength(CONTRASENA_MINIMA, { message: MENSAJE_CONTRASENA_MINIMA })
   @MaxLength(100)
   password_nueva?: string;
 }

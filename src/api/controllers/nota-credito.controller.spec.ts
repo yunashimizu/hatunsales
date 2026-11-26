@@ -114,8 +114,8 @@ describe('NotaCreditoController (/comprobante/:id/nota-credito)', () => {
     await controlador.emitir(40, cuerpo, undefined as never);
     await controlador.contexto(40);
 
-    expect(notas.emitir).toHaveBeenNthCalledWith(1, 40, cuerpo, 3);
-    expect(notas.emitir).toHaveBeenNthCalledWith(2, 40, cuerpo, null);
+    expect(notas.emitir).toHaveBeenNthCalledWith(1, 40, cuerpo, 3, null);
+    expect(notas.emitir).toHaveBeenNthCalledWith(2, 40, cuerpo, null, null);
     expect(notas.contexto).toHaveBeenCalledWith(40);
   });
 

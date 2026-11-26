@@ -1,10 +1,14 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, EntityManager } from 'typeorm';
 import { Inventario } from '../../models/DBModel/inventario.entity';
 import { CrudRepository } from '../Irepository/GenericIRepository/crud.Irepository';
 import { reintentarSiHuboConflicto } from '../../util/reintento-bd';
 import { patronContiene } from './venta-documentos.repository';
+import { EsquemaCajaService } from '../../caja/esquema/esquema-caja.service';
+import {
+  columnasRastro, extrasFila, RastroMovimiento, sufijo, TipoDocumentoMovimiento,
+} from '../../stock/rastro-movimiento';
 
 export interface FiltroInventario {
   texto?: string;
@@ -28,6 +32,33 @@ export interface StockPorAlmacen {
   stock: number;
   /** false = el producto todavía no tiene fila de inventario en ese almacén. */
   registrado: boolean;
+}
+
+/** Un movimiento de stock del producto con su rastro (8.1). Sin fase21 los campos de rastro van en null. */
+export interface MovimientoConRastro {
+  id_movimiento: number;
+  fecha: string;
+  tipo: string;
+  cantidad: number;
+  descripcion: string;
+  sucursal_origen: string;
+  sucursal_destino: string;
+  id_usuario: number | null;
+  usuario: string | null;
+  id_almacen: number | null;
+  almacen: string | null;
+  tipo_documento: TipoDocumentoMovimiento | null;
+  id_documento: number | null;
+}
+
+export interface PaginaMovimientos {
+  datos: MovimientoConRastro[];
+  pagina: number;
+  por_pagina: number;
+  /** true si hay al menos una página más (se lee una fila de más en vez de contar). */
+  hay_mas: boolean;
+  /** Qué columnas de rastro existen (false mientras falte sql/fase21). */
+  rastro: { usuario: boolean; almacen: boolean; documento: boolean };
 }
 
 export interface FilaInventario {
@@ -61,6 +92,9 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
 
     @InjectDataSource('pgConnection')
     private readonly dataSource: DataSource,
+
+    /** Fase 8.1 (fase21): columnas de rastro del movimiento. Sin él (pruebas antiguas) se guarda como antes. */
+    @Optional() private readonly esquema?: EsquemaCajaService,
   ) {
     super(inventarioRepo);
   }
@@ -326,6 +360,72 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     );
   }
 
+  /**
+   * Historial de movimientos de UN producto con quién, cuándo, dónde y por qué (8.1), paginado por
+   * número de página (se lee una fila de más para saber si hay otra página, sin COUNT). Sin las columnas
+   * de fase21 los campos de rastro salen en null. Usa ix_movimientos_inventario_producto (id_producto, fecha).
+   */
+  async movimientosDeProducto(
+    idProducto: number,
+    opciones: { pagina?: number; por_pagina?: number; id_almacen?: number } = {},
+  ): Promise<PaginaMovimientos> {
+    const pagina = Math.max(1, Math.trunc(Number(opciones.pagina)) || 1);
+    const porPagina = Math.min(100, Math.max(1, Math.trunc(Number(opciones.por_pagina)) || 30));
+    const columnas = await columnasRastro(this.esquema);
+
+    const parametros: unknown[] = [idProducto];
+    let filtroAlmacen = '';
+    const idAlmacen = Number(opciones.id_almacen);
+    if (columnas.almacen && Number.isSafeInteger(idAlmacen) && idAlmacen > 0) {
+      parametros.push(idAlmacen);
+      filtroAlmacen = `AND m.id_almacen = $${parametros.length}`;
+    }
+    parametros.push(porPagina + 1, (pagina - 1) * porPagina);
+
+    // Fragmentos fijos del código según el catálogo (nunca texto del usuario).
+    const filas: any[] = await this.dataSource.query(
+      `SELECT m.id_movimiento, m.fecha, m.tipo::text AS tipo, m.cantidad, COALESCE(m.descripcion, '') AS descripcion,
+              COALESCE(so.nombre, '') AS sucursal_origen,
+              COALESCE(sd.nombre, '') AS sucursal_destino,
+              ${columnas.usuario ? 'm.id_usuario, u.nombre AS usuario' : 'NULL::int AS id_usuario, NULL::text AS usuario'},
+              ${columnas.almacen ? 'm.id_almacen, al.nombre AS almacen' : 'NULL::int AS id_almacen, NULL::text AS almacen'},
+              ${columnas.documento ? 'm.tipo_documento, m.id_documento' : 'NULL::text AS tipo_documento, NULL::int AS id_documento'}
+         FROM movimientos_inventario m
+         LEFT JOIN sucursales so ON so.id_sucursal = m.id_sucursal_origen
+         LEFT JOIN sucursales sd ON sd.id_sucursal = m.id_sucursal_destino
+         ${columnas.usuario ? 'LEFT JOIN usuarios u ON u.id_usuario = m.id_usuario' : ''}
+         ${columnas.almacen ? 'LEFT JOIN almacenes al ON al.id_almacen = m.id_almacen' : ''}
+        WHERE m.id_producto = $1 ${filtroAlmacen}
+        ORDER BY m.fecha DESC, m.id_movimiento DESC
+        LIMIT $${parametros.length - 1} OFFSET $${parametros.length}`,
+      parametros,
+    );
+
+    const hayMas = filas.length > porPagina;
+    const entero = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+    return {
+      datos: filas.slice(0, porPagina).map((f) => ({
+        id_movimiento: Number(f.id_movimiento),
+        fecha: f.fecha,
+        tipo: String(f.tipo ?? ''),
+        cantidad: Number(f.cantidad ?? 0),
+        descripcion: f.descripcion ?? '',
+        sucursal_origen: f.sucursal_origen ?? '',
+        sucursal_destino: f.sucursal_destino ?? '',
+        id_usuario: entero(f.id_usuario),
+        usuario: f.usuario ?? null,
+        id_almacen: entero(f.id_almacen),
+        almacen: f.almacen ?? null,
+        tipo_documento: f.tipo_documento ?? null,
+        id_documento: entero(f.id_documento),
+      })),
+      pagina,
+      por_pagina: porPagina,
+      hay_mas: hayMas,
+      rastro: { ...columnas },
+    };
+  }
+
   // ── Operaciones con rastro ───────────────────────────────────
 
   /**
@@ -343,13 +443,15 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     descripcion: string,
     manager?: EntityManager,
     stockEsperado?: number,
+    /** Fase 8.1: quién y por qué documento (solo se escribe con las columnas de fase21). */
+    rastro?: RastroMovimiento,
   ): Promise<number> {
     // Con `manager` el ajuste entra en la transacción de quien llama (alta de
     // producto con stock inicial); sin él abre la suya.
-    if (manager) return this.ajustarCon(manager, idProducto, idAlmacen, cantidad, descripcion, stockEsperado);
+    if (manager) return this.ajustarCon(manager, idProducto, idAlmacen, cantidad, descripcion, stockEsperado, rastro);
     // Solo la transacción propia se repite tras un interbloqueo: la de quien llama ya quedó abortada.
     return reintentarSiHuboConflicto(() => this.dataSource.transaction((m) =>
-      this.ajustarCon(m, idProducto, idAlmacen, cantidad, descripcion, stockEsperado),
+      this.ajustarCon(m, idProducto, idAlmacen, cantidad, descripcion, stockEsperado, rastro),
     ), { operacion: 'Ajustar stock' });
   }
 
@@ -360,6 +462,7 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     cantidad: number,
     descripcion: string,
     stockEsperado?: number,
+    rastro?: RastroMovimiento,
   ): Promise<number> {
     const filas = await manager.query(
       'SELECT id_inventario, stock FROM inventario WHERE id_producto = $1 AND id_almacen = $2 FOR UPDATE',
@@ -400,6 +503,7 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
       Math.abs(cantidad),
       cantidad >= 0 ? 'entrada' : 'salida',
       descripcion,
+      rastro,
     );
 
     return stockFinal;
@@ -435,7 +539,10 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     cantidad: number,
     descripcion: string,
     stockOrigenEsperado?: number,
+    /** Fase 8.1: quién transfiere (el tipo es siempre `transferencia`; el almacén guardado es el de origen). */
+    rastro?: RastroMovimiento,
   ): Promise<void> {
+    const columnas = await columnasRastro(this.esquema);
     await reintentarSiHuboConflicto(() => this.dataSource.transaction(async (manager) => {
       const bloqueadas: { id_inventario: unknown; id_almacen: unknown; stock: unknown }[] = await manager.query(
         `SELECT id_inventario, id_almacen, stock
@@ -482,11 +589,12 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
       );
       const mapa = new Map(sucursales.map((s: any) => [Number(s.id_almacen), s.id_sucursal]));
 
+      const extras = extrasFila(columnas, { ...rastro, tipo_documento: 'transferencia', id_documento: null }, idOrigen, 6);
       await manager.query(
         `INSERT INTO movimientos_inventario
-           (id_producto, tipo, cantidad, id_sucursal_origen, id_sucursal_destino, descripcion, fecha)
-         VALUES ($1, 'transferencia', $2, $3, $4, $5, NOW())`,
-        [idProducto, cantidad, mapa.get(idOrigen) ?? null, mapa.get(idDestino) ?? null, descripcion],
+           (id_producto, tipo, cantidad, id_sucursal_origen, id_sucursal_destino, descripcion, fecha${sufijo(extras.columnas)})
+         VALUES ($1, 'transferencia', $2, $3, $4, $5, NOW()${sufijo(extras.expresiones)})`,
+        [idProducto, cantidad, mapa.get(idOrigen) ?? null, mapa.get(idDestino) ?? null, descripcion, ...extras.valores],
       );
 
       // Kardex (misma TX): no duplicar movimientos_inventario (ya hay fila transferencia)
@@ -516,7 +624,10 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
     cantidad: number,
     tipo: 'entrada' | 'salida',
     descripcion: string,
+    rastro?: RastroMovimiento,
   ): Promise<void> {
+    const columnas = await columnasRastro(this.esquema);
+    const extras = extrasFila(columnas, rastro, idAlmacen, 7);
     const sucursal = await manager.query(
       'SELECT id_sucursal FROM almacenes WHERE id_almacen = $1 LIMIT 1',
       [idAlmacen],
@@ -525,8 +636,8 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
 
     await manager.query(
       `INSERT INTO movimientos_inventario
-         (id_producto, tipo, cantidad, id_sucursal_origen, id_sucursal_destino, descripcion, fecha)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+         (id_producto, tipo, cantidad, id_sucursal_origen, id_sucursal_destino, descripcion, fecha${sufijo(extras.columnas)})
+       VALUES ($1, $2, $3, $4, $5, $6, NOW()${sufijo(extras.expresiones)})`,
       [
         idProducto,
         tipo,
@@ -534,6 +645,7 @@ export class InventarioRepository extends CrudRepository<Inventario> implements 
         tipo === 'salida' ? idSucursal : null,
         tipo === 'entrada' ? idSucursal : null,
         descripcion,
+        ...extras.valores,
       ],
     );
 

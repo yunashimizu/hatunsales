@@ -10,6 +10,7 @@ import { CambiarRolRequest } from 'src/models/model/new/cambiar-rol.request';
 import { EliminarUsuarioRequest } from 'src/models/model/new/eliminar-usuario.request';
 import { Rol } from 'src/models/DBModel/role.entity';
 import { esRolCliente } from 'src/config/roles.config';
+import { contrasenaSuficiente, MENSAJE_CONTRASENA_MINIMA } from 'src/util/jwt/contrasena-minima';
 
 @Injectable()
 export class AdminBussnies {
@@ -49,6 +50,7 @@ export class AdminBussnies {
     if (!nombre || !email || !dto.password) {
       throw new BadRequestException('Nombre, correo y contraseña son obligatorios');
     }
+    if (!contrasenaSuficiente(dto.password)) throw new BadRequestException(MENSAJE_CONTRASENA_MINIMA);
 
     // Clientes se registran en la tienda; aquí solo personal / roles internos.
     if (idRol === 5) {
@@ -118,8 +120,9 @@ export class AdminBussnies {
     }
 
     const passwordNueva = (dto.password ?? '').trim();
-    if (passwordNueva && passwordNueva.length < 6) {
-      throw new BadRequestException('La contraseña debe tener al menos 6 caracteres');
+    // Fase 2.9: 8 como mínimo al cambiarla (el DTO ya lo exige; esto cubre a quien llame sin pasar por él).
+    if (passwordNueva && !contrasenaSuficiente(passwordNueva)) {
+      throw new BadRequestException(MENSAJE_CONTRASENA_MINIMA);
     }
 
     const cambios: Partial<Usuarios> = {

@@ -92,6 +92,7 @@ function armar(opciones: {
     validarMetodoPago: jest.fn(async () => undefined),
     validarCupon: jest.fn(),
     registrarUso: jest.fn(),
+    devolverUso: jest.fn(async () => true),
   };
   const stockRepo = {
     configuracion: jest.fn(async () => 'true'),
@@ -339,5 +340,147 @@ describe('PedidoBussnies · comprobante en el detalle (S5)', () => {
 
     expect(pedido.codigo).toBeDefined();
     expect(pedido.comprobante).toBeUndefined();
+  });
+});
+
+/**
+ * Fase 8.2: la base simulada imita lo que garantiza PostgreSQL: el UPDATE condicional de `transicionarEstado`
+ * es atómico (solo uno encuentra el pedido en `desde`) y lo que corre en la transacción se aplica todo junto.
+ * Las esperas (`tick`) dejan que las operaciones simultáneas se entrecrucen.
+ */
+describe('PedidoBussnies · vencimiento y cancelación: el stock y el cupón vuelven exactamente una vez (Fase 8.2)', () => {
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  function baseSimulada(opciones: { conCupon?: boolean; pagos?: string[] } = {}) {
+    const bd = {
+      estado: 'pendiente',
+      stock_reservado: true,
+      id_venta: null as number | null,
+      id_cupon: opciones.conCupon === false ? null : 8,
+      stock: 0,
+      usos_cupon: 1,
+      pagos: [...(opciones.pagos ?? [])],
+      historial: [] as string[],
+    };
+    const armado = armar({ pedido: { estado: 'pendiente' } });
+    (armado.repo.transicionarEstado as jest.Mock).mockImplementation(async (_id: number, desde: readonly string[], hacia: string, comentario?: string, _m?: any, op: any = {}) => {
+      await tick();
+      if (!desde.includes(bd.estado)) return null;
+      if (op.sinPagoEnCurso && bd.pagos.some((p) => p === 'pendiente' || p === 'aprobado')) return null;
+      bd.estado = hacia;
+      bd.historial.push(`${hacia}: ${comentario ?? ''}`);
+      return { id_pedido: 57, stock_reservado: bd.stock_reservado, id_venta: bd.id_venta, id_cupon: bd.id_cupon };
+    });
+    (armado.repo.marcarStockReservado as jest.Mock).mockImplementation(async (_id: number, reservado: boolean) => {
+      bd.stock_reservado = reservado;
+    });
+    armado.repo.obtenerPorId.mockImplementation(async () => pedidoBase({ estado: bd.estado }));
+    armado.stockRepo.devolver.mockImplementation(async () => {
+      await tick();
+      bd.stock += 5;
+    });
+    armado.checkoutBussnies.devolverUso.mockImplementation(async () => {
+      if (bd.usos_cupon <= 0) return false;
+      bd.usos_cupon -= 1;
+      return true;
+    });
+    /** Lo que hace PedidoRepository.confirmarPago: 'pendiente' → 'pagado' condicional, con su cobro. */
+    const confirmarPago = async () => {
+      const cambio = await (armado.repo.transicionarEstado as jest.Mock)(57, ['pendiente'], 'pagado', 'Pago confirmado');
+      if (cambio) bd.pagos.push('aprobado');
+      return cambio !== null;
+    };
+    return { ...armado, bd, confirmarPago };
+  }
+
+  it('vencer: cancela con la nota de las horas, devuelve el stock y el uso del cupón, y exige que no haya cobro en curso', async () => {
+    const { servicio, repo, bd, manager } = baseSimulada();
+
+    const resultado = await servicio.vencer(57, 24);
+
+    expect(resultado).toEqual({ stock_devuelto: true, cupon_devuelto: true, id_cupon: 8 });
+    expect(repo.transicionarEstado).toHaveBeenCalledWith(
+      57, ['pendiente'], 'cancelado', 'Vencido automáticamente: sin pago en 24 h', manager, { sinVentaVigente: true, sinPagoEnCurso: true },
+    );
+    expect(bd).toMatchObject({ estado: 'cancelado', stock: 5, usos_cupon: 0, stock_reservado: false });
+    expect(bd.historial).toEqual(['cancelado: Vencido automáticamente: sin pago en 24 h']);
+  });
+
+  it('se cancela dos veces a la vez (la tarea en dos réplicas, o la tarea y el cliente): el stock y el cupón vuelven UNA vez', async () => {
+    const { servicio, bd } = baseSimulada();
+
+    const resultados = await Promise.all([servicio.vencer(57, 24), servicio.vencer(57, 24), servicio.cancelar(57, 3, 'Ya no lo quiero')]);
+
+    expect(bd.stock).toBe(5);
+    expect(bd.usos_cupon).toBe(0);
+    expect(bd.historial).toHaveLength(1);
+    // De los dos vencimientos, a lo sumo uno ganó; el otro recibe null y no toca nada.
+    expect(resultados.slice(0, 2).filter((r) => r !== null).length).toBeLessThanOrEqual(1);
+  });
+
+  it('la tarea vence el pedido mientras llega el pago: gana uno solo y el stock se libera como mucho una vez', async () => {
+    for (let ronda = 0; ronda < 6; ronda++) {
+      const { servicio, bd, confirmarPago } = baseSimulada();
+      // Alterna quién arranca primero para cubrir los dos órdenes.
+      const [vencido, pagado] = ronda % 2
+        ? await Promise.all([servicio.vencer(57, 24), confirmarPago()])
+        : await Promise.all([confirmarPago(), servicio.vencer(57, 24)]).then(([p, v]) => [v, p] as const);
+
+      expect((vencido !== null) !== pagado).toBe(true);
+      if (pagado) {
+        expect(bd).toMatchObject({ estado: 'pagado', stock: 0, usos_cupon: 1, stock_reservado: true });
+      } else {
+        // El cargo que llegue después ya no confirma: lo maneja la Fase 8.3 (cobro sobre pedido cancelado).
+        expect(bd).toMatchObject({ estado: 'cancelado', stock: 5, usos_cupon: 0, stock_reservado: false });
+        expect(await confirmarPago()).toBe(false);
+        expect(bd.stock).toBe(5);
+      }
+    }
+  });
+
+  it('un pedido con un pago manual pendiente de confirmar (o aprobado) no se vence', async () => {
+    for (const pago of ['pendiente', 'aprobado']) {
+      const { servicio, bd } = baseSimulada({ pagos: [pago] });
+      expect(await servicio.vencer(57, 48)).toBeNull();
+      expect(bd).toMatchObject({ estado: 'pendiente', stock: 0, usos_cupon: 1 });
+    }
+    // Un pago rechazado no frena el vencimiento.
+    const rechazado = baseSimulada({ pagos: ['rechazado'] });
+    expect(await rechazado.servicio.vencer(57, 48)).not.toBeNull();
+  });
+
+  it('la cancelación manual del panel y la del cliente también devuelven el uso del cupón (antes solo se sumaba)', async () => {
+    const panel = baseSimulada();
+    await panel.servicio.cambiarEstado(57, 'cancelado', 'Sin stock real');
+    expect(panel.checkoutBussnies.devolverUso).toHaveBeenCalledWith(8, panel.manager);
+    expect(panel.bd.usos_cupon).toBe(0);
+
+    const cliente = baseSimulada();
+    await cliente.servicio.cancelar(57, 3);
+    expect(cliente.bd.usos_cupon).toBe(0);
+
+    const sinCupon = baseSimulada({ conCupon: false });
+    await sinCupon.servicio.cancelar(57, 3);
+    expect(sinCupon.checkoutBussnies.devolverUso).not.toHaveBeenCalled();
+  });
+
+  it('pedido con venta (ya anulada): la cancelación no devuelve stock (lo devolvió la anulación) pero sí el cupón', async () => {
+    const { servicio, bd } = baseSimulada();
+    bd.id_venta = 99;
+
+    const resultado = await servicio.vencer(57, 24);
+
+    expect(resultado).toEqual({ stock_devuelto: false, cupon_devuelto: true, id_cupon: 8 });
+    expect(bd.stock).toBe(0);
+  });
+
+  it('el checkout reserva el stock con el pedido como documento de origen (8.1)', async () => {
+    const { servicio, stockRepo, manager } = armar();
+
+    await servicio.crearDesdeCarrito(3, {} as any);
+
+    expect(stockRepo.reservar).toHaveBeenCalledWith(
+      [{ id_producto: 5, cantidad: 5 }], undefined, 'spillover', manager, { tipo_documento: 'pedido', id_documento: 57 },
+    );
   });
 });

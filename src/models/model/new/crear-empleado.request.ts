@@ -1,4 +1,5 @@
 import { IsString, IsEmail, IsInt, IsOptional, IsBoolean, MinLength, Min } from 'class-validator';
+import { CONTRASENA_MINIMA, MENSAJE_CONTRASENA_MINIMA } from '../../../util/jwt/contrasena-minima';
 
 export class CrearEmpleadoRequest {
 
@@ -9,7 +10,7 @@ export class CrearEmpleadoRequest {
   email!: string;
 
   @IsString()
-  @MinLength(6)
+  @MinLength(CONTRASENA_MINIMA, { message: MENSAJE_CONTRASENA_MINIMA })
   password!: string;
 
   /** Cualquier rol existente en la tabla `roles`, excepto cliente. */
